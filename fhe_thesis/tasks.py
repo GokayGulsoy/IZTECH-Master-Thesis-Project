@@ -80,36 +80,12 @@ GLUE_TASKS: dict[str, TaskConfig] = {
         epochs=3,
         description="Question Natural Language Inference (QNLI)",
     ),
-    "rte": TaskConfig(
-        name="rte",
-        text_fields=("sentence1", "sentence2"),
-        num_labels=2,
-        metric="accuracy",
-        eval_metrics=("accuracy",),
-        epochs=5,
-        description="Recognizing Textual Entailment (RTE)",
-    ),
-    "mnli": TaskConfig(
-        name="mnli",
-        text_fields=("premise", "hypothesis"),
-        num_labels=3,
-        metric="accuracy",
-        eval_metrics=("accuracy",),
-        eval_splits=("validation_matched", "validation_mismatched"),
-        epochs=3,
-        description="Multi-Genre Natural Language Inference (MNLI)",
-    ),
-    "stsb": TaskConfig(
-        name="stsb",
-        text_fields=("sentence1", "sentence2"),
-        num_labels=1,
-        problem_type="regression",
-        metric="pearson",
-        eval_metrics=("pearson", "spearmanr"),
-        epochs=5,
-        description="Semantic Textual Similarity (STS-B)",
-    ),
 }
+
+# Tasks chosen to align with prior FHE/MPC transformer literature
+# (MPCFormer, THE-X, BOLT) that all report SST-2 / MRPC / QNLI / QQP.
+# MNLI / RTE / STS-B are intentionally omitted to keep the comparison
+# table apples-to-apples and to avoid the regression-KD code path.
 
 
 def get_task(name: str) -> TaskConfig:

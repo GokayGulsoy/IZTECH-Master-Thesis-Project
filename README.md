@@ -45,14 +45,51 @@ This repository contains the implementation and thesis document for privacy-pres
 ## What Will Be Done (Planned Extensions)
 
 ### 1. Multi-Dataset Evaluation (GLUE Benchmark Extension)
-- Extend LPAN evaluation beyond SST-2 to additional GLUE tasks used in the literature:
-  - **MNLI** (Multi-Genre Natural Language Inference)
-  - **QQP** (Quora Question Pairs)
-  - **QNLI** (Question Natural Language Inference)
+- Extend LPAN evaluation beyond SST-2 to the GLUE tasks reported by all
+  comparable FHE/MPC transformer works (MPCFormer, THE-X, BOLT):
   - **MRPC** (Microsoft Research Paraphrase Corpus)
-  - **RTE** (Recognizing Textual Entailment)
-  - **STS-B** (Semantic Textual Similarity Benchmark)
-- Benchmark against MPCFormer, BOLT, Iron, THE-X, and other baselines on matching tasks
+  - **QNLI** (Question Natural Language Inference)
+  - **QQP** (Quora Question Pairs)
+- MNLI / RTE / STS-B are intentionally **out of scope** — they are not
+  reported by the baseline papers, so adding them would not improve the
+  comparison table.
+
+#### Running on a new task
+
+The task registry lives in [fhe_thesis/tasks.py](fhe_thesis/tasks.py)
+(`GLUE_TASKS = {"sst2", "mrpc", "qnli", "qqp"}`). Both the baseline
+trainer and the staged LPAN pipeline accept a `--task` flag that
+threads task-specific metric, num_labels, and dataset loader through
+every stage.
+
+```bash
+# 1. Train baselines + all-poly LPAN (single-shot) for one task
+python experiments/05_multi_model_scaling.py \
+    --models tiny mini small base \
+    --task mrpc          # or qnli / qqp / sst2
+
+# 2. Run the staged 3-stage LPAN pipeline (CE → Softmax KD → LN KD)
+python run_staged_lpan.py --model tiny --task mrpc
+python run_staged_lpan.py --model mini --task qnli
+python run_staged_lpan.py --model small --task qqp
+python run_staged_lpan.py --model base --task qqp
+```
+
+**Result paths.** SST-2 keeps the legacy layout
+(`results/multi_model/<model>/...`) so existing checkpoints are not
+disturbed. New tasks land under
+`results/multi_model/<model>/<task>/...`. The summary JSON gets a
+`_<task>` suffix when not `sst2`.
+
+**Metric per task** (auto-selected by `compute_metrics_for_task` and
+used as `metric_for_best_model`):
+
+| Task | Primary metric | Also reported |
+|------|----------------|---------------|
+| sst2 | accuracy       | —             |
+| mrpc | f1             | accuracy      |
+| qnli | accuracy       | —             |
+| qqp  | f1             | accuracy      |
 
 ### 2. Encrypted Inference with CKKS
 - Complete end-to-end encrypted inference pipeline using the CKKS homomorphic encryption scheme
