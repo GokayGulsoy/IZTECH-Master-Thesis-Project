@@ -29,10 +29,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 ANALYSES = {
-    "poly":    "experiments.analysis.poly_approximation",
+    "poly": "experiments.analysis.poly_approximation",
     "profile": "experiments.analysis.activation_profiling",
-    "error":   "experiments.analysis.error_propagation",
-    "bsgs":    "experiments.analysis.bsgs_eval_strategies",
+    "error": "experiments.analysis.error_propagation",
+    "bsgs": "experiments.analysis.bsgs_eval_strategies",
 }
 
 

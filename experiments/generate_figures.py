@@ -16,14 +16,21 @@ import json
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
 from fhe_thesis.config import (
-    RESULTS_DIR, POLY_APPROX_DIR, ACTIVATION_PROFILES_DIR,
-    DEPTH_ALLOCATION_DIR, BSGS_EVAL_DIR, ERROR_PROPAGATION_DIR,
-    GA_OPTIMIZATION_DIR, MULTI_MODEL_DIR, MULTI_DATASET_DIR,
+    RESULTS_DIR,
+    POLY_APPROX_DIR,
+    ACTIVATION_PROFILES_DIR,
+    DEPTH_ALLOCATION_DIR,
+    BSGS_EVAL_DIR,
+    ERROR_PROPAGATION_DIR,
+    GA_OPTIMIZATION_DIR,
+    MULTI_MODEL_DIR,
+    MULTI_DATASET_DIR,
     ensure_dirs,
 )
 
@@ -34,7 +41,9 @@ def fig_poly_approx():
     """Figure set 1: Polynomial approximation comparisons."""
     json_path = POLY_APPROX_DIR / "comparison_results.json"
     if not json_path.exists():
-        print("  [SKIP] No poly_approx results found. Run: python experiments/run_analysis.py poly")
+        print(
+            "  [SKIP] No poly_approx results found. Run: python experiments/run_analysis.py poly"
+        )
         return
     with open(json_path) as f:
         data = json.load(f)
@@ -108,16 +117,21 @@ def fig_multi_model():
 
     x = np.arange(len(models))
     w = 0.35
-    ax1.bar(x - w/2, baseline_acc, w, label="Baseline", color="tab:blue", alpha=0.85)
-    ax1.bar(x + w/2, poly_acc, w, label="Polynomial", color="tab:green", alpha=0.85)
-    ax1.set_xticks(x); ax1.set_xticklabels(models)
+    ax1.bar(x - w / 2, baseline_acc, w, label="Baseline", color="tab:blue", alpha=0.85)
+    ax1.bar(x + w / 2, poly_acc, w, label="Polynomial", color="tab:green", alpha=0.85)
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(models)
     ax1.set(ylabel="Accuracy (%)", title="SST-2 Accuracy: Baseline vs Polynomial")
-    ax1.legend(); ax1.grid(True, alpha=0.3, axis="y")
+    ax1.legend()
+    ax1.grid(True, alpha=0.3, axis="y")
 
     drops = [b - p for b, p in zip(baseline_acc, poly_acc)]
     ax2.bar(x, drops, color="tab:orange", alpha=0.85)
-    ax2.set_xticks(x); ax2.set_xticklabels(models)
-    ax2.set(ylabel="Accuracy Drop (%)", title="Accuracy Drop from Polynomial Replacement")
+    ax2.set_xticks(x)
+    ax2.set_xticklabels(models)
+    ax2.set(
+        ylabel="Accuracy Drop (%)", title="Accuracy Drop from Polynomial Replacement"
+    )
     ax2.grid(True, alpha=0.3, axis="y")
 
     plt.tight_layout()
@@ -160,8 +174,9 @@ FIGURE_SETS = {
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--only", type=int, nargs="*",
-                        help="Only generate specific figure sets (1-9)")
+    parser.add_argument(
+        "--only", type=int, nargs="*", help="Only generate specific figure sets (1-9)"
+    )
     args = parser.parse_args()
 
     ensure_dirs()
