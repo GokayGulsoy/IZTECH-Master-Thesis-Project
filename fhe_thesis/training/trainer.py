@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -18,6 +18,8 @@ from transformers import (
     TrainingArguments,
     default_data_collator,
 )
+
+from fhe_thesis.tasks import GLUE_TASKS, TaskConfig, get_task
 
 
 class NaNSafeTrainer(Trainer):
@@ -54,6 +56,7 @@ class NaNSafeTrainer(Trainer):
 
 
 # ── Gradient-Aware Polynomial Fine-Tuning ────────────────────────────────────
+
 
 def calibrate_grad_norm(
     model: nn.Module,
@@ -129,8 +132,10 @@ def calibrate_grad_norm(
     calibrated = float(np.percentile(grad_norms, percentile))
     median = float(np.median(grad_norms))
     print(f"  [calibrate] Gradient norms over {len(grad_norms)} batches:")
-    print(f"    median={median:.1f}, p{percentile:.0f}={calibrated:.1f}, "
-          f"max={max(grad_norms):.1f}")
+    print(
+        f"    median={median:.1f}, p{percentile:.0f}={calibrated:.1f}, "
+        f"max={max(grad_norms):.1f}"
+    )
     print(f"  [calibrate] Setting max_grad_norm = {calibrated:.1f}")
 
     # Reset model gradients
@@ -139,6 +144,7 @@ def calibrate_grad_norm(
 
 
 # ── Knowledge Distillation for Polynomial Fine-Tuning ────────────────────────
+
 
 class DistillationTrainer(NaNSafeTrainer):
     """NaN-safe trainer with knowledge distillation from a teacher model.
@@ -184,7 +190,10 @@ class DistillationTrainer(NaNSafeTrainer):
         loss = super().training_step(model, inputs, **kwargs)
 
         # Apply scheduled gradient norm clipping
-        if self.initial_max_grad_norm is not None and self.final_max_grad_norm is not None:
+        if (
+            self.initial_max_grad_norm is not None
+            and self.final_max_grad_norm is not None
+        ):
             total_steps = self.state.max_steps
             current_step = self.state.global_step
             progress = min(current_step / max(total_steps, 1), 1.0)
@@ -211,18 +220,22 @@ class DistillationTrainer(NaNSafeTrainer):
             student_device = student_logits.device
             self.teacher.to(student_device)
             teacher_inputs = {
-                k: v.to(student_device) for k, v in inputs.items()
-                if k != "labels"
+                k: v.to(student_device) for k, v in inputs.items() if k != "labels"
             }
             teacher_logits = self.teacher(**teacher_inputs).logits
 
-        # KL divergence between temperature-smoothed distributions
-        T = self.temperature
-        kd_loss = F.kl_div(
-            F.log_softmax(student_logits / T, dim=-1),
-            F.softmax(teacher_logits / T, dim=-1),
-            reduction="batchmean",
-        ) * (T * T)
+        # For regression heads (num_labels=1) KL is undefined; use MSE on
+        # raw logits between student and teacher instead.
+        if student_logits.shape[-1] == 1:
+            kd_loss = F.mse_loss(student_logits.float(), teacher_logits.float())
+        else:
+            # KL divergence between temperature-smoothed distributions.
+            T = self.temperature
+            kd_loss = F.kl_div(
+                F.log_softmax(student_logits / T, dim=-1),
+                F.softmax(teacher_logits / T, dim=-1),
+                reduction="batchmean",
+            ) * (T * T)
 
         loss = self.alpha * task_loss + (1.0 - self.alpha) * kd_loss
         return (loss, outputs) if return_outputs else loss
@@ -292,8 +305,8 @@ class AttentionDistillationTrainer(NaNSafeTrainer):
         if not is_training:
             return (task_loss, outputs) if return_outputs else task_loss
 
-        student_attns = outputs.attentions          # tuple of [B, H, S, S]
-        student_hiddens = outputs.hidden_states     # tuple of [B, S, D]
+        student_attns = outputs.attentions  # tuple of [B, H, S, S]
+        student_hiddens = outputs.hidden_states  # tuple of [B, S, D]
 
         # --- Teacher forward with attention outputs ---
         with torch.no_grad():
@@ -336,11 +349,13 @@ class AttentionDistillationTrainer(NaNSafeTrainer):
 
         # Log individual loss components periodically
         if hasattr(self, "state") and self.state.global_step % 100 == 0:
-            print(f"  [AttnKD step {self.state.global_step}] "
-                  f"CE={task_loss.item():.4f} "
-                  f"AttnKL={attn_loss.item():.4f} "
-                  f"HidMSE={hid_loss.item():.6f} "
-                  f"total={loss.item():.4f}")
+            print(
+                f"  [AttnKD step {self.state.global_step}] "
+                f"CE={task_loss.item():.4f} "
+                f"AttnKL={attn_loss.item():.4f} "
+                f"HidMSE={hid_loss.item():.6f} "
+                f"total={loss.item():.4f}"
+            )
 
         return (loss, outputs) if return_outputs else loss
 
@@ -360,9 +375,100 @@ def detect_device() -> torch.device:
 
 
 def compute_metrics(eval_pred: EvalPrediction) -> Dict[str, float]:
-    """Compute accuracy for classification evaluation."""
+    """Compute accuracy for classification evaluation (legacy SST-2 default)."""
     preds = np.argmax(eval_pred.predictions, axis=-1)
     return {"accuracy": float((preds == eval_pred.label_ids).mean())}
+
+
+def _binary_f1(preds: np.ndarray, labels: np.ndarray) -> Dict[str, float]:
+    tp = float(((preds == 1) & (labels == 1)).sum())
+    fp = float(((preds == 1) & (labels == 0)).sum())
+    fn = float(((preds == 0) & (labels == 1)).sum())
+    prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    rec = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    f1 = 2 * prec * rec / (prec + rec) if (prec + rec) > 0 else 0.0
+    return {"f1": f1, "precision": prec, "recall": rec}
+
+
+def compute_metrics_for_task(
+    task: TaskConfig,
+) -> Callable[[EvalPrediction], Dict[str, float]]:
+    """Return a `compute_metrics` callable matching the task's metric set.
+
+    Always reports `task.metric` as a top-level key so HuggingFace
+    Trainer can use `metric_for_best_model = f"eval_{task.metric}"`.
+    """
+    if task.is_regression:
+        # Lazy import: scipy is heavy and only required for STS-B.
+        from scipy.stats import pearsonr, spearmanr
+
+        def _metrics(eval_pred: EvalPrediction) -> Dict[str, float]:
+            preds = eval_pred.predictions.squeeze().astype(np.float64)
+            labels = eval_pred.label_ids.astype(np.float64)
+            pearson = float(pearsonr(preds, labels).statistic)
+            spearman = float(spearmanr(preds, labels).statistic)
+            return {"pearson": pearson, "spearmanr": spearman}
+
+        return _metrics
+
+    def _metrics(eval_pred: EvalPrediction) -> Dict[str, float]:
+        preds = np.argmax(eval_pred.predictions, axis=-1)
+        labels = eval_pred.label_ids
+        out = {"accuracy": float((preds == labels).mean())}
+        if "f1" in task.eval_metrics:
+            out.update(_binary_f1(preds, labels))
+        return out
+
+    return _metrics
+
+
+def load_glue_dataset(
+    task: TaskConfig,
+    tokenizer,
+    max_length: int = 128,
+    splits: Optional[Tuple[str, ...]] = None,
+):
+    """Load and tokenize any GLUE task; returns (train, eval_dict).
+
+    Returns a tuple (train_dataset, eval_datasets) where eval_datasets is
+    a dict mapping split label -> dataset.  For most tasks the dict has a
+    single 'validation' key; for MNLI it has 'matched' and 'mismatched'.
+    The first entry is the one used for best-model selection.
+    """
+    dataset = load_dataset("glue", task.name)
+    fields = task.text_fields
+
+    def tokenize_fn(examples):
+        if len(fields) == 1:
+            return tokenizer(
+                examples[fields[0]],
+                truncation=True,
+                padding="max_length",
+                max_length=max_length,
+            )
+        return tokenizer(
+            examples[fields[0]],
+            examples[fields[1]],
+            truncation=True,
+            padding="max_length",
+            max_length=max_length,
+        )
+
+    tokenized = dataset.map(tokenize_fn, batched=True)
+    tokenized = tokenized.rename_column(task.label_column, "labels")
+
+    # HuggingFace stores STS-B labels as float32 already; for classification
+    # tasks they are int64.  No explicit cast needed for either case.
+    tokenized.set_format("torch", columns=["input_ids", "attention_mask", "labels"])
+
+    use_splits = splits if splits is not None else task.eval_splits
+    eval_datasets: Dict[str, Any] = {}
+    for sp in use_splits:
+        # MNLI: keep human-readable short labels ("matched", "mismatched").
+        short = sp.replace("validation_", "") if sp.startswith("validation_") else sp
+        eval_datasets[short] = tokenized[sp]
+
+    return tokenized["train"], eval_datasets
 
 
 def load_sst2_dataset(tokenizer, max_length: int = 128):
@@ -400,6 +506,8 @@ def train_and_eval(
     label: str,
     use_fp16: bool = True,
     max_grad_norm: Optional[float] = None,
+    compute_metrics_fn: Optional[Callable[[EvalPrediction], Dict[str, float]]] = None,
+    metric_for_best_model: str = "eval_accuracy",
 ) -> Dict[str, Any]:
     """Train and evaluate a model, return results dict."""
     device = detect_device()
@@ -407,6 +515,15 @@ def train_and_eval(
     extra_kwargs = {}
     if max_grad_norm is not None:
         extra_kwargs["max_grad_norm"] = max_grad_norm
+
+    metric_fn = (
+        compute_metrics_fn if compute_metrics_fn is not None else compute_metrics
+    )
+    primary_key = (
+        metric_for_best_model[len("eval_") :]
+        if metric_for_best_model.startswith("eval_")
+        else metric_for_best_model
+    )
 
     args = TrainingArguments(
         output_dir=output_dir,
@@ -433,14 +550,14 @@ def train_and_eval(
         args=args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-        compute_metrics=compute_metrics,
+        compute_metrics=metric_fn,
     )
 
     print(f"  Training '{label}' for {epochs} epochs (bs={batch_size}, lr={lr})...")
     trainer.train()
     results = trainer.evaluate()
-    acc = results["eval_accuracy"]
-    print(f"  {label} accuracy: {acc:.4f} ({acc:.2%})")
+    acc = results.get(f"eval_{primary_key}", float("nan"))
+    print(f"  {label} {primary_key}: {acc:.4f}")
 
     # Make all tensors contiguous before saving
     for p in model.parameters():
@@ -459,7 +576,6 @@ def train_and_eval(
 
 
 def distill_and_eval(
-    student_model: nn.Module,
     teacher_model: nn.Module,
     train_dataset,
     eval_dataset,
@@ -477,6 +593,8 @@ def distill_and_eval(
     seed: Optional[int] = None,
     resume_from_checkpoint: Optional[str] = None,
     gradient_accumulation_steps: int = 1,
+    compute_metrics_fn: Optional[Callable[[EvalPrediction], Dict[str, float]]] = None,
+    metric_for_best_model: str = "eval_accuracy",
 ) -> Dict[str, Any]:
     """Fine-tune a polynomial model using knowledge distillation.
 
@@ -499,6 +617,15 @@ def distill_and_eval(
     if seed is not None:
         extra_kwargs["seed"] = seed
         extra_kwargs["data_seed"] = seed
+
+    metric_fn = (
+        compute_metrics_fn if compute_metrics_fn is not None else compute_metrics
+    )
+    primary_key = (
+        metric_for_best_model[len("eval_") :]
+        if metric_for_best_model.startswith("eval_")
+        else metric_for_best_model
+    )
 
     args = TrainingArguments(
         output_dir=output_dir,
@@ -538,8 +665,10 @@ def distill_and_eval(
         compute_metrics=compute_metrics,
     )
 
-    print(f"  Training '{label}' for {epochs} epochs "
-          f"(KD: alpha={alpha}, T={temperature}, bs={batch_size}, lr={lr})...")
+    print(
+        f"  Training '{label}' for {epochs} epochs "
+        f"(KD: alpha={alpha}, T={temperature}, bs={batch_size}, lr={lr})..."
+    )
     if resume_from_checkpoint:
         print(f"  Resuming from checkpoint: {resume_from_checkpoint}")
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)
@@ -580,6 +709,8 @@ def attn_distill_and_eval(
     gamma: float = 1.0,
     seed: Optional[int] = None,
     lr_scheduler_type: str = "cosine",
+    compute_metrics_fn: Optional[Callable[[EvalPrediction], Dict[str, float]]] = None,
+    metric_for_best_model: str = "eval_accuracy",
 ) -> Dict[str, Any]:
     """Fine-tune Stage 2 (Softmax) with attention-level knowledge distillation.
 
@@ -603,6 +734,15 @@ def attn_distill_and_eval(
     if seed is not None:
         extra_kwargs["seed"] = seed
         extra_kwargs["data_seed"] = seed
+
+    metric_fn = (
+        compute_metrics_fn if compute_metrics_fn is not None else compute_metrics
+    )
+    primary_key = (
+        metric_for_best_model[len("eval_") :]
+        if metric_for_best_model.startswith("eval_")
+        else metric_for_best_model
+    )
 
     args = TrainingArguments(
         output_dir=output_dir,
@@ -640,9 +780,11 @@ def attn_distill_and_eval(
         compute_metrics=compute_metrics,
     )
 
-    print(f"  Training '{label}' for {epochs} epochs "
-          f"(AttnKD: alpha={alpha}, beta={beta}, gamma={gamma}, "
-          f"bs={batch_size}, lr={lr})...")
+    print(
+        f"  Training '{label}' for {epochs} epochs "
+        f"(AttnKD: alpha={alpha}, beta={beta}, gamma={gamma}, "
+        f"bs={batch_size}, lr={lr})..."
+    )
     trainer.train()
     results = trainer.evaluate()
     acc = results["eval_accuracy"]

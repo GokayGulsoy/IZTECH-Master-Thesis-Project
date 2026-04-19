@@ -45,15 +45,38 @@ from transformers import (
 
 sys.path.insert(0, str(Path(__file__).parent))
 from fhe_thesis.config import MODEL_REGISTRY, MULTI_MODEL_DIR
+from fhe_thesis.tasks import GLUE_TASKS, TaskConfig, get_task
 from fhe_thesis.models.profiling import profile_model, compute_poly_coefficients
 from fhe_thesis.models.replacement import replace_activations
 from fhe_thesis.training.trainer import (
     NaNSafeTrainer,
     attn_distill_and_eval,
     compute_metrics,
+    compute_metrics_for_task,
     detect_device,
     distill_and_eval,
+    load_glue_dataset,
 )
+
+
+def _task_subpath(task_name: str) -> str:
+    """SST-2 keeps the legacy directory layout; other tasks add a subdir.
+
+    This preserves any LPAN runs already completed for SST-2 under
+    `results/multi_model/<model>/staged_lpan_*` while isolating each new GLUE
+    task under `results/multi_model/<model>/<task>/staged_lpan_*`.
+    """
+    return "" if task_name == "sst2" else task_name
+
+
+def _load_cls(path_or_name, task: TaskConfig):
+    """from_pretrained with task-specific num_labels / problem_type."""
+    kwargs = {"num_labels": task.num_labels}
+    if task.is_regression:
+        kwargs["problem_type"] = "regression"
+    return AutoModelForSequenceClassification.from_pretrained(
+        str(path_or_name), **kwargs
+    )
 
 
 def _restore_poly_coeffs(model: torch.nn.Module, checkpoint_path) -> int:
@@ -86,13 +109,13 @@ def _restore_poly_coeffs(model: torch.nn.Module, checkpoint_path) -> int:
                 n += 1
             elif v.dim() == 1 and target.dim() == 2:
                 # Old checkpoint (shared) → new model (per-head): broadcast
-                target.data.copy_(
-                    v.unsqueeze(0).expand_as(target).to(target.device)
-                )
+                target.data.copy_(v.unsqueeze(0).expand_as(target).to(target.device))
                 n += 1
             else:
-                print(f"  Warning: shape mismatch for {k}: "
-                      f"checkpoint {v.shape} vs model {target.shape}, skipping")
+                print(
+                    f"  Warning: shape mismatch for {k}: "
+                    f"checkpoint {v.shape} vs model {target.shape}, skipping"
+                )
     del state
     return n
 
@@ -118,7 +141,9 @@ def _freeze_for_ln_stage(model: torch.nn.Module) -> int:
     return trainable
 
 
-def _freeze_for_progressive_ln(model: torch.nn.Module, layer_idx: int, replaced_layers: list) -> int:
+def _freeze_for_progressive_ln(
+    model: torch.nn.Module, layer_idx: int, replaced_layers: list
+) -> int:
     """Freeze everything except LN coefficients for replaced layers + classifier.
 
     Unlike the single-layer variant, this keeps ALL already-replaced LN layers
@@ -136,10 +161,7 @@ def _freeze_for_progressive_ln(model: torch.nn.Module, layer_idx: int, replaced_
             if name.startswith(prefix) and "LayerNorm" in name:
                 is_replaced_ln = True
                 break
-        is_head = (
-            name.startswith("bert.pooler.")
-            or name.startswith("classifier.")
-        )
+        is_head = name.startswith("bert.pooler.") or name.startswith("classifier.")
         should_train = is_replaced_ln or is_head
         param.requires_grad = should_train
         if should_train:
@@ -158,27 +180,44 @@ def _set_reproducibility(seed: int) -> None:
         torch.backends.cudnn.benchmark = False
 
 
-def load_data(model_name: str):
-    """Load and tokenize SST-2 dataset."""
+def load_data(model_name: str, task: TaskConfig):
+    """Load and tokenize the chosen GLUE task.
+
+    Returns (train, eval) where eval is the primary validation split (matched
+    for MNLI; standard validation otherwise).  Best-model selection during
+    each stage operates on this split.
+    """
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    dataset = load_dataset("glue", "sst2")
-
-    def tokenize_fn(ex):
-        return tokenizer(
-            ex["sentence"], truncation=True, padding="max_length", max_length=128
-        )
-
-    tokenized = dataset.map(tokenize_fn, batched=True)
-    tokenized = tokenized.rename_column("label", "labels")
-    tokenized.set_format("torch", columns=["input_ids", "attention_mask", "labels"])
-    return tokenized["train"], tokenized["validation"]
+    train_ds, eval_dict = load_glue_dataset(task, tokenizer, max_length=128)
+    primary_eval_name = next(iter(eval_dict))
+    return train_ds, eval_dict[primary_eval_name]
 
 
 def run_ce_stage(
-    model, train_ds, eval_ds, poly_coeffs, hidden, replace_types,
-    stage_name, stage_output, epochs, bs, lr, device, seed,
+    model,
+    train_ds,
+    eval_ds,
+    poly_coeffs,
+    hidden,
+    replace_types,
+    stage_name,
+    stage_output,
+    epochs,
+    bs,
+    lr,
+    device,
+    seed,
+    task: TaskConfig,
 ):
-    """Run a CE-loss fine-tuning stage (for GELU / Softmax replacement)."""
+    """Run a CE-loss fine-tuning stage (for GELU / Softmax replacement).
+
+    Note: "CE" is a historical name; for regression tasks (STS-B) the head
+    actually optimises MSE.  The same Trainer setup applies.
+    """
+    metric_fn = compute_metrics_for_task(task)
+    metric_for_best = task.metric_for_best_model
+    eval_key = metric_for_best  # e.g. "eval_accuracy" or "eval_pearson"
+
     replace_activations(
         model, poly_coeffs, hidden, learnable=True, replace_types=replace_types
     )
@@ -188,16 +227,20 @@ def run_ce_stage(
 
     # Zero-shot eval after replacement
     zs_args = TrainingArguments(
-        output_dir=stage_output + "_zs", per_device_eval_batch_size=32,
-        report_to="none", disable_tqdm=True,
+        output_dir=stage_output + "_zs",
+        per_device_eval_batch_size=32,
+        report_to="none",
+        disable_tqdm=True,
         seed=seed,
         data_seed=seed,
     )
     zs_trainer = Trainer(
-        model=model, args=zs_args, eval_dataset=eval_ds,
-        compute_metrics=compute_metrics,
+        model=model,
+        args=zs_args,
+        eval_dataset=eval_ds,
+        compute_metrics=metric_fn,
     )
-    zs_acc = zs_trainer.evaluate()["eval_accuracy"]
+    zs_acc = zs_trainer.evaluate()[eval_key]
     print(f"  After {stage_name} replacement (before FT): {zs_acc:.4f}")
 
     # Fine-tune
@@ -213,7 +256,7 @@ def run_ce_stage(
         save_strategy="epoch",
         logging_steps=50,
         load_best_model_at_end=True,
-        metric_for_best_model="eval_accuracy",
+        metric_for_best_model=metric_for_best,
         greater_is_better=True,
         report_to="none",
         disable_tqdm=True,
@@ -224,16 +267,18 @@ def run_ce_stage(
     )
 
     trainer = NaNSafeTrainer(
-        model=model, args=args,
-        train_dataset=train_ds, eval_dataset=eval_ds,
-        compute_metrics=compute_metrics,
+        model=model,
+        args=args,
+        train_dataset=train_ds,
+        eval_dataset=eval_ds,
+        compute_metrics=metric_fn,
     )
 
     print(f"  Training {stage_name} for {epochs} epochs (bs={bs}, lr={lr})...")
     trainer.train()
     results = trainer.evaluate()
-    acc = results["eval_accuracy"]
-    print(f"  {stage_name} accuracy: {acc:.4f} ({acc:.2%})")
+    acc = results[eval_key]
+    print(f"  {stage_name} {task.metric}: {acc:.4f}")
 
     # Save stage model
     for p in model.parameters():
@@ -247,8 +292,19 @@ def run_ce_stage(
 
 
 def run_attn_kd_stage(
-    model, train_ds, eval_ds, poly_coeffs, hidden,
-    stage_output, epochs, bs, lr, device, stage1_path, seed,
+    model,
+    train_ds,
+    eval_ds,
+    poly_coeffs,
+    hidden,
+    stage_output,
+    epochs,
+    bs,
+    lr,
+    device,
+    stage1_path,
+    seed,
+    task: TaskConfig,
 ):
     """Run Softmax replacement with attention-level knowledge distillation.
 
@@ -256,14 +312,19 @@ def run_attn_kd_stage(
     Student = Stage 1 model with Softmax replaced by polynomial.
     Loss = alpha*CE + beta*KL(teacher_attn||student_attn) + gamma*MSE(hiddens)
     """
+    metric_fn = compute_metrics_for_task(task)
+    metric_for_best = task.metric_for_best_model
+    eval_key = metric_for_best
+
     # --- Load teacher: Stage 1 model with original Softmax ---
     print("  Loading Stage 1 model as teacher (original Softmax)...")
-    teacher = AutoModelForSequenceClassification.from_pretrained(
-        str(stage1_path), num_labels=2
-    )
+    teacher = _load_cls(stage1_path, task)
     # Teacher keeps original Softmax — only apply GELU replacement
     replace_activations(
-        teacher, poly_coeffs, hidden, learnable=False,
+        teacher,
+        poly_coeffs,
+        hidden,
+        learnable=False,
         replace_types=["GELU"],
     )
     n = _restore_poly_coeffs(teacher, stage1_path)
@@ -281,15 +342,20 @@ def run_attn_kd_stage(
 
     # Zero-shot eval after replacement
     zs_args = TrainingArguments(
-        output_dir=stage_output + "_zs", per_device_eval_batch_size=32,
-        report_to="none", disable_tqdm=True,
-        seed=seed, data_seed=seed,
+        output_dir=stage_output + "_zs",
+        per_device_eval_batch_size=32,
+        report_to="none",
+        disable_tqdm=True,
+        seed=seed,
+        data_seed=seed,
     )
     zs_trainer = Trainer(
-        model=model, args=zs_args, eval_dataset=eval_ds,
-        compute_metrics=compute_metrics,
+        model=model,
+        args=zs_args,
+        eval_dataset=eval_ds,
+        compute_metrics=metric_fn,
     )
-    zs_acc = zs_trainer.evaluate()["eval_accuracy"]
+    zs_acc = zs_trainer.evaluate()[eval_key]
     print(f"  After Softmax replacement (before FT): {zs_acc:.4f}")
 
     # Fine-tune with attention-level KD
@@ -305,10 +371,12 @@ def run_attn_kd_stage(
         label="Stage 2 (Softmax, AttnKD)",
         use_fp16=True,
         max_grad_norm=1.0,
-        alpha=1.0,   # CE task loss
-        beta=0.01,   # attention KL (scaled down — raw KL is O(100))
+        alpha=1.0,  # CE task loss
+        beta=0.01,  # attention KL (scaled down — raw KL is O(100))
         gamma=10.0,  # hidden state MSE (scaled up — raw MSE is O(0.01))
         seed=seed,
+        compute_metrics_fn=metric_fn,
+        metric_for_best_model=metric_for_best,
     )
 
     acc = ft_res["accuracy"]
@@ -318,6 +386,7 @@ def run_attn_kd_stage(
         p.data = p.data.contiguous()
     try:
         import shutil
+
         best_path = os.path.join(stage_output, "best_model")
         if not os.path.exists(best_path):
             os.makedirs(best_path, exist_ok=True)
@@ -331,8 +400,20 @@ def run_attn_kd_stage(
 
 
 def run_progressive_softmax_stage(
-    model, train_ds, eval_ds, poly_coeffs, hidden, num_layers,
-    stage_output, epochs_per_layer, bs, lr, device, stage1_path, seed,
+    model,
+    train_ds,
+    eval_ds,
+    poly_coeffs,
+    hidden,
+    num_layers,
+    stage_output,
+    epochs_per_layer,
+    bs,
+    lr,
+    device,
+    stage1_path,
+    seed,
+    task: TaskConfig,
     start_layer: int = 0,
 ):
     """Replace Softmax layer-by-layer with AttnKD fine-tuning after each.
@@ -351,13 +432,18 @@ def run_progressive_softmax_stage(
 
     Teacher = Stage 1 model (polynomial GELU + original Softmax).
     """
+    metric_fn = compute_metrics_for_task(task)
+    metric_for_best = task.metric_for_best_model
+    eval_key = metric_for_best
+
     # --- Load teacher once: Stage 1 model with original Softmax ---
     print("  Loading Stage 1 model as teacher (original Softmax)...")
-    teacher = AutoModelForSequenceClassification.from_pretrained(
-        str(stage1_path), num_labels=2
-    )
+    teacher = _load_cls(stage1_path, task)
     replace_activations(
-        teacher, poly_coeffs, hidden, learnable=False,
+        teacher,
+        poly_coeffs,
+        hidden,
+        learnable=False,
         replace_types=["GELU"],
     )
     n = _restore_poly_coeffs(teacher, stage1_path)
@@ -368,18 +454,26 @@ def run_progressive_softmax_stage(
     acc = None
     # If resuming, restore already-trained Softmax layers from checkpoints
     if start_layer > 0:
-        print(f"  Resuming from layer {start_layer} — restoring layers 0..{start_layer-1} from checkpoints")
+        print(
+            f"  Resuming from layer {start_layer} — restoring layers 0..{start_layer-1} from checkpoints"
+        )
         for prev_li in range(start_layer):
             replace_activations(
-                model, poly_coeffs, hidden, learnable=False,
-                replace_types=["Softmax"], layer_indices=[prev_li],
+                model,
+                poly_coeffs,
+                hidden,
+                learnable=False,
+                replace_types=["Softmax"],
+                layer_indices=[prev_li],
             )
             prev_ckpt = os.path.join(stage_output, f"layer_{prev_li}", "best_model")
             if os.path.isdir(prev_ckpt):
                 n = _restore_poly_coeffs(model, prev_ckpt)
                 print(f"    L{prev_li}: restored {n} coeff tensors from checkpoint")
             else:
-                print(f"    L{prev_li}: WARNING — no best_model checkpoint found at {prev_ckpt}")
+                print(
+                    f"    L{prev_li}: WARNING — no best_model checkpoint found at {prev_ckpt}"
+                )
 
     for li in range(start_layer, num_layers):
         # Depth-adaptive epochs: last layer gets 2× epochs,
@@ -397,14 +491,20 @@ def run_progressive_softmax_stage(
         lr_scale = 1.0 + 0.5 * (li / max(1, num_layers - 1))
         layer_lr = lr * lr_scale
 
-        print(f"\n  --- Stage 2 sub-step {li+1}/{num_layers}: "
-              f"Replace Softmax in layer {li} "
-              f"(epochs={layer_epochs}, lr={layer_lr:.1e}) ---")
+        print(
+            f"\n  --- Stage 2 sub-step {li+1}/{num_layers}: "
+            f"Replace Softmax in layer {li} "
+            f"(epochs={layer_epochs}, lr={layer_lr:.1e}) ---"
+        )
 
         # Replace Softmax in this single layer only
         replace_activations(
-            model, poly_coeffs, hidden, learnable=True,
-            replace_types=["Softmax"], layer_indices=[li],
+            model,
+            poly_coeffs,
+            hidden,
+            learnable=True,
+            replace_types=["Softmax"],
+            layer_indices=[li],
         )
 
         poly_params = sum(
@@ -416,14 +516,18 @@ def run_progressive_softmax_stage(
         zs_args = TrainingArguments(
             output_dir=stage_output + f"_L{li}_zs",
             per_device_eval_batch_size=32,
-            report_to="none", disable_tqdm=True,
-            seed=seed, data_seed=seed,
+            report_to="none",
+            disable_tqdm=True,
+            seed=seed,
+            data_seed=seed,
         )
         zs_trainer = Trainer(
-            model=model, args=zs_args, eval_dataset=eval_ds,
-            compute_metrics=compute_metrics,
+            model=model,
+            args=zs_args,
+            eval_dataset=eval_ds,
+            compute_metrics=metric_fn,
         )
-        zs_acc = zs_trainer.evaluate()["eval_accuracy"]
+        zs_acc = zs_trainer.evaluate()[eval_key]
         print(f"  After L{li} Softmax replacement (before FT): {zs_acc:.4f}")
 
         # Fine-tune with AttnKD
@@ -444,9 +548,11 @@ def run_progressive_softmax_stage(
             beta=0.01,
             gamma=10.0,
             seed=seed,
+            compute_metrics_fn=metric_fn,
+            metric_for_best_model=metric_for_best,
         )
         acc = ft_res["accuracy"]
-        print(f"  After L{li} fine-tune: {acc:.4f} ({acc:.2%})")
+        print(f"  After L{li} fine-tune: {acc:.4f}")
 
     # Save final Stage 2 model
     for p in model.parameters():
@@ -464,17 +570,33 @@ def run_progressive_softmax_stage(
 
 
 def run_kd_stage(
-    student, train_ds, eval_ds, poly_coeffs, hidden,
-    stage_output, epochs, bs, lr, device, stage2_path, seed,
+    student,
+    train_ds,
+    eval_ds,
+    poly_coeffs,
+    hidden,
+    stage_output,
+    epochs,
+    bs,
+    lr,
+    device,
+    stage2_path,
+    seed,
+    task: TaskConfig,
 ):
     """Run KD-loss fine-tuning stage for LayerNorm replacement."""
+    metric_fn = compute_metrics_for_task(task)
+    metric_for_best = task.metric_for_best_model
+    eval_key = metric_for_best
+
     # Load teacher (Stage 2 model with standard LN)
     print("  Loading Stage 2 model as teacher...")
-    teacher = AutoModelForSequenceClassification.from_pretrained(
-        str(stage2_path), num_labels=2
-    )
+    teacher = _load_cls(stage2_path, task)
     replace_activations(
-        teacher, poly_coeffs, hidden, learnable=False,
+        teacher,
+        poly_coeffs,
+        hidden,
+        learnable=False,
         replace_types=["GELU", "Softmax"],
     )
     # Restore trained polynomial coefficients from Stage 2 checkpoint.
@@ -492,24 +614,26 @@ def run_kd_stage(
     )
     trainable_params = _freeze_for_ln_stage(student)
 
-    poly_params = sum(
-        p.numel() for n, p in student.named_parameters() if "coeffs" in n
-    )
+    poly_params = sum(p.numel() for n, p in student.named_parameters() if "coeffs" in n)
     print(f"  Learnable poly coefficients: {poly_params}")
     print(f"  Total trainable params in Stage 3: {trainable_params}")
 
     # Zero-shot eval after LN replacement
     zs_args = TrainingArguments(
-        output_dir=stage_output + "_zs", per_device_eval_batch_size=32,
-        report_to="none", disable_tqdm=True,
+        output_dir=stage_output + "_zs",
+        per_device_eval_batch_size=32,
+        report_to="none",
+        disable_tqdm=True,
         seed=seed,
         data_seed=seed,
     )
     zs_trainer = Trainer(
-        model=student, args=zs_args, eval_dataset=eval_ds,
-        compute_metrics=compute_metrics,
+        model=student,
+        args=zs_args,
+        eval_dataset=eval_ds,
+        compute_metrics=metric_fn,
     )
-    zs_acc = zs_trainer.evaluate()["eval_accuracy"]
+    zs_acc = zs_trainer.evaluate()[eval_key]
     print(f"  After LN replacement (before FT): {zs_acc:.4f}")
 
     # KD fine-tuning
@@ -529,6 +653,8 @@ def run_kd_stage(
         temperature=4.0,
         max_grad_norm=1.0,
         seed=seed,
+        compute_metrics_fn=metric_fn,
+        metric_for_best_model=metric_for_best,
     )
 
     del teacher
@@ -537,9 +663,21 @@ def run_kd_stage(
 
 
 def run_progressive_ln_stage(
-    model, train_ds, eval_ds, poly_coeffs, hidden, num_layers,
-    stage_output, epochs_per_layer, bs, lr, device,
-    stage2_path, seed, start_layer=0,
+    model,
+    train_ds,
+    eval_ds,
+    poly_coeffs,
+    hidden,
+    num_layers,
+    stage_output,
+    epochs_per_layer,
+    bs,
+    lr,
+    device,
+    stage2_path,
+    seed,
+    task: TaskConfig,
+    start_layer=0,
 ):
     """Progressive layer-by-layer LayerNorm replacement with AttnKD.
 
@@ -549,13 +687,18 @@ def run_progressive_ln_stage(
 
     Teacher = Stage 2 model (polynomial GELU + Softmax, original LN).
     """
+    metric_fn = compute_metrics_for_task(task)
+    metric_for_best = task.metric_for_best_model
+    eval_key = metric_for_best
+
     # --- Load teacher once: Stage 2 model with original LN ---
     print("  Loading Stage 2 model as teacher (original LN)...")
-    teacher = AutoModelForSequenceClassification.from_pretrained(
-        str(stage2_path), num_labels=2
-    )
+    teacher = _load_cls(stage2_path, task)
     replace_activations(
-        teacher, poly_coeffs, hidden, learnable=False,
+        teacher,
+        poly_coeffs,
+        hidden,
+        learnable=False,
         replace_types=["GELU", "Softmax"],
     )
     n = _restore_poly_coeffs(teacher, stage2_path)
@@ -570,7 +713,9 @@ def run_progressive_ln_stage(
     # restore their coefficients for all previously-replaced layers.
     if start_layer > 0:
         last_ckpt = os.path.join(stage_output, f"layer_{start_layer-1}", "best_model")
-        print(f"  Resuming from layer {start_layer} — loading full model from {last_ckpt}")
+        print(
+            f"  Resuming from layer {start_layer} — loading full model from {last_ckpt}"
+        )
         if os.path.isdir(last_ckpt):
             # Load full model weights (classifier, pooler, embeddings, etc.)
             sf = Path(last_ckpt) / "model.safetensors"
@@ -578,7 +723,9 @@ def run_progressive_ln_stage(
             if sf.exists():
                 full_state = _load_safetensors(str(sf))
             elif ckpt_bin.exists():
-                full_state = torch.load(str(ckpt_bin), map_location="cpu", weights_only=False)
+                full_state = torch.load(
+                    str(ckpt_bin), map_location="cpu", weights_only=False
+                )
             else:
                 full_state = None
                 print(f"    WARNING: no checkpoint file found in {last_ckpt}")
@@ -588,25 +735,37 @@ def run_progressive_ln_stage(
                 model_state = model.state_dict()
                 loaded = 0
                 for k, v in full_state.items():
-                    if "coeffs" not in k and k in model_state and model_state[k].shape == v.shape:
+                    if (
+                        "coeffs" not in k
+                        and k in model_state
+                        and model_state[k].shape == v.shape
+                    ):
                         model_state[k] = v
                         loaded += 1
                 model.load_state_dict(model_state, strict=False)
-                print(f"    Loaded {loaded} non-coeff tensors (classifier, pooler, etc.)")
+                print(
+                    f"    Loaded {loaded} non-coeff tensors (classifier, pooler, etc.)"
+                )
                 del full_state
 
         # Now create polynomial LN modules and restore their coefficients
         for prev_li in range(start_layer):
             replace_activations(
-                model, poly_coeffs, hidden, learnable=True,
-                replace_types=["LN"], layer_indices=[prev_li],
+                model,
+                poly_coeffs,
+                hidden,
+                learnable=True,
+                replace_types=["LN"],
+                layer_indices=[prev_li],
             )
             prev_ckpt = os.path.join(stage_output, f"layer_{prev_li}", "best_model")
             if os.path.isdir(prev_ckpt):
                 n = _restore_poly_coeffs(model, prev_ckpt)
                 print(f"    L{prev_li}: restored {n} coeff tensors from checkpoint")
             else:
-                print(f"    L{prev_li}: WARNING — no best_model checkpoint found at {prev_ckpt}")
+                print(
+                    f"    L{prev_li}: WARNING — no best_model checkpoint found at {prev_ckpt}"
+                )
 
     replaced_so_far = list(range(start_layer))  # track which layers have poly LN
 
@@ -628,14 +787,20 @@ def run_progressive_ln_stage(
         lr_scale = 1.0 + 0.5 * (li / max(1, num_layers - 1))
         layer_lr = lr * lr_scale
 
-        print(f"\n  --- Stage 3 sub-step {li+1}/{num_layers}: "
-              f"Replace LN in layer {li} "
-              f"(epochs={layer_epochs}, lr={layer_lr:.1e}) ---")
+        print(
+            f"\n  --- Stage 3 sub-step {li+1}/{num_layers}: "
+            f"Replace LN in layer {li} "
+            f"(epochs={layer_epochs}, lr={layer_lr:.1e}) ---"
+        )
 
         # Replace LN in this single layer only
         replace_activations(
-            model, poly_coeffs, hidden, learnable=True,
-            replace_types=["LN"], layer_indices=[li],
+            model,
+            poly_coeffs,
+            hidden,
+            learnable=True,
+            replace_types=["LN"],
+            layer_indices=[li],
         )
         replaced_so_far.append(li)
 
@@ -653,14 +818,18 @@ def run_progressive_ln_stage(
         zs_args = TrainingArguments(
             output_dir=stage_output + f"_L{li}_zs",
             per_device_eval_batch_size=32,
-            report_to="none", disable_tqdm=True,
-            seed=seed, data_seed=seed,
+            report_to="none",
+            disable_tqdm=True,
+            seed=seed,
+            data_seed=seed,
         )
         zs_trainer = Trainer(
-            model=model, args=zs_args, eval_dataset=eval_ds,
-            compute_metrics=compute_metrics,
+            model=model,
+            args=zs_args,
+            eval_dataset=eval_ds,
+            compute_metrics=metric_fn,
         )
-        zs_acc = zs_trainer.evaluate()["eval_accuracy"]
+        zs_acc = zs_trainer.evaluate()[eval_key]
         print(f"  After L{li} LN replacement (before FT): {zs_acc:.4f}")
 
         # Fine-tune with AttnKD
@@ -686,9 +855,11 @@ def run_progressive_ln_stage(
             gamma=10.0,
             seed=seed,
             lr_scheduler_type="constant_with_warmup",
+            compute_metrics_fn=metric_fn,
+            metric_for_best_model=metric_for_best,
         )
         acc = ft_res["accuracy"]
-        print(f"  After L{li} LN fine-tune: {acc:.4f} ({acc:.2%})")
+        print(f"  After L{li} LN fine-tune: {acc:.4f}")
 
     # Save final Stage 3 model
     for p in model.parameters():
@@ -703,14 +874,20 @@ def run_progressive_ln_stage(
     del teacher
     torch.cuda.empty_cache()
 
-    poly_params = sum(
-        p.numel() for pn, p in model.named_parameters() if "coeffs" in pn
-    )
+    poly_params = sum(p.numel() for pn, p in model.named_parameters() if "coeffs" in pn)
     return acc, poly_params
 
 
-def run_staged_lpan(model_key: str, degree: int = 8, start_stage: int = 1, seed: int = 42, start_layer: int = 0, start_ln_layer: int = 0):
-    """Run the full 3-stage LPAN pipeline for one model variant."""
+def run_staged_lpan(
+    model_key: str,
+    degree: int = 8,
+    start_stage: int = 1,
+    seed: int = 42,
+    start_layer: int = 0,
+    start_ln_layer: int = 0,
+    task_name: str = "sst2",
+):
+    """Run the full 3-stage LPAN pipeline for one model variant on one task."""
     cfg = MODEL_REGISTRY[model_key]
     model_name = cfg["name"]
     short = cfg["short"]
@@ -719,12 +896,18 @@ def run_staged_lpan(model_key: str, degree: int = 8, start_stage: int = 1, seed:
     bs = cfg["batch_size"]
     lr = cfg["lr"]
 
-    result_dir = MULTI_MODEL_DIR / model_key
+    task = get_task(task_name)
+    primary_key = task.metric  # "accuracy", "f1", or "pearson"
+
+    result_dir = MULTI_MODEL_DIR / model_key / _task_subpath(task_name)
     baseline_path = result_dir / "baseline" / "best_model"
 
     if not baseline_path.exists():
         print(f"  ERROR: Baseline not found at {baseline_path}")
-        print(f"  Run experiment 05 first to create the baseline.")
+        print(
+            f"  Run experiment 05 first to create the baseline:\n"
+            f"    python experiments/05_multi_model_scaling.py --models {model_key} --task {task_name}"
+        )
         return None
 
     # Load baseline accuracy
@@ -736,8 +919,8 @@ def run_staged_lpan(model_key: str, degree: int = 8, start_stage: int = 1, seed:
         baseline_acc = prev.get("baseline_acc", 0.0)
 
     print(f"\n{'='*70}")
-    print(f"  {short} — Staged LPAN Pipeline")
-    print(f"  Baseline: {baseline_acc:.4f} ({baseline_acc:.2%})")
+    print(f"  {short} — Staged LPAN Pipeline ({task.description})")
+    print(f"  Baseline {primary_key}: {baseline_acc:.4f}")
     print(f"  Stages: GELU(CE) → Softmax(Progressive AttnKD) → LayerNorm(KD)")
     print(f"  Degree: {degree} (adaptive per operation/depth)")
     print(f"  Seed: {seed}")
@@ -747,7 +930,7 @@ def run_staged_lpan(model_key: str, degree: int = 8, start_stage: int = 1, seed:
 
     # Load data
     print("\n[0/5] Loading data...")
-    train_ds, eval_ds = load_data(model_name)
+    train_ds, eval_ds = load_data(model_name, task)
 
     # Profile activations
     print("\n[1/5] Profiling activations...")
@@ -757,9 +940,7 @@ def run_staged_lpan(model_key: str, degree: int = 8, start_stage: int = 1, seed:
     device = detect_device()
 
     # Load baseline model
-    model = AutoModelForSequenceClassification.from_pretrained(
-        str(baseline_path), num_labels=2
-    )
+    model = _load_cls(baseline_path, task)
     model.to(device)
 
     # ── Stage 1: GELU (CE) ──
@@ -770,25 +951,34 @@ def run_staged_lpan(model_key: str, degree: int = 8, start_stage: int = 1, seed:
         print(f"  Stage 1/3: Replace GELU → Learnable Polynomial (CE)")
         print(f"{'='*70}")
         s1_acc = run_ce_stage(
-            model, train_ds, eval_ds, poly_coeffs, hidden,
+            model,
+            train_ds,
+            eval_ds,
+            poly_coeffs,
+            hidden,
             replace_types=["GELU"],
             stage_name="Stage 1 (GELU)",
             stage_output=s1_output,
-            epochs=3, bs=bs, lr=lr, device=device, seed=seed,
+            epochs=3,
+            bs=bs,
+            lr=lr,
+            device=device,
+            seed=seed,
+            task=task,
         )
     else:
         # Load Stage 1 model, re-apply GELU replacement, restore trained coefficients.
         # from_pretrained ignores custom 'intermediate_act_fn.coeffs' keys, so we must
         # call replace_activations + _restore_poly_coeffs to get the trained polynomial.
         print(f"\n  Skipping Stage 1 — loading from {s1_model_path}")
-        model = AutoModelForSequenceClassification.from_pretrained(
-            str(s1_model_path), num_labels=2
-        )
+        model = _load_cls(s1_model_path, task)
         replace_activations(
             model, poly_coeffs, hidden, learnable=False, replace_types=["GELU"]
         )
         n_restored = _restore_poly_coeffs(model, s1_model_path)
-        print(f"  Stage 1 GELU: poly modules created, {n_restored} coeff tensors restored from checkpoint.")
+        print(
+            f"  Stage 1 GELU: poly modules created, {n_restored} coeff tensors restored from checkpoint."
+        )
         model.to(device)
         s1_acc = 0.0  # will be read from previous results if available
 
@@ -797,32 +987,49 @@ def run_staged_lpan(model_key: str, degree: int = 8, start_stage: int = 1, seed:
     s2_model_path = Path(s2_output) / "best_model"
     if start_stage <= 2:
         print(f"\n{'='*70}")
-        print(f"  Stage 2/3: Replace Softmax → Learnable Polynomial (Progressive AttnKD)")
-        print(f"  Replacing layer-by-layer: {num_layers} layers, depth-adaptive epochs + LR scaling")
+        print(
+            f"  Stage 2/3: Replace Softmax → Learnable Polynomial (Progressive AttnKD)"
+        )
+        print(
+            f"  Replacing layer-by-layer: {num_layers} layers, depth-adaptive epochs + LR scaling"
+        )
         print(f"{'='*70}")
         s2_acc = run_progressive_softmax_stage(
-            model, train_ds, eval_ds, poly_coeffs, hidden, num_layers,
+            model,
+            train_ds,
+            eval_ds,
+            poly_coeffs,
+            hidden,
+            num_layers,
             stage_output=s2_output,
-            epochs_per_layer=2, bs=bs, lr=lr, device=device,
-            stage1_path=s1_model_path, seed=seed,
+            epochs_per_layer=2,
+            bs=bs,
+            lr=lr,
+            device=device,
+            stage1_path=s1_model_path,
+            seed=seed,
+            task=task,
             start_layer=start_layer,
         )
     else:
         # Load Stage 2 model
         print(f"\n  Skipping Stage 2 — loading from {s2_model_path}")
-        model = AutoModelForSequenceClassification.from_pretrained(
-            str(s2_model_path), num_labels=2
-        )
+        model = _load_cls(s2_model_path, task)
         # Re-create polynomial modules for GELU and Softmax, then restore
         # trained coefficients from their respective stage checkpoints.
         replace_activations(
-            model, poly_coeffs, hidden, learnable=False,
+            model,
+            poly_coeffs,
+            hidden,
+            learnable=False,
             replace_types=["GELU", "Softmax"],
         )
         n1 = _restore_poly_coeffs(model, s1_model_path)  # GELU coeffs from Stage 1
         n2 = _restore_poly_coeffs(model, s2_model_path)  # Softmax coeffs from Stage 2
         print(f"  Stage 1 GELU: {n1} coeff tensors restored from Stage 1 checkpoint.")
-        print(f"  Stage 2 Softmax: {n2} coeff tensors restored from Stage 2 checkpoint.")
+        print(
+            f"  Stage 2 Softmax: {n2} coeff tensors restored from Stage 2 checkpoint."
+        )
         model.to(device)
         s2_acc = 0.0
 
@@ -834,14 +1041,28 @@ def run_staged_lpan(model_key: str, degree: int = 8, start_stage: int = 1, seed:
         s3_output = str(result_dir / "staged_lpan_s3_ln_progressive")
         s3_lr = 5e-6
         print(f"\n{'='*70}")
-        print(f"  Stage 3/3: Replace LayerNorm → Learnable Polynomial (Progressive AttnKD)")
-        print(f"  Replacing layer-by-layer: {num_layers} layers, depth-adaptive epochs + LR scaling")
+        print(
+            f"  Stage 3/3: Replace LayerNorm → Learnable Polynomial (Progressive AttnKD)"
+        )
+        print(
+            f"  Replacing layer-by-layer: {num_layers} layers, depth-adaptive epochs + LR scaling"
+        )
         print(f"{'='*70}")
         s3_acc, poly_params = run_progressive_ln_stage(
-            model, train_ds, eval_ds, poly_coeffs, hidden, num_layers,
+            model,
+            train_ds,
+            eval_ds,
+            poly_coeffs,
+            hidden,
+            num_layers,
             stage_output=s3_output,
-            epochs_per_layer=2, bs=bs, lr=s3_lr, device=device,
-            stage2_path=stage2_model_path, seed=seed,
+            epochs_per_layer=2,
+            bs=bs,
+            lr=s3_lr,
+            device=device,
+            stage2_path=stage2_model_path,
+            seed=seed,
+            task=task,
             start_layer=start_ln_layer,
         )
     else:
@@ -854,11 +1075,18 @@ def run_staged_lpan(model_key: str, degree: int = 8, start_stage: int = 1, seed:
         print(f"{'='*70}")
         s3_acc, poly_params = run_kd_stage(
             student=model,
-            train_ds=train_ds, eval_ds=eval_ds,
-            poly_coeffs=poly_coeffs, hidden=hidden,
+            train_ds=train_ds,
+            eval_ds=eval_ds,
+            poly_coeffs=poly_coeffs,
+            hidden=hidden,
             stage_output=s3_output,
-            epochs=s3_epochs, bs=bs, lr=s3_lr, device=device,
-            stage2_path=stage2_model_path, seed=seed,
+            epochs=s3_epochs,
+            bs=bs,
+            lr=s3_lr,
+            device=device,
+            stage2_path=stage2_model_path,
+            seed=seed,
+            task=task,
         )
 
     # ── Compute multiplicative depth ──
@@ -920,22 +1148,39 @@ def main():
         description="Staged LPAN: progressive polynomial replacement for FHE-compatible BERT"
     )
     parser.add_argument(
-        "--model", nargs="+", default=["base"],
+        "--model",
+        nargs="+",
+        default=["base"],
         help="Model key(s) from MODEL_REGISTRY, or 'all'",
     )
     parser.add_argument("--degree", type=int, default=8, help="Base polynomial degree")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument(
-        "--start-stage", type=int, default=1, choices=[1, 2, 3],
+        "--seed", type=int, default=42, help="Random seed for reproducibility"
+    )
+    parser.add_argument(
+        "--start-stage",
+        type=int,
+        default=1,
+        choices=[1, 2, 3],
         help="Stage to start from (default: 1). Skipped stages load from checkpoints.",
     )
     parser.add_argument(
-        "--start-layer", type=int, default=0,
+        "--start-layer",
+        type=int,
+        default=0,
         help="Layer to resume from in Stage 2 progressive Softmax (default: 0).",
     )
     parser.add_argument(
-        "--start-ln-layer", type=int, default=0,
+        "--start-ln-layer",
+        type=int,
+        default=0,
         help="Layer to resume from in Stage 3 progressive LN (default: 0).",
+    )
+    parser.add_argument(
+        "--task",
+        default="sst2",
+        choices=list(GLUE_TASKS),
+        help="GLUE task to run the LPAN pipeline on (default: sst2).",
     )
     args = parser.parse_args()
 
@@ -947,12 +1192,21 @@ def main():
 
     all_results = []
     for model_key in model_keys:
-        result = run_staged_lpan(model_key, args.degree, args.start_stage, args.seed, args.start_layer, args.start_ln_layer)
+        result = run_staged_lpan(
+            model_key,
+            args.degree,
+            args.start_stage,
+            args.seed,
+            args.start_layer,
+            args.start_ln_layer,
+            task_name=args.task,
+        )
         if result:
             all_results.append(result)
 
-    # Save combined results
-    out_file = MULTI_MODEL_DIR / "staged_lpan_results.json"
+    # Save combined results (per-task suffix when not the SST-2 default)
+    suffix = "" if args.task == "sst2" else f"_{args.task}"
+    out_file = MULTI_MODEL_DIR / f"staged_lpan_results{suffix}.json"
     with open(out_file, "w") as f:
         json.dump(all_results, f, indent=2)
     print(f"\nResults saved to {out_file}")
