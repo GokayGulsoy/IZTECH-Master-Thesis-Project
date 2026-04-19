@@ -93,6 +93,101 @@ This repository contains the implementation and thesis document for privacy-pres
 - GPU-accelerated CKKS operations for practical deployment
 - Formal circuit depth analysis for each BERT variant
 
+## CKKS Encrypted Inference (Phase 1 — `feature/ckks-protocol`)
+
+The CKKS work is being landed in incremental, runnable phases on the
+`feature/ckks-protocol` branch. The full design is in
+[docs/ckks_protocol.md](docs/ckks_protocol.md); a short operator-level
+summary follows.
+
+### Protocol — Pure-FHE Single-Round (PF-SR)
+
+Existing FHE/MPC transformer systems (THE-X, MPCFormer, BOLT, Iron)
+fall back to MPC round-trips for LayerNorm because `(x − μ)/σ`
+requires a square root that is impractical under FHE. LPAN replaces
+LN with a polynomial during training, so the **server can run the
+entire transformer layer purely under FHE**:
+
+```
+Client            Server
+──────            ──────
+Enc(x) ──────────▶
+                  LPAN_layer(ct)   ← no client interaction
+       ◀────────  Enc(y)
+Dec(y)
+```
+
+One round-trip total, independent of model depth.
+
+### Module layout
+
+```
+fhe_thesis/encryption/
+  context.py     # CKKS context factories (existing)
+  backend.py     # CKKSBackend ABC + TenSEALBackend reference impl
+  packing.py     # TokenPackedTensor — token-packed slot layout
+  ops.py         # enc_linear, enc_gelu_poly, enc_ln_poly
+  depth.py       # symbolic depth audit (DepthAudit, DEPTH_COST)
+docs/
+  ckks_protocol.md   # full protocol specification
+experiments/
+  07_encrypted_inference.py    # legacy FFN-only benchmark
+  12_lpan_fhe_protocol.py      # NEW: Phase-1 FFN+LN block
+```
+
+### Packing strategy (token-packed)
+
+One ciphertext per token row, `hidden_dim` slots used per ciphertext.
+Chosen because every LPAN polynomial (GELU, softmax-poly, LN-poly) is
+**intra-token element-wise**, so polynomial evaluation costs **zero
+rotations**. Linear layers use a per-row plaintext-weight matmul.
+
+### Multiplicative-depth budget
+
+Critical-path depth per LPAN BERT layer (Q/K/V parallel, two LN-polys
+sequential, degree-8 polys via Horner) = **20 levels**. Computed by
+`fhe_thesis.encryption.depth.transformer_layer_depth()`. The Phase-1
+FFN+LN block alone is 9 levels and fits a TenSEAL N=16384 chain
+without bootstrapping.
+
+### Running Phase 1 on the MSI box
+
+```bash
+git fetch
+git checkout feature/ckks-protocol
+# (Phase 1 has no extra deps beyond the existing fhe_venv: tenseal,
+#  numpy, torch, transformers, scipy.)
+python experiments/12_lpan_fhe_protocol.py
+```
+
+Outputs a JSON record with latency breakdown and decryption error to
+`results/encrypted_inference/phase1_protocol.json`. The legacy FFN-only
+[experiments/07_encrypted_inference.py](experiments/07_encrypted_inference.py)
+is left unchanged and still runnable.
+
+### Roadmap (further phases on this branch)
+
+| Phase | Deliverable |
+|---|---|
+| 1 ✅ | Protocol design, backend abstraction, FFN+LN block (this commit) |
+| 2 | Encrypted self-attention (Q/K/V, softmax-poly, attn·V) |
+| 3 | Full BERT-Tiny encrypted layer + classifier head |
+| 4 | Scale to Mini / Small / Base, depth-budget audit per model |
+| 5 | GPU-backend port (Phantom-FHE or OpenFHE-CUDA) — perf-only |
+
+### Notes for the MSI box
+
+- The protocol layer is intentionally backend-agnostic. Swapping
+  TenSEAL for a GPU CKKS library is a single new `CKKSBackend`
+  subclass — no protocol code changes.
+- `fhe_thesis/encryption/__init__.py` uses lazy (PEP-562) imports so
+  the design machine can load `depth` and `packing` even without
+  `tenseal` installed; importing `TenSEALBackend` triggers the heavy
+  import only when needed.
+- Bootstrapping is intentionally **not** in scope yet. If a future
+  phase needs it for BERT-Base, it will be added behind the
+  `BackendCapabilities.supports_bootstrapping` flag.
+
 ## Environment
 
 - **Hardware:** NVIDIA RTX 5070 Ti Laptop GPU (12GB VRAM)
