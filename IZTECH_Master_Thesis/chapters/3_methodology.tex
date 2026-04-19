@@ -573,3 +573,138 @@ Folding the per-operation depth costs along the critical path of one LPAN layer 
 
 \subsection{Model-Agnostic Implementation}
 The encrypted layer is implemented in \texttt{fhe\_thesis/encryption/protocol.py} as four model-agnostic primitives -- \texttt{encrypt\_ffn\_block}, \texttt{encrypt\_attention\_block}, \texttt{encrypt\_layer}, and \texttt{encrypt\_inference}. Each one pulls $d$, $H$, $L$, and the FFN intermediate size from the HuggingFace \texttt{BertConfig}, so the same code path executes on BERT-Tiny, Mini, Small, and Base without any per-model branching. The driver \texttt{python experiments/run\_protocol.py --model <key> --phase <phase>} dispatches the chosen phase against a CKKS context of the right size and dumps a JSON record of per-step latency to \texttt{results/encrypted\_inference/}.
+
+\subsection{Protocol Diagram}
+Figure~\ref{fig:pfsr_sequence} contrasts the PF-SR communication pattern with the multi-round MPC pattern used by THE-X / MPCFormer / BOLT for an $L$-layer model. PF-SR consumes exactly one round-trip; the prior systems consume $L$ to $2L$.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+    node distance=0.6cm and 1.6cm,
+    party/.style={draw, thick, minimum width=2.4cm, minimum height=0.6cm, font=\small\bfseries},
+    msg/.style={-{Stealth[length=2mm]}, thick, font=\scriptsize},
+    label/.style={midway, fill=white, inner sep=1pt, font=\scriptsize}
+]
+% PF-SR (left)
+\node[party] (cl1) {Client};
+\node[party, right=4cm of cl1] (sv1) {Server};
+\draw[dashed] (cl1.south) -- ++(0,-3.6) coordinate (cle1);
+\draw[dashed] (sv1.south) -- ++(0,-3.6) coordinate (sve1);
+\draw[msg] ($(cl1.south)+(0,-0.3)$) -- node[label]{$\mathrm{Enc}(x)$} ($(sv1.south)+(0,-0.3)$);
+\node[font=\scriptsize, right=0.05cm] at ($(sv1.south)+(0,-0.9)$) {evaluate $L$ encrypted layers};
+\node[font=\scriptsize, right=0.05cm] at ($(sv1.south)+(0,-1.4)$) {(LPAN polynomials)};
+\draw[msg] ($(sv1.south)+(0,-2.8)$) -- node[label]{$\mathrm{Enc}(y)$} ($(cl1.south)+(0,-2.8)$);
+\node[font=\small\bfseries] at ($(cl1)!0.5!(sv1) + (0,-4.2)$) {(a) PF-SR: 1 round-trip};
+
+% MPC (right)
+\node[party, right=5cm of sv1] (cl2) {Client};
+\node[party, right=4cm of cl2] (sv2) {Server};
+\draw[dashed] (cl2.south) -- ++(0,-3.6) coordinate (cle2);
+\draw[dashed] (sv2.south) -- ++(0,-3.6) coordinate (sve2);
+\foreach \i/\y in {1/-0.3, 2/-1.1, 3/-1.9, 4/-2.7} {
+    \draw[msg] ($(cl2.south)+(0,\y)$) -- node[label]{share/refresh} ($(sv2.south)+(0,\y)$);
+    \draw[msg] ($(sv2.south)+(0,\y-0.35)$) -- ($(cl2.south)+(0,\y-0.35)$);
+}
+\node[font=\small\bfseries] at ($(cl2)!0.5!(sv2) + (0,-4.2)$) {(b) MPC: $\geq L$ round-trips};
+\end{tikzpicture}
+\caption{Communication pattern. (a) The proposed PF-SR protocol exchanges only an encrypted input and an encrypted output. (b) THE-X / MPCFormer / BOLT require client--server interaction at every non-polynomial primitive (LayerNorm, GELU, Softmax), scaling linearly with depth.}
+\label{fig:pfsr_sequence}
+\end{figure}
+
+Figure~\ref{fig:token_packing} illustrates the token-packed ciphertext layout that underpins every PF-SR primitive. Each token occupies a single ciphertext whose first $d$ slots carry the hidden-state row; remaining slots are zero-padded up to the CKKS slot count $N/2$.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+    slot/.style={draw, minimum width=0.45cm, minimum height=0.45cm, font=\tiny, inner sep=0pt},
+    pad/.style={draw, minimum width=0.45cm, minimum height=0.45cm, font=\tiny, inner sep=0pt, fill=gray!20},
+    ct/.style={font=\small}
+]
+\foreach \i in {0,1,2} {
+    \node[ct] at (-1.4, -\i*0.6) {$\mathrm{ct}_\i =$};
+    \foreach \j in {0,1,2,3,4,5} \node[slot] at (\j*0.45, -\i*0.6) {$x_{\i,\j}$};
+    \foreach \j in {6,7,8,9,10,11} \node[pad] at (\j*0.45, -\i*0.6) {$0$};
+}
+\node[font=\small] at (-1.4, -2.0) {$\vdots$};
+\foreach \j in {0,...,11} \node[font=\tiny] at (\j*0.45, -2.0) {$\vdots$};
+\node[ct] at (-1.4, -2.6) {$\mathrm{ct}_{L-1} =$};
+\foreach \j in {0,1,2,3,4,5} \node[slot] at (\j*0.45, -2.6) {$x_{L\text{-}1,\j}$};
+\foreach \j in {6,7,8,9,10,11} \node[pad] at (\j*0.45, -2.6) {$0$};
+
+\draw[decoration={brace,raise=2pt}, decorate] (-0.05, 0.3) -- node[above=4pt, font=\scriptsize]{$d$ slots (hidden dim)} (2.55, 0.3);
+\draw[decoration={brace,raise=2pt}, decorate] (2.65, 0.3) -- node[above=4pt, font=\scriptsize]{$N/2 - d$ zero slots} (5.20, 0.3);
+\draw[decoration={brace,mirror,raise=2pt}, decorate] (-0.7, -2.85) -- node[below=4pt, font=\scriptsize]{$L$ ciphertexts (one per token)} (5.20, -2.85);
+\end{tikzpicture}
+\caption{Token-packed ciphertext layout. A 2-D activation tensor $X \in \mathbb{R}^{L\times d}$ maps to $L$ independent ciphertexts. Polynomial GELU/Softmax/inverse-sqrt act element-wise on slots, so they require zero rotations.}
+\label{fig:token_packing}
+\end{figure}
+
+\subsection{Encrypted Layer Algorithm}
+Algorithm~\ref{alg:pfsr_layer} specifies the model-agnostic encrypted layer. The same procedure is invoked for every layer of every BERT variant; per-model differences appear only in the dimensions $(L, d, H)$ pulled from the HuggingFace \texttt{BertConfig} at call time.
+
+\begin{algorithm}[htbp]
+\caption{\textsc{EncryptLayer} --- one PF-SR encoder layer (model-agnostic)}
+\label{alg:pfsr_layer}
+\begin{algorithmic}[1]
+\REQUIRE Token-packed ciphertexts $\{\mathrm{ct}_i\}_{i=0}^{L-1}$, plaintext weights $W_Q,W_K,W_V,W_O,W_1,W_2$ and biases, LayerNorm parameters $(\gamma_1,\beta_1),(\gamma_2,\beta_2)$, polynomial coefficients $c_{\mathrm{gelu}}, c_{\mathrm{sm}}, c_{\mathrm{inv}}$, head count $H$, head dim $d_h = d/H$
+\ENSURE Updated ciphertexts $\{\mathrm{ct}'_i\}_{i=0}^{L-1}$ at $-23$ levels
+\STATE $\{\tilde{\mathrm{ct}}_i\} \gets$ \textsc{EncLNPoly}$(\{\mathrm{ct}_i\}, \gamma_1, \beta_1, c_{\mathrm{inv}})$ \COMMENT{$-4$ levels}
+\STATE \textbf{// Multi-head attention --- per-head plaintext slicing}
+\STATE $\mathrm{out} \gets 0$
+\FOR{$h = 0$ \TO $H-1$}
+    \STATE $W_Q^{(h)}, W_K^{(h)}, W_V^{(h)} \gets$ row-slice $W_Q,W_K,W_V$ for head $h$
+    \STATE $\{Q_i^{(h)}\} \gets$ \textsc{EncLinear}$(\{\tilde{\mathrm{ct}}_i\}, W_Q^{(h)})$ \COMMENT{Q,K,V parallel: $-1$}
+    \STATE $\{K_i^{(h)}\}, \{V_i^{(h)}\} \gets$ analogous
+    \STATE $S^{(h)} \gets$ \textsc{EncQKScores}$(\{Q_i^{(h)}\}, \{K_i^{(h)}\}, d_h)$ \COMMENT{$-2$}
+    \STATE $A^{(h)} \gets$ \textsc{EncSoftmaxPoly}$(S^{(h)}, c_{\mathrm{sm}})$ \COMMENT{$-3$}
+    \STATE $Z^{(h)} \gets$ \textsc{EncAttnApply}$(A^{(h)}, \{V_i^{(h)}\})$ \COMMENT{$-2$}
+    \STATE $\mathrm{out} \mathrel{+}=$ \textsc{ZeroPadConcat}$(Z^{(h)}, h, d_h)$ \COMMENT{plaintext mask: $-1$}
+\ENDFOR
+\STATE $\{\mathrm{ct}^{(1)}_i\} \gets$ \textsc{EncLinear}$(\mathrm{out}, W_O) + \{\tilde{\mathrm{ct}}_i\}$ \COMMENT{$-1$ + residual}
+\STATE \textbf{// Feed-forward block}
+\STATE $\{\tilde{\mathrm{ct}}^{(1)}_i\} \gets$ \textsc{EncLNPoly}$(\{\mathrm{ct}^{(1)}_i\}, \gamma_2, \beta_2, c_{\mathrm{inv}})$ \COMMENT{$-4$}
+\STATE $\{u_i\} \gets$ \textsc{EncLinear}$(\{\tilde{\mathrm{ct}}^{(1)}_i\}, W_1)$ \COMMENT{$-1$}
+\STATE $\{u_i\} \gets$ \textsc{EncGeluPoly}$(\{u_i\}, c_{\mathrm{gelu}})$ \COMMENT{$-3$}
+\STATE $\{\mathrm{ct}'_i\} \gets$ \textsc{EncLinear}$(\{u_i\}, W_2) + \{\mathrm{ct}^{(1)}_i\}$ \COMMENT{$-1$ + residual}
+\RETURN $\{\mathrm{ct}'_i\}$
+\end{algorithmic}
+\end{algorithm}
+
+Algorithm~\ref{alg:pfsr_attn} details the per-head zero-pad concatenation that keeps multi-head attention rotation-free. The plaintext masks $M^{(h)} \in \{0,1\}^{N/2}$ are precomputed once at protocol setup and reused for every layer.
+
+\begin{algorithm}[htbp]
+\caption{\textsc{ZeroPadConcat} --- multi-head concat under FHE}
+\label{alg:pfsr_attn}
+\begin{algorithmic}[1]
+\REQUIRE Per-head ciphertexts $\{Z^{(h)}_i\}_{h=0}^{H-1}$ each occupying slots $[0, d_h)$, head index $h$, head dim $d_h$
+\ENSURE Concatenated ciphertexts placing head $h$ at slots $[hd_h, (h+1)d_h)$
+\STATE Build plaintext mask $M^{(h)}$ with ones at positions $[hd_h, (h+1)d_h)$, zeros elsewhere
+\STATE Build plaintext shift vector $\sigma^{(h)} \in \mathbb{R}^{N/2}$ that maps slot $j \mapsto j + hd_h$ via per-slot permutation \COMMENT{rotation-free: encoded as a structured plaintext}
+\FOR{$i = 0$ \TO $L-1$}
+    \STATE $\bar{Z}^{(h)}_i \gets Z^{(h)}_i \odot \sigma^{(h)}$ \COMMENT{plaintext-by-ciphertext: $-1$ level}
+\ENDFOR
+\RETURN $\{\bar{Z}^{(h)}_i\}$ to be summed across heads
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{End-to-End PF-SR Inference}
+Algorithm~\ref{alg:pfsr_inference} composes \textsc{EncryptLayer} with the embedding lookup (run on plaintext indices client-side) and the classification head. The whole procedure is implemented by \texttt{encrypt\_inference} in \texttt{fhe\_thesis/encryption/protocol.py} and is invoked by \texttt{python experiments/run\_protocol.py --model <key> --phase model}.
+
+\begin{algorithm}[htbp]
+\caption{\textsc{PFSR-Inference} --- end-to-end encrypted forward pass}
+\label{alg:pfsr_inference}
+\begin{algorithmic}[1]
+\REQUIRE Tokenised input ids $\{t_i\}_{i=0}^{L-1}$, model checkpoint with embeddings $E$, $L_{\mathrm{enc}}$ encoder layers, classifier $W_{\mathrm{cls}}$, CKKS context with $\geq 23 L_{\mathrm{enc}} + 2$ levels
+\ENSURE Encrypted logits $\mathrm{Enc}(y) \in \mathbb{R}^{C}$
+\STATE \textbf{Client:} $X \gets E[t_0],\ldots,E[t_{L-1}]$; $\{\mathrm{ct}_i\} \gets \mathrm{Enc}(X)$ via token-packing
+\STATE \textbf{Client} $\to$ \textbf{Server:} send $\{\mathrm{ct}_i\}$
+\FOR{$\ell = 0$ \TO $L_{\mathrm{enc}}-1$}
+    \STATE $\{\mathrm{ct}_i\} \gets$ \textsc{EncryptLayer}$(\{\mathrm{ct}_i\}, \theta_\ell)$ \COMMENT{depth $-23$}
+\ENDFOR
+\STATE $\mathrm{ct}_{\mathrm{cls}} \gets \mathrm{ct}_0$ \COMMENT{[CLS] token}
+\STATE $\mathrm{Enc}(y) \gets$ \textsc{EncLinear}$(\mathrm{ct}_{\mathrm{cls}}, W_{\mathrm{cls}})$ \COMMENT{$-1$ level}
+\STATE \textbf{Server} $\to$ \textbf{Client:} return $\mathrm{Enc}(y)$
+\STATE \textbf{Client:} $y \gets \mathrm{Dec}(\mathrm{Enc}(y))$; predict $\arg\max_c y_c$
+\RETURN $\mathrm{Enc}(y)$
+\end{algorithmic}
+\end{algorithm}
