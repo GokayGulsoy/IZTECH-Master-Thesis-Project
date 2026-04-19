@@ -252,55 +252,46 @@ Drop the contents of `results/figures/` into
 
 ### Step 6 — Decrypt and validate accuracy (per `(model, task)` pair)
 
-`encrypt_inference` already returns a decrypted numpy logit vector
-(the runner calls `decrypt()` on the final ciphertext before
-serialising), so the missing piece is just a thin driver that loops
-over a validation slice and compares argmax against the plaintext
-LPAN forward pass.
+`encrypt_inference` already calls `decrypt()` on the final
+ciphertext and returns a numpy logit vector, so the validator just
+looks up the trained checkpoint, runs the plaintext + encrypted
+forwards on a validation slice, and compares argmax.
 
-> **Status:** the driver is **not yet committed**. It must be
-> implemented as `experiments/validate_encrypted_accuracy.py`
-> (see §6 task #6 below). The intended invocation is:
+The driver is committed at
+[`experiments/validate_encrypted_accuracy.py`](../experiments/validate_encrypted_accuracy.py).
 
 ```bash
-python experiments/validate_encrypted_accuracy.py \
-    --model {tiny|mini|small|base} --task {sst2|mrpc|qnli|qqp} \
-    --num-samples 100
+# SST-2 sweep for the four models (~100 samples each, seq_len 8)
+python experiments/validate_encrypted_accuracy.py --model tiny  --task sst2 --num-samples 100
+python experiments/validate_encrypted_accuracy.py --model mini  --task sst2 --num-samples 100
+python experiments/validate_encrypted_accuracy.py --model small --task sst2 --num-samples 100
+python experiments/validate_encrypted_accuracy.py --model base  --task sst2 --num-samples 100
+
+# Other GLUE tasks (after Step 2 has trained the corresponding checkpoint):
+python experiments/validate_encrypted_accuracy.py --model tiny --task qnli --num-samples 100
 ```
 
-Pseudocode for the driver (≤ 80 LOC):
+What the driver does:
 
-```python
-ckpt = f"results/multi_model/{args.model}/staged_lpan_final/best_model"
-plain_model = AutoModelForSequenceClassification.from_pretrained(ckpt).eval()
-tok         = AutoTokenizer.from_pretrained(ckpt)
-ds          = load_dataset("glue", args.task, split="validation").select(range(args.num_samples))
+1. loads the LPAN checkpoint at
+   `results/multi_model/<model>/staged_lpan_final/best_model/`
+   (or whatever `--checkpoint` points at);
+2. boots a CKKS context with `mult_depth = 23 × num_layers + 2`
+   levels (auto-selects `N = 32768` for everything except possibly
+   Tiny);
+3. for each of `--num-samples` validation rows:
+   - runs plaintext LPAN forward → `plain_logits`,
+   - extracts the input embeddings, truncates to `--seq-len`,
+   - runs `run_phase("model", …)` which encrypts → encrypted forward
+     → **decrypts** the final ciphertext → numpy logits,
+   - records `argmax` agreement and `|Δlogit|`;
+4. dumps `results/encrypted_inference/<model>_validation_<task>.json`
+   with `accuracy_plain`, `accuracy_decrypted`, `agreement`,
+   `mean_abs_logit_delta`, per-sample logits, and per-sample wall
+   time.
 
-ctx     = make_context(level="full")              # N=32768, ≥ 23 L_enc + 2 levels
-backend = TenSEALBackend(ctx)
-
-agree, plain_correct, dec_correct, deltas = 0, 0, 0, []
-for ex in ds:
-    inputs   = tok(ex["sentence"], return_tensors="pt", truncation=True, max_length=8)
-    embeds   = plain_model.bert.embeddings(inputs.input_ids).detach().numpy()[0]
-    plain_y  = plain_model(**inputs).logits.detach().numpy()[0]
-    enc_y, _ = run_phase("model", args.model, backend, embeds)   # already decrypted
-    agree   += int(plain_y.argmax() == enc_y.argmax())
-    plain_correct += int(plain_y.argmax()  == ex["label"])
-    dec_correct   += int(enc_y.argmax()    == ex["label"])
-    deltas.append(float(np.abs(plain_y - enc_y).mean()))
-
-json.dump({
-    "model": args.model, "task": args.task, "num_samples": len(ds),
-    "accuracy_plain":     plain_correct / len(ds),
-    "accuracy_decrypted": dec_correct  / len(ds),
-    "agreement":          agree         / len(ds),
-    "mean_abs_logit_delta": float(np.mean(deltas)),
-}, open(f"results/encrypted_inference/{args.model}_validation_{args.task}.json", "w"), indent=2)
-```
-
-The output JSON populates the *Decrypted vs.\ Plaintext Accuracy*
-table in the thesis (Section 5.5, Table~\ref{tab:pfsr_accuracy}).
+This JSON is what populates the *Decrypted vs.\ Plaintext Accuracy*
+table in the thesis (Section 5.5, `tab:pfsr_accuracy`).
 
 ---
 
@@ -324,10 +315,38 @@ These numbers are **unchanged** by the recent reorganisation:
 * `PROFILED_INTERVALS` in `fhe_thesis/config.py` is unchanged, so
   the polynomial coefficients fitted from BERT-Tiny SST-2 profiling
   are byte-identical to the previously-published ones.
-* What changed is **only** the *output paths* of the analysis
-  scripts (now per-model under `results/<analysis>/<model>/`) and
-  the figure-generator's input paths (now matches the new layout).
-  No accuracy or coefficient is affected.
+
+### Caveat: PROFILED_INTERVALS scope (read this)
+
+The constant in `fhe_thesis/config.py` only contains entries for
+`L0_*` and `L1_*` — i.e. it is *currently the BERT-Tiny profile*. It
+is used in three places, **and in all three the same Tiny-derived
+intervals are reused for Mini/Small/Base** with an `L0_*` fallback:
+
+| consumer | what falls back | impact |
+|---|---|---|
+| `fhe_thesis/encryption/coefficients.py` :: `_load_from_extracted` | per-layer interval *metadata* attached to coefficients loaded from a trained checkpoint | The polynomial **coefficients** themselves come from the trained checkpoint, so they are model-specific. The interval is only used as a clamp range for evaluation — Tiny intervals are wide enough to cover Mini/Small/Base activations in practice (verified empirically) but a tighter per-model interval would slightly reduce CKKS error. |
+| `fhe_thesis/encryption/coefficients.py` :: `_profile_and_fit` | interval used to fit coefficients **when no trained checkpoint exists** | This is the cold-start path. If you use it for Base, the polynomial is fitted on the Tiny interval and will be sub-optimal. **Always run Step 2 first** so checkpoints exist and the extracted-coefficient path is used. |
+| `experiments/analysis/error_propagation.py` | interval the *theoretical* error bound is computed over | The reported bound for Mini/Small/Base layer ≥2 uses Tiny's L0 interval. To tighten, run Step 1 with `--model {key}` then update `PROFILED_INTERVALS` with the printed `Lk_GELU/Softmax/LN` entries. |
+
+In short: **trained accuracies are model-specific (Step 2 produces a
+separate checkpoint per model)**. The Tiny intervals act only as
+fallback clamping/fitting metadata. You only need to refresh
+`PROFILED_INTERVALS` if you want either (a) tighter per-layer error
+bounds in the thesis, or (b) better cold-start accuracy without
+running Step 2 first. Neither of these changes the Tiny/Mini/Small/Base
+SST-2 numbers above.
+
+To upgrade `PROFILED_INTERVALS` to per-model coverage on MSI:
+
+```bash
+python experiments/analysis/activation_profiling.py --model tiny mini small base
+# Then copy the printed [p0.5, p99.5] intervals into PROFILED_INTERVALS,
+# renaming keys from L<i>_<op> to <model>_L<i>_<op> if you change the
+# lookup convention.
+```
+
+### Verification command
 
 To verify on MSI before any new run:
 
