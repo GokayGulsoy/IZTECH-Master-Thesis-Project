@@ -34,11 +34,11 @@ def fig_poly_approx():
     """Figure set 1: Polynomial approximation comparisons."""
     json_path = POLY_APPROX_DIR / "comparison_results.json"
     if not json_path.exists():
-        print("  [SKIP] No poly_approx results found. Run experiment 01 first.")
+        print("  [SKIP] No poly_approx results found. Run: python experiments/run_analysis.py poly")
         return
     with open(json_path) as f:
         data = json.load(f)
-    print("  [OK] Polynomial approximation figures (from experiment 01)")
+    print("  [OK] Polynomial approximation figures (run_analysis.py poly)")
 
 
 def fig_activation_profiles():
@@ -47,7 +47,7 @@ def fig_activation_profiles():
     if png.exists():
         print(f"  [OK] {png}")
     else:
-        print("  [SKIP] Run experiment 03 first.")
+        print("  [SKIP] Run: python experiments/run_analysis.py profile")
 
 
 def fig_depth_allocation():
@@ -67,7 +67,7 @@ def fig_bsgs():
     if png.exists():
         print(f"  [OK] {png}")
     else:
-        print("  [SKIP] Run experiment 09 first.")
+        print("  [SKIP] Run: python experiments/run_analysis.py bsgs")
 
 
 def fig_error_propagation():
@@ -76,7 +76,7 @@ def fig_error_propagation():
     if png.exists():
         print(f"  [OK] {png}")
     else:
-        print("  [SKIP] Run experiment 08 first.")
+        print("  [SKIP] Run: python experiments/run_analysis.py error")
 
 
 def fig_ga_convergence():
@@ -92,7 +92,7 @@ def fig_multi_model():
     """Figure set 7: Multi-model scaling results."""
     json_path = MULTI_MODEL_DIR / "scaling_results.json"
     if not json_path.exists():
-        print("  [SKIP] Run experiment 05 first.")
+        print("  [SKIP] Run: python experiments/05_multi_model_scaling.py")
         return
 
     with open(json_path) as f:
@@ -142,7 +142,7 @@ def fig_lpan():
     if png.exists():
         print(f"  [OK] {png}")
     else:
-        print("  [SKIP] Run experiment 11 first.")
+        print("  [SKIP] Run: python run_staged_lpan.py --model <key>")
 
 
 FIGURE_SETS = {
