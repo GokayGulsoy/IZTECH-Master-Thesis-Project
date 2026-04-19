@@ -48,18 +48,23 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--model", required=True, choices=sorted(MODEL_REGISTRY))
     p.add_argument("--task", required=True, choices=sorted(GLUE_TASKS))
     p.add_argument("--num-samples", type=int, default=100)
-    p.add_argument("--seq-len", type=int, default=8,
-                   help="Truncate inputs to this many tokens (PF-SR seq length).")
-    p.add_argument("--checkpoint", default=None,
-                   help="LPAN checkpoint dir. Default: results/multi_model/<model>/staged_lpan_final/best_model")
+    p.add_argument(
+        "--seq-len",
+        type=int,
+        default=8,
+        help="Truncate inputs to this many tokens (PF-SR seq length).",
+    )
+    p.add_argument(
+        "--checkpoint",
+        default=None,
+        help="LPAN checkpoint dir. Default: results/multi_model/<model>/staged_lpan_final/best_model",
+    )
     p.add_argument("--seed", type=int, default=0)
     return p.parse_args()
 
 
 def _default_checkpoint(model_key: str) -> Path:
-    return (
-        MULTI_MODEL_DIR / model_key / "staged_lpan_final" / "best_model"
-    )
+    return MULTI_MODEL_DIR / model_key / "staged_lpan_final" / "best_model"
 
 
 def main() -> int:
@@ -112,8 +117,10 @@ def main() -> int:
     t0 = time.time()
     ctx = make_context(mult_depth=mult_depth)
     backend = TenSEALBackend(ctx)
-    print(f"      boot wall = {time.time() - t0:.1f}s, "
-          f"capabilities: {backend.capabilities}")
+    print(
+        f"      boot wall = {time.time() - t0:.1f}s, "
+        f"capabilities: {backend.capabilities}"
+    )
 
     # ── Per-sample loop ────────────────────────────────────────────────
     print(f"\n[4/4] Running {n} encrypted inferences …")
@@ -147,7 +154,10 @@ def main() -> int:
         # encrypted forward (returns numpy logits — decryption already inside)
         t1 = time.time()
         enc_logits, _ = run_phase(
-            "model", args.model, backend, embeds,
+            "model",
+            args.model,
+            backend,
+            embeds,
             checkpoint_path=str(ckpt),
         )
         enc_wall_total += time.time() - t1
@@ -162,14 +172,16 @@ def main() -> int:
         agree += int(plain_pred == dec_pred)
         deltas.append(float(np.mean(np.abs(plain_logits - enc_logits))))
 
-        per_sample.append({
-            "index": int(indices[i]),
-            "label": label,
-            "plain_logits": plain_logits.tolist(),
-            "decrypted_logits": enc_logits.tolist(),
-            "plain_pred": plain_pred,
-            "decrypted_pred": dec_pred,
-        })
+        per_sample.append(
+            {
+                "index": int(indices[i]),
+                "label": label,
+                "plain_logits": plain_logits.tolist(),
+                "decrypted_logits": enc_logits.tolist(),
+                "plain_pred": plain_pred,
+                "decrypted_pred": dec_pred,
+            }
+        )
 
         if (i + 1) % 10 == 0 or (i + 1) == n:
             print(
@@ -212,7 +224,9 @@ def main() -> int:
     print(f"  decrypted   PF-SR accuracy: {summary['accuracy_decrypted']:.4f}")
     print(f"  argmax agreement          : {summary['agreement']:.4f}")
     print(f"  mean |Δlogit|             : {summary['mean_abs_logit_delta']:.4f}")
-    print(f"  encrypted wall / sample   : {summary['encrypted_wall_per_sample_s']:.2f}s")
+    print(
+        f"  encrypted wall / sample   : {summary['encrypted_wall_per_sample_s']:.2f}s"
+    )
     print(f"\n  → {out_path}")
     return 0
 

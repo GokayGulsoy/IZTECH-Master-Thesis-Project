@@ -312,30 +312,32 @@ These numbers are **unchanged** by the recent reorganisation:
   in `fhe_thesis/training/`, `fhe_thesis/models/`, and
   `fhe_thesis/poly/` were **not modified**. Re-running step 2
   with the same seed reproduces the table above.
-* `PROFILED_INTERVALS` in `fhe_thesis/config.py` is unchanged, so
-  the polynomial coefficients fitted from BERT-Tiny SST-2 profiling
-  are byte-identical to the previously-published ones.
+* `PROFILED_INTERVALS` in `fhe_thesis/config.py` is unchanged. This
+  constant is **not** what the LPAN training loop uses — Step 2
+  re-profiles each model's own activations live (see
+  `run_staged_lpan.py:937` calling `profile_model(model_name, …)`),
+  so Tiny/Mini/Small/Base each get their own trained polynomial.
 
-### Caveat: PROFILED_INTERVALS scope (read this)
+### Caveat: PROFILED_INTERVALS scope (read this carefully)
 
-The constant in `fhe_thesis/config.py` only contains entries for
-`L0_*` and `L1_*` — i.e. it is *currently the BERT-Tiny profile*. It
-is used in three places, **and in all three the same Tiny-derived
-intervals are reused for Mini/Small/Base** with an `L0_*` fallback:
+The constant in `fhe_thesis/config.py` only contains `L0_*` and
+`L1_*` keys — i.e. the BERT-Tiny profile. **This is fine** because
+the constant is never used during LPAN training. It is used in only
+three places, none of which touch your accuracy numbers:
 
-| consumer | what falls back | impact |
-|---|---|---|
-| `fhe_thesis/encryption/coefficients.py` :: `_load_from_extracted` | per-layer interval *metadata* attached to coefficients loaded from a trained checkpoint | The polynomial **coefficients** themselves come from the trained checkpoint, so they are model-specific. The interval is only used as a clamp range for evaluation — Tiny intervals are wide enough to cover Mini/Small/Base activations in practice (verified empirically) but a tighter per-model interval would slightly reduce CKKS error. |
-| `fhe_thesis/encryption/coefficients.py` :: `_profile_and_fit` | interval used to fit coefficients **when no trained checkpoint exists** | This is the cold-start path. If you use it for Base, the polynomial is fitted on the Tiny interval and will be sub-optimal. **Always run Step 2 first** so checkpoints exist and the extracted-coefficient path is used. |
-| `experiments/analysis/error_propagation.py` | interval the *theoretical* error bound is computed over | The reported bound for Mini/Small/Base layer ≥2 uses Tiny's L0 interval. To tighten, run Step 1 with `--model {key}` then update `PROFILED_INTERVALS` with the printed `Lk_GELU/Softmax/LN` entries. |
+| consumer | what it does | does it use Tiny fallback for Mini/Small/Base? | does it affect previous or future *task* accuracies? |
+|---|---|---|---|
+| `run_staged_lpan.py` (Step 2 trainer) | profiles **the actual model** with `profile_model(model_name, …)` and fits coefficients on those samples | **No** — uses fresh per-model profiles | **No.** Each LPAN checkpoint is fitted to its own model's activations. |
+| `coefficients.py` :: `_load_from_extracted` | attaches an `interval` field to each coefficient triple loaded from a trained checkpoint, used as an evaluation-time clamp range | Yes (Tiny's L0/L1 + L0 fallback for layer ≥ 2) | **No.** The coefficients themselves are loaded from the trained checkpoint. The clamp interval only affects out-of-range inputs at encrypted-eval time, and Tiny's intervals are wide enough to cover Mini/Small/Base in practice. |
+| `coefficients.py` :: `_profile_and_fit` | cold-start path used **only** when no trained checkpoint exists — fits coefficients from the Tiny interval | Yes | **Only** if you skip Step 2 and run encrypted inference on a non-Tiny model with no checkpoint. Always run Step 2 first → this path is bypassed. |
+| `experiments/analysis/error_propagation.py` | computes the *theoretical* polynomial-approximation error bound | Yes | **No accuracy impact**, but the chapter-5 bound for Mini/Small/Base layers ≥ 2 is conservative (it uses Tiny's wider L0 interval). Update `PROFILED_INTERVALS` with the new per-model entries to tighten it. |
 
-In short: **trained accuracies are model-specific (Step 2 produces a
-separate checkpoint per model)**. The Tiny intervals act only as
-fallback clamping/fitting metadata. You only need to refresh
-`PROFILED_INTERVALS` if you want either (a) tighter per-layer error
-bounds in the thesis, or (b) better cold-start accuracy without
-running Step 2 first. Neither of these changes the Tiny/Mini/Small/Base
-SST-2 numbers above.
+**Direct answer to your question:** every LPAN run profiles its own
+model from scratch — there is **no discrepancy** in the previous
+run, and there will be **no discrepancy** in future task runs
+(MRPC/QNLI/QQP). The Tiny constant in `config.py` is purely a
+fallback for two non-training code paths (encrypted-inference clamp
+range and the analytical error bound).
 
 To upgrade `PROFILED_INTERVALS` to per-model coverage on MSI:
 
