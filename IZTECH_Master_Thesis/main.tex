@@ -1,0 +1,102 @@
+\documentclass{iztechthesis}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsthm}
+\usepackage{mathtools}
+\usepackage{multirow}
+\usepackage{booktabs}
+
+% --- Clickable internal links (TOC, LOF, LOT, citations) ---
+\usepackage[hidelinks, bookmarks=true, bookmarksnumbered=true, pdfusetitle, linktoc=section]{hyperref}
+
+% --- TikZ for Diagrams ---
+\usepackage{tikz}
+\usetikzlibrary{shapes.geometric, arrows.meta, positioning, calc, fit, backgrounds, decorations.pathreplacing, chains}
+
+\newtheorem{definition}{Definition}[chapter]
+\newtheorem{theorem}{Theorem}[chapter]
+\newtheorem{corollary}{Corollary}[theorem]
+
+% --- Bibliography Setup ---
+\usepackage{csquotes}
+\DeclareQuoteStyle{turkish}{\textquotedblleft}{\textquotedblright}{\textquoteleft}{\textquoteright}
+
+\usepackage[backend=biber, style=ieee]{biblatex}
+\addbibresource{references.bib}
+
+% IZTECH Bibliography Spacing Rules
+\AtBeginBibliography{\singlespacing}
+\setlength{\bibitemsep}{1.5\baselineskip}
+
+% --- Thesis Information ---
+\thesistitle{Secure Inference in Large Language Models Using Homomorphic Encryption}
+\thesistitleTR{Homomorfik Şifreleme Kullanarak Büyük Dil Modellerinde Güvenli Çıkarım}
+\authorname{Gökay}
+\authorsurname{Gülsoy}
+\department{Computer Engineering}
+\degree{Master of Science}
+\submissiondate{[Month] 2026}
+\examdate{[Day] [Month] 2026}
+
+% --- Committee Information ---
+\setmemberone{TITLE Name LASTNAME}{Computer Engineering, IZTECH}
+\setmembertwo{TITLE Name LASTNAME}{Computer Engineering, IZTECH}
+\setmemberthree{TITLE Name LASTNAME}{Computer Engineering, Ege University}
+\setmemberfour{TITLE Name LASTNAME}{Computer Engineering, IZTECH} 
+\setmemberfive{TITLE Name LASTNAME}{Computer Engineering, IZTECH} 
+
+\supervisor{Prof. Dr. Supervisor Name}{Computer Engineering, IZTECH}
+\cosupervisor{Co-Supervisor, Name of the Department}{Institution/University} 
+\headofdept{Prof. Dr. Head Name}
+\dean{Prof. Dr. Dean Name}
+
+\begin{document}
+\selectlanguage{english}
+
+% --- Preliminary Pages (Roman Numerals) ---
+\pagenumbering{roman}
+
+\maketitle 
+\setcounter{page}{2}
+\makeapprovalpage
+
+% --- Frontmatter Inclusions (order per IZTECH guide Section 3) ---
+\input{frontmatter/acknowledgments} % injects acknowledgments
+\input{frontmatter/abstract} % injects abstract
+\input{frontmatter/ozet} % injects özet
+
+% --- Tables of Contents and Lists ---
+\tableofcontents
+\listoffigures
+\listoftables
+\input{frontmatter/abbreviations} % injects list of abbreviations
+\input{frontmatter/symbols} % injects list of symbols
+\clearpage
+
+% --- Main Body (Arabic Numerals) ---
+\pagenumbering{arabic}
+
+\input{chapters/1_introduction}
+\input{chapters/2_background}
+\input{chapters/3_methodology}
+\input{chapters/4_results}
+\input{chapters/5_conclusion}
+
+% --- References ---
+\clearpage
+\addcontentsline{toc}{chapter}{REFERENCES}
+\chapter*{REFERENCES} 
+\nocite{*} 
+\printbibliography[heading=none] 
+
+% --- Appendices ---
+\appendix
+\chapter{FORMAT OF DISKETTES/CD CONTAINING COMPUTER SOFTWARE}
+% You can move these appendices into their own files later too! (e.g., \input{appendices/app_a})
+This is the text for Appendix A. 
+
+\chapter{THE MATERIALS WHICH WILL BE ADMITTED TO THE GRADUATE SCHOOL}
+This is the text for Appendix B. 
+
+\end{document}

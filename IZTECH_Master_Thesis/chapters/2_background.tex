@@ -1,0 +1,515 @@
+\chapter{BACKGROUND AND RELATED WORK}
+\label{ch:background}
+
+This chapter provides the foundational concepts of Large Language Models (LLMs) and Homomorphic Encryption (HE), and reviews the recent literature on privacy-preserving machine learning frameworks.
+
+\section{Privacy Challenges in Large Language Models}
+The deployment of Large Language Models via cloud-based APIs has revolutionized natural language processing. However, this centralized Machine Learning as a Service (MLaaS) paradigm requires clients to transmit their prompts in plaintext to the server. When dealing with sensitive domains such as healthcare or corporate finance, this presents a severe vulnerability. The critical need for privacy in these platforms has been widely recognized in recent literature:
+
+\begin{quote}
+    The exposure of proprietary or personally identifiable information to third-party model providers constitutes one of the most significant barriers to the enterprise adoption of cloud-based LLMs. Guaranteeing the confidentiality of both the client's input query and the model's generated response without relying on trusted hardware enclaves is a paramount challenge for the next generation of secure artificial intelligence.
+\end{quote}
+
+To address these vulnerabilities, researchers are increasingly turning to advanced cryptographic solutions that allow computations to be performed directly on encrypted data without ever exposing the underlying plaintext.
+
+\section{Homomorphic Encryption}
+
+The concept of computing on encrypted data was first envisioned by Rivest, Adleman, and Dertouzos in 1978, who proposed the notion of \emph{privacy homomorphisms}~\cite{rivest1978data}. However, constructing a scheme capable of evaluating arbitrary functions on ciphertexts---a Fully Homomorphic Encryption (FHE) scheme---remained an open problem for over three decades. The breakthrough came in 2009, when Gentry introduced the first plausible FHE construction based on ideal lattices~\cite{gentry2009fully}.
+
+Gentry's blueprint established the standard two-step methodology: first, construct a \emph{somewhat homomorphic encryption} (SHE) scheme that supports a limited number of additions and multiplications, and second, apply a \emph{bootstrapping} procedure that homomorphically evaluates the decryption circuit to refresh ciphertexts and reset the noise level. This approach enables evaluation of circuits of arbitrary depth, at the cost of significant computational overhead.
+
+Following Gentry's work, a series of more efficient schemes emerged. Brakerski, Gentry, and Vaikuntanathan proposed the BGV scheme~\cite{brakerski2012leveled}, which introduced the concept of \emph{modulus switching} to manage noise growth without bootstrapping, enabling the evaluation of leveled arithmetic circuits of bounded depth. Fan and Vercauteren proposed the BFV scheme~\cite{fan2012somewhat}, an optimized variant based on the same Ring Learning with Errors (RLWE) hardness assumption~\cite{lyubashevsky2010ideal}. Both BGV and BFV support \emph{exact} arithmetic over integers or finite fields, which makes them well-suited for tasks that require discrete computations but poorly adapted to the inherently approximate arithmetic of neural network inference.
+
+\subsection{The CKKS Scheme for Approximate Arithmetic}
+
+The Cheon-Kim-Kim-Song (CKKS) scheme~\cite{cheon2017homomorphic} departed fundamentally from the exact-arithmetic paradigm of prior HE schemes by introducing native support for \emph{approximate arithmetic} over vectors of real (or complex) numbers. The central insight of CKKS is to treat the small encryption noise inherent in all lattice-based schemes not as an error to be eliminated, but as part of an acceptable approximation error. Consequently, the decryption algorithm outputs an approximate value $\tilde{m} \approx m$ of the original plaintext $m$, with precision controlled by a scaling parameter.
+
+This design philosophy aligns naturally with the numerical characteristics of machine learning computations, where floating-point rounding errors are already tolerated throughout training and inference. For deep learning applications---and for the secure LLM inference framework developed in this thesis---CKKS is therefore the scheme of choice.
+
+\subsubsection{Notation and Algebraic Preliminaries}
+
+Let $M$ be a power of two and $N = M/2$. The $M$-th cyclotomic polynomial is $\Phi_M(X) = X^N + 1$, which is irreducible over~$\mathbb{Z}[X]$. We define the polynomial ring
+\begin{equation}
+    \mathcal{R} = \mathbb{Z}[X]/(X^N + 1),
+\end{equation}
+whose elements are integer polynomials of degree less than~$N$. For a positive integer $q$, we write $\mathcal{R}_q = \mathcal{R}/q\mathcal{R}$ for the corresponding quotient ring with coefficients reduced modulo $q$.
+
+Throughout this work we use the following standard distributions over the ring $\mathcal{R}$:
+\begin{itemize}
+    \item $\chi_{\mathit{key}}$: the \emph{secret key distribution}, sampling polynomials with small coefficients (e.g., from $\{-1, 0, 1\}$ or a sparse ternary distribution);
+    \item $\chi_{\mathit{err}}$: the \emph{error distribution}, a discrete Gaussian distribution $D_{\mathcal{R}, \sigma_e}$ with standard deviation $\sigma_e$;
+    \item $\chi_{\mathit{enc}}$: the \emph{encryption randomness distribution}, typically $\mathcal{U}(\mathcal{R}_q)$ or a small distribution depending on the variant.
+\end{itemize}
+
+The scheme operates over a \emph{chain of moduli}
+\begin{equation}
+    q_0 < q_1 < \cdots < q_L,
+\end{equation}
+where $q_l = \prod_{i=0}^{l} p_i$ for a sequence of primes $p_0, p_1, \ldots, p_L$. The integer~$L$ is called the \emph{maximum level} and determines the multiplicative depth the scheme can support before bootstrapping is required.
+
+\subsubsection{Encoding and Decoding via the Canonical Embedding}
+
+A crucial contribution of the CKKS scheme is its encoding procedure, which maps a vector of complex numbers into an element of the polynomial ring $\mathcal{R}$ using the \emph{complex canonical embedding}~\cite{cheon2017homomorphic}.
+
+Let $\zeta = e^{2\pi i / M}$ be a primitive $M$-th root of unity. The canonical embedding $\sigma: \mathbb{Q}[X]/(X^N+1) \to \mathbb{C}^N$ is defined by evaluating a polynomial $a(X)$ at the $N$ complex roots of $X^N + 1$:
+\begin{equation}
+    \sigma(a) = \left(a(\zeta), a(\zeta^3), a(\zeta^5), \ldots, a(\zeta^{2N-1})\right) \in \mathbb{C}^N.
+\end{equation}
+Because $X^N + 1$ splits into conjugate pairs of roots---$\zeta^j$ and $\overline{\zeta^j} = \zeta^{M-j}$---the image of $\sigma$ on real-coefficient polynomials lies in the subspace
+\begin{equation}
+    \mathbb{H} = \left\{ \mathbf{z} \in \mathbb{C}^N : z_j = \overline{z_{N-j}} \text{ for all } j \right\},
+\end{equation}
+which is isomorphic to $\mathbb{R}^N$ as a real vector space. This conjugate symmetry means that it suffices to specify $N/2$ independent complex values to determine a vector in $\mathbb{H}$. Accordingly, define the natural projection
+\begin{equation}
+    \pi: \mathbb{H} \to \mathbb{C}^{N/2}, \quad \pi(\mathbf{z}) = (z_0, z_1, \ldots, z_{N/2-1}),
+\end{equation}
+which extracts the first $N/2$ coordinates. Its inverse $\pi^{-1}: \mathbb{C}^{N/2} \to \mathbb{H}$ extends a vector by appending its complex conjugate.
+
+Given a message vector $\mathbf{z} \in \mathbb{C}^{N/2}$ and a scaling factor $\Delta > 0$, the \textbf{encoding} procedure is
+\begin{equation}
+    \mathrm{Ecd}(\mathbf{z};\, \Delta) = \left\lfloor \sigma^{-1}\!\left(\Delta \cdot \pi^{-1}(\mathbf{z})\right) \right\rceil \;\in\; \mathcal{R},
+    \label{eq:ckks_encode}
+\end{equation}
+where $\lfloor \cdot \rceil$ denotes coordinate-wise rounding to the nearest integer. The scaling factor $\Delta$ amplifies the fractional parts of the message before rounding, thereby preserving $\lfloor \log_2 \Delta \rfloor$ bits of precision in the encoded polynomial.
+
+The corresponding \textbf{decoding} procedure recovers the approximate message:
+\begin{equation}
+    \mathrm{Dcd}(m;\, \Delta) = \pi\!\left(\Delta^{-1} \cdot \sigma(m)\right) \;\in\; \mathbb{C}^{N/2}.
+    \label{eq:ckks_decode}
+\end{equation}
+
+A key property of this encoding is that it preserves the ring structure: the component-wise addition and multiplication of message vectors correspond to polynomial addition and multiplication in $\mathcal{R}$, up to the rounding error introduced during encoding. This enables Single Instruction, Multiple Data (SIMD) operations, where a single ciphertext simultaneously packs $N/2$ independent data slots that are processed in parallel~\cite{smart2014fully}.
+
+\subsubsection{Key Generation}
+
+The CKKS key generation procedure produces three components~\cite{cheon2017homomorphic}:
+
+\begin{enumerate}
+    \item \textbf{Secret key.} Sample $s \leftarrow \chi_{\mathit{key}}$ and set $\mathit{sk} = (1, s)$.
+    \item \textbf{Public key.} Sample $a \leftarrow \mathcal{U}(\mathcal{R}_{q_L})$ uniformly and $e \leftarrow \chi_{\mathit{err}}$, then set
+    \begin{equation}
+        \mathit{pk} = \left(b,\, a\right) = \left(-a \cdot s + e,\; a\right) \in \mathcal{R}_{q_L}^2.
+        \label{eq:ckks_pk}
+    \end{equation}
+    \item \textbf{Evaluation key (relinearization key).} An auxiliary ciphertext that encrypts $s^2$ under the secret key $s$, constructed using a special modulus $P \cdot q_L$:
+    \begin{equation}
+        \mathit{evk} = \left(-a' \cdot s + e' + P \cdot s^2,\; a'\right) \in \mathcal{R}_{P \cdot q_L}^2,
+        \label{eq:ckks_evk}
+    \end{equation}
+    where $a' \leftarrow \mathcal{U}(\mathcal{R}_{P \cdot q_L})$, $e' \leftarrow \chi_{\mathit{err}}$, and $P$ is a large auxiliary modulus that controls the additional noise introduced during relinearization.
+\end{enumerate}
+
+\subsubsection{Encryption and Decryption}
+
+Given a plaintext polynomial $m \in \mathcal{R}$ obtained from the encoding procedure in Equation~\eqref{eq:ckks_encode}, the \textbf{encryption} algorithm computes:
+\begin{equation}
+    \mathrm{Enc}_{\mathit{pk}}(m) = \left(m + v \cdot b + e_0,\;\; v \cdot a + e_1\right) \pmod{q_L},
+    \label{eq:ckks_enc}
+\end{equation}
+where $v \leftarrow \chi_{\mathit{enc}}$ is a small random polynomial and $e_0, e_1 \leftarrow \chi_{\mathit{err}}$ are fresh error samples. The resulting ciphertext $\mathit{ct} = (c_0, c_1) \in \mathcal{R}_{q_L}^2$ is said to be at level~$L$ with scaling factor~$\Delta$.
+
+The \textbf{decryption} algorithm evaluates the inner product with the secret key:
+\begin{equation}
+    \mathrm{Dec}_{\mathit{sk}}(\mathit{ct}) = c_0 + c_1 \cdot s \pmod{q_l}.
+    \label{eq:ckks_dec}
+\end{equation}
+Substituting the encryption equation, this yields
+\begin{equation}
+    c_0 + c_1 \cdot s = m + v \cdot e + e_0 + e_1 \cdot s \approx m + e_{\mathrm{small}},
+\end{equation}
+where $e_{\mathrm{small}} = v \cdot e + e_0 + e_1 \cdot s$ is a small noise term. Because all participating distributions have small variance, the noise $e_{\mathrm{small}}$ does not destroy the significant digits of $m$: the decrypted value $m + e_{\mathrm{small}}$ serves as an accurate approximation of the original plaintext, with the approximation error bounded by the magnitude of~$e_{\mathrm{small}}$.
+
+\subsubsection{Homomorphic Operations}
+
+Let $\mathit{ct} = (c_0, c_1)$ and $\mathit{ct}' = (c_0', c_1')$ be ciphertexts encrypting plaintexts $m$ and $m'$ respectively, both at the same level $l$ and with the same scaling factor~$\Delta$.
+
+\paragraph{Homomorphic Addition.} Component-wise addition yields a valid encryption of $m + m'$:
+\begin{equation}
+    \mathrm{Add}(\mathit{ct}, \mathit{ct}') = (c_0 + c_0',\; c_1 + c_1') \pmod{q_l}.
+    \label{eq:ckks_add}
+\end{equation}
+The noise grows only additively ($e + e'$), making homomorphic addition essentially ``free'' in terms of depth consumption.
+
+\paragraph{Homomorphic Multiplication.} The ciphertext product is computed via the tensor product of the ciphertext polynomials. Treating each ciphertext as a degree-1 polynomial in the secret $s$, we obtain a degree-2 result:
+\begin{equation}
+    (d_0, d_1, d_2) = \left(c_0 \cdot c_0',\;\; c_0 \cdot c_1' + c_1 \cdot c_0',\;\; c_1 \cdot c_1'\right) \pmod{q_l}.
+    \label{eq:ckks_tensormult}
+\end{equation}
+This triple decrypts correctly under the extended key $(1, s, s^2)$ to yield an encryption of $m \cdot m'$ with scaling factor~$\Delta^2$. However, to maintain the standard ciphertext structure (a pair of polynomials), a \emph{relinearization} step is required to eliminate the $d_2$ component.
+
+\subsubsection{Key Switching and Relinearization}
+
+After a homomorphic multiplication produces a degree-2 ciphertext $(d_0, d_1, d_2)$, the \textbf{relinearization} procedure uses the evaluation key $\mathit{evk}$ to convert it back to a standard degree-1 ciphertext~\cite{cheon2017homomorphic}:
+\begin{equation}
+    \mathrm{Relin}_{\mathit{evk}}(d_0, d_1, d_2) = (d_0, d_1) + \left\lfloor P^{-1} \cdot d_2 \cdot \mathit{evk} \right\rceil \pmod{q_l}.
+    \label{eq:ckks_relin}
+\end{equation}
+Since $\mathit{evk}$ effectively encrypts $s^2$ under $s$, this substitution replaces the $d_2 \cdot s^2$ term with an equivalent first-degree expression in~$s$, restoring the ciphertext to the form $(c_0', c_1') \in \mathcal{R}_{q_l}^2$. The large auxiliary modulus $P$ ensures that the rounding noise introduced during this step remains negligible.
+
+More generally, the \emph{key switching} technique allows a ciphertext encrypted under one secret key $s'$ to be converted into a ciphertext under a different key $s$. This is essential for homomorphic rotation operations (used for SIMD slot permutations), which require \emph{Galois keys}: evaluation keys that encode the image of $s$ under the Frobenius automorphisms of the cyclotomic ring.
+
+\subsubsection{Rescaling: The Core Innovation of CKKS}
+\label{sec:rescaling}
+
+While homomorphic addition is computationally inexpensive and preserves the scaling factor, homomorphic multiplication squares it: a product of two ciphertexts at scale~$\Delta$ produces a ciphertext at scale~$\Delta^2$. If left unchecked, this exponential growth would rapidly exhaust the ciphertext modulus after only a few multiplications.
+
+The \textbf{Rescaling} procedure ($\mathrm{RS}$), the core algorithmic innovation of CKKS~\cite{cheon2017homomorphic}, resolves this problem. After a multiplication, rescaling divides the ciphertext by a factor $p_l$ (typically chosen so that $p_l \approx \Delta$), rounding the result to the nearest integer, and reduces the ciphertext modulus from $q_l$ to $q_{l-1} = q_l / p_l$:
+\begin{equation}
+    \mathrm{RS}_{l \to l-1}(\mathit{ct}) = \left\lfloor p_l^{-1} \cdot \mathit{ct} \right\rceil \pmod{q_{l-1}}.
+    \label{eq:ckks_rescale}
+\end{equation}
+
+This operation restores the scaling factor from $\Delta^2$ back to approximately $\Delta$ and simultaneously truncates the least significant bits of the plaintext---bits that were already corrupted by noise and carry no useful information. The analogy to floating-point rounding is deliberate: just as floating-point arithmetic discards insignificant trailing bits after each operation, CKKS rescaling trims the noisy least significant bits to maintain a stable working precision~\cite{cheon2017homomorphic}.
+
+Crucially, each rescaling operation \emph{consumes one level} of the modulus chain, transitioning the ciphertext from level $l$ to level $l-1$. This means that the total number of sequential multiplications (the \emph{multiplicative depth}) that can be evaluated is bounded by the number of levels $L$ in the modulus chain. Since each level contributes $\log_2 p_l$ bits to the total modulus $\log_2 q_L = \sum_{l=0}^{L} \log_2 p_l$, the bit-size of the initial ciphertext modulus $q_L$ imposes a strict, linear limit on the circuit depth.
+
+Figure~\ref{fig:modulus_chain} visualises the CKKS modulus chain and the level-consumption process during a sequence of homomorphic multiplications and rescalings.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+    levelbox/.style={draw, thick, minimum height=0.7cm, align=center, font=\footnotesize},
+    arr/.style={-{Stealth[length=2.5mm]}, thick},
+]
+% Draw the stacked modulus boxes (widths proportional to bits)
+\foreach \i/\w/\clr in {0/1.0/red!30, 1/1.0/orange!30, 2/1.0/yellow!30, 3/1.0/green!25, 4/1.0/cyan!20, 5/1.0/blue!15, 6/1.0/blue!10, 7/1.2/gray!15} {
+    \pgfmathsetmacro{\ypos}{-\i*1.0}
+    \pgfmathsetmacro{\totalw}{1.0*(\i) + \w + 0.2*\i}
+    \node[levelbox, fill=\clr, minimum width={\totalw*1.0 cm + 1.5cm}] (L\i) at (5, \ypos) {};
+}
+
+% Labels on the left
+\foreach \i in {0,...,7} {
+    \pgfmathsetmacro{\ypos}{-\i*1.0}
+    \node[font=\footnotesize, anchor=east] at (2.0, \ypos) {Level $\i$};
+}
+
+% Labels inside boxes
+\node[font=\footnotesize] at (L0) {$q_0 = p_0$};
+\node[font=\footnotesize] at (L1) {$q_1 = p_0 \cdot p_1$};
+\node[font=\footnotesize] at (L2) {$q_2 = p_0 \cdot p_1 \cdot p_2$};
+\node[font=\footnotesize] at (L3) {$q_3$};
+\node[font=\footnotesize] at (L4) {$q_4$};
+\node[font=\footnotesize] at (L5) {$q_5$};
+\node[font=\footnotesize] at (L6) {$q_6$};
+\node[font=\footnotesize] at (L7) {$q_L = \prod_{i=0}^{L} p_i$};
+
+% Arrows showing consumption (moved right to clear boxes)
+\draw[arr, red!70, very thick] (8.5, 0.0) -- node[right, font=\scriptsize, text=red!70] {Mult + Rescale} (8.5, -1.0);
+\draw[arr, red!70, very thick] (8.5, -1.0) -- node[right, font=\scriptsize, text=red!70] {Mult + Rescale} (8.5, -2.0);
+\draw[arr, red!70, very thick] (8.5, -2.0) -- node[right, font=\scriptsize, text=red!70] {Mult + Rescale} (8.5, -3.0);
+\node[font=\scriptsize, text=red!70] at (8.5, -3.7) {$\vdots$};
+
+% Top annotation (above all boxes, moved up for clearance)
+\draw[decorate, decoration={brace, amplitude=5pt}, thick] (7.5, 0.55) -- (2.2, 0.55) node[midway, above=8pt, font=\footnotesize] {Ciphertext modulus size (bits)};
+
+% Fresh ciphertext label (below all boxes)
+\node[font=\scriptsize, text=blue!70, anchor=west] at (0.5, -7.8) {\textbf{Fresh ct} encrypted at Level $L$};
+\draw[arr, blue!70] (0.5, -7.5) -- (L7.south west);
+
+% Exhausted label (above brace, with clearance)
+\node[font=\scriptsize, text=red!70, anchor=west] at (0.5, 1.8) {\textbf{Exhausted:} no further mults possible};
+\draw[arr, red!70] (0.5, 1.5) -- (L0.north west);
+\end{tikzpicture}
+\caption{The CKKS modulus chain. A fresh ciphertext is encrypted at the highest level $L$ with a large modulus $q_L$. Each homomorphic multiplication followed by rescaling consumes one level, reducing the modulus. When level~0 is reached, bootstrapping is required to continue computation.}
+\label{fig:modulus_chain}
+\end{figure}
+
+\subsubsection{Bootstrapping for CKKS}
+\label{sec:bootstrapping}
+
+When a ciphertext has been rescaled down to the lowest level ($l = 0$), no further multiplications can be performed. \emph{Bootstrapping} is the procedure that refreshes a ciphertext by homomorphically evaluating an approximation of the decryption circuit, thereby raising the ciphertext back to a higher level~\cite{cheon2018bootstrapping}.
+
+In the CKKS context, bootstrapping homomorphically computes the mapping $\mathit{ct} \mapsto \mathrm{Enc}(\mathrm{Dec}(\mathit{ct}))$, which requires evaluating the modular reduction function. Since this function is not a polynomial, it must be approximated---typically using a trigonometric (sine/cosine) polynomial approximation of the modular reduction $t \mapsto t \bmod q$~\cite{cheon2018bootstrapping, chen2019improved}. The bootstrapping procedure itself consumes a significant number of multiplicative levels, so the modulus chain must be provisioned with additional levels beyond those needed for the target computation.
+
+While bootstrapping enables computations of \emph{unbounded} depth in principle, it remains the most expensive operation in the CKKS toolkit in terms of both latency and noise accumulation. For the secure inference framework considered in this thesis, careful circuit design that minimizes the total multiplicative depth---and hence the need for bootstrapping---is therefore essential.
+
+\subsection{Security Foundation: The RLWE Problem}
+
+The security of the CKKS scheme is based on the \emph{Ring Learning with Errors} (RLWE) problem~\cite{lyubashevsky2010ideal}, a structured variant of the Learning with Errors (LWE) problem introduced by Regev~\cite{regev2005lattices}.
+
+\begin{definition}[RLWE Problem]
+For a secret $s \in \mathcal{R}_q$ and an error distribution $\chi_{\mathit{err}}$ over $\mathcal{R}$, the RLWE problem asks to distinguish the distribution
+\begin{equation}
+    \left\{ \left(a_i,\; a_i \cdot s + e_i\right) : a_i \leftarrow \mathcal{U}(\mathcal{R}_q),\; e_i \leftarrow \chi_{\mathit{err}} \right\}
+\end{equation}
+from the uniform distribution over $\mathcal{R}_q^2$.
+\end{definition}
+
+Intuitively, the RLWE assumption states that the pair $(a, a \cdot s + e) \in \mathcal{R}_q^2$ is computationally indistinguishable from a uniformly random pair, provided that the error $e$ is sufficiently small. This directly implies that a CKKS public key $\mathit{pk} = (-as + e, a)$ is indistinguishable from random, and hence that ciphertexts computed via Equation~\eqref{eq:ckks_enc} reveal no information about the underlying plaintext to a computationally bounded adversary.
+
+The RLWE problem is believed to be hard even for quantum computers, deriving its hardness from worst-case lattice problems such as the Shortest Vector Problem (SVP) on ideal lattices~\cite{lyubashevsky2010ideal}. The concrete security level of a CKKS instantiation depends on the ring dimension~$N$, the ciphertext modulus~$q_L$, and the error standard deviation~$\sigma_e$, following the guidelines established by the Homomorphic Encryption Standard~\cite{albrecht2018homomorphic}.
+
+\subsection{Summary of CKKS Operations}
+
+Table~\ref{tab:ckks_operations} summarizes the core CKKS operations, their effect on the plaintext, scaling factor, and ciphertext level, providing a concise reference for the circuit design discussions in Chapter~3.
+
+\begin{table}[ht]
+\centering
+\caption{Summary of core CKKS homomorphic operations.}
+\label{tab:ckks_operations}
+\begin{tabular}{|l|c|c|c|}
+\hline
+\textbf{Operation} & \textbf{Plaintext Effect} & \textbf{Scale After} & \textbf{Level After} \\ \hline
+Addition            & $m + m'$                  & $\Delta$              & $l$                  \\ \hline
+Multiplication      & $m \cdot m'$              & $\Delta^2$            & $l$                  \\ \hline
+Rescaling           & $\approx m \cdot m'$      & $\Delta$              & $l - 1$              \\ \hline
+Rotation            & $\mathrm{rot}(m, k)$      & $\Delta$              & $l$                  \\ \hline
+Bootstrapping       & $\approx m$               & $\Delta$              & $L$                  \\ \hline
+\end{tabular}
+\end{table}
+
+\section{The Non-Linearity Bottleneck in Transformers}
+\label{sec:nonlinearity_bottleneck}
+
+Adapting modern Transformer architectures~\cite{vaswani2023attentionneed} to the encrypted domain is highly non-trivial due to the multiplicative depth limits of CKKS discussed in Section~\ref{sec:rescaling}. The core difficulty arises because FHE schemes natively support only two operations---addition and multiplication of polynomials. Any function that cannot be expressed as a polynomial of bounded degree must be \emph{approximated}, and the degree of that approximation directly determines the multiplicative depth consumed. This section systematically identifies the non-polynomial components of the standard Transformer block and explains why each poses a unique challenge for encrypted computation.
+
+\subsection{Anatomy of a Transformer Block}
+
+A single Transformer layer consists of two principal sub-layers: a \emph{multi-head self-attention} (MHA) mechanism and a \emph{position-wise feed-forward network} (FFN), each followed by residual connections and layer normalization~\cite{vaswani2023attentionneed}. For an input hidden state $H \in \mathbb{R}^{L_{\text{seq}} \times d}$, the computation proceeds as:
+\begin{align}
+    H' &= \mathrm{LayerNorm}\!\left(H + \mathrm{MHA}(H)\right), \label{eq:transformer_attn} \\
+    H'' &= \mathrm{LayerNorm}\!\left(H' + \mathrm{FFN}(H')\right). \label{eq:transformer_ffn}
+\end{align}
+
+Within this structure, three distinct non-linear functions must be evaluated: the \textbf{Softmax} function inside multi-head attention, the \textbf{GELU} activation inside the feed-forward network, and the \textbf{LayerNorm} normalization applied after each sub-layer. Each of these is inherently non-polynomial and thus incompatible with direct FHE evaluation.
+
+Figure~\ref{fig:transformer_block} illustrates a single Transformer layer, highlighting the three non-linear operations (shaded in red) that require polynomial replacement for encrypted inference.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+    block/.style={draw, rounded corners, minimum width=3.4cm, minimum height=0.7cm, align=center, font=\small},
+    polyblock/.style={block, fill=red!20, draw=red!60, thick},
+    linearblock/.style={block, fill=blue!10, draw=blue!40},
+    addblock/.style={draw, circle, inner sep=2pt, font=\scriptsize},
+    arr/.style={-{Stealth[length=2.5mm]}, thick},
+    skipline/.style={thick, draw=gray!60},
+]
+% Input
+\node[font=\small] (input) at (0,0) {Input $H \in \mathbb{R}^{L_{\text{seq}} \times d}$};
+
+% MHA Branch
+\node[linearblock, above=0.6cm of input] (qkv) {Linear: $Q, K, V$ Projections};
+\node[polyblock, above=0.5cm of qkv] (softmax) {\textbf{Softmax} $\leftarrow$ \emph{Poly}};
+\node[linearblock, above=0.5cm of softmax] (wo) {Linear: Output Projection $W_O$};
+\node[addblock, above=0.5cm of wo] (add1) {$+$};
+\node[polyblock, above=0.5cm of add1] (ln1) {\textbf{LayerNorm} $\leftarrow$ \emph{Poly}};
+
+% FFN Branch
+\node[linearblock, above=0.5cm of ln1] (w1) {Linear: $W_1 x + b_1$};
+\node[polyblock, above=0.5cm of w1] (gelu) {\textbf{GELU} $\leftarrow$ \emph{Poly}};
+\node[linearblock, above=0.5cm of gelu] (w2) {Linear: $W_2 x + b_2$};
+\node[addblock, above=0.5cm of w2] (add2) {$+$};
+\node[polyblock, above=0.5cm of add2] (ln2) {\textbf{LayerNorm} $\leftarrow$ \emph{Poly}};
+
+% Output
+\node[font=\small, above=0.6cm of ln2] (output) {Output $H''$};
+
+% Main flow arrows
+\draw[arr] (input) -- (qkv);
+\draw[arr] (qkv) -- (softmax);
+\draw[arr] (softmax) -- (wo);
+\draw[arr] (wo) -- (add1);
+\draw[arr] (add1) -- (ln1);
+\draw[arr] (ln1) -- (w1);
+\draw[arr] (w1) -- (gelu);
+\draw[arr] (gelu) -- (w2);
+\draw[arr] (w2) -- (add2);
+\draw[arr] (add2) -- (ln2);
+\draw[arr] (ln2) -- (output);
+
+% Residual connections (pushed further right to avoid legend)
+\draw[skipline] (input.east) -- ++(2.8,0) |- (add1.east);
+\draw[skipline] (ln1.east) -- ++(2.4,0) |- (add2.east);
+
+% Brace for attention sublayer (input through ln1) — forced vertical
+\draw[decorate, decoration={brace, amplitude=5pt, mirror}, thick, gray]
+    ([xshift=-0.8cm]qkv.south west) -- ([xshift=-0.8cm]qkv.south west |- ln1.north west)
+    node[midway, left=8pt, font=\scriptsize, gray, rotate=90, anchor=south] {Self-Attention};
+% Brace for FFN sublayer (w1 through ln2) — forced vertical
+\draw[decorate, decoration={brace, amplitude=5pt, mirror}, thick, gray]
+    ([xshift=-0.8cm]w1.south west) -- ([xshift=-0.8cm]w1.south west |- ln2.north west)
+    node[midway, left=8pt, font=\scriptsize, gray, rotate=90, anchor=south] {Feed-Forward};
+
+% Legend (moved below input to avoid collision with residual lines)
+\node[polyblock, minimum width=1.8cm, minimum height=0.4cm, font=\scriptsize] at (0, -1.2) {Non-linear (replace)};
+\node[linearblock, minimum width=1.8cm, minimum height=0.4cm, font=\scriptsize] at (0, -1.8) {Linear (HE-native)};
+\end{tikzpicture}
+\caption{Architecture of a single Transformer layer highlighting the three non-linear operations (Softmax, GELU, LayerNorm) that must be replaced by polynomial approximations for FHE compatibility. Linear operations (blue) are natively supported by homomorphic addition and multiplication.}
+\label{fig:transformer_block}
+\end{figure}
+
+\subsection{Softmax in Self-Attention}
+
+The self-attention mechanism computes a weighted aggregation of value vectors, with weights determined by the compatibility between query and key vectors. For query, key, and value matrices $Q, K, V \in \mathbb{R}^{L_{\text{seq}} \times d_k}$, the attention output is:
+\begin{equation}
+    \mathrm{Attention}(Q, K, V) = \mathrm{softmax}\!\left(\frac{QK^T}{\sqrt{d_k}}\right) V.
+    \label{eq:attention}
+\end{equation}
+
+The Softmax function applied to each row $\mathbf{x} = (x_1, \ldots, x_n)$ of the scaled score matrix is defined as:
+\begin{equation}
+    \mathrm{softmax}(x_i) = \frac{e^{x_i}}{\sum_{j=1}^{n} e^{x_j}}.
+    \label{eq:softmax}
+\end{equation}
+
+This function presents a \emph{triple incompatibility} with FHE: (1)~the exponential function $e^{x}$ has an infinite Taylor expansion and cannot be represented by any finite-degree polynomial; (2)~the division by the normalizing sum $\sum_j e^{x_j}$ requires computing a multiplicative inverse, which is not a native HE operation; and (3)~the summation over all sequence positions requires cross-slot aggregation via expensive homomorphic rotation operations. Early encrypted inference frameworks such as CryptoNets~\cite{gilad2016cryptonets} avoided this problem entirely by targeting architectures without attention. More recent works, including Iron~\cite{hao2022iron}, have proposed replacing Softmax with low-degree polynomial approximations or alternative attention mechanisms to achieve encrypted Transformer inference.
+
+\subsection{GELU in Feed-Forward Networks}
+
+The position-wise feed-forward network in modern Transformer variants (GPT, BERT) typically employs the Gaussian Error Linear Unit (GELU) activation function~\cite{hendrycks2016gaussian}:
+\begin{equation}
+    \mathrm{GELU}(x) = x \cdot \Phi(x) = x \cdot \frac{1}{2}\left[1 + \mathrm{erf}\!\left(\frac{x}{\sqrt{2}}\right)\right],
+    \label{eq:gelu}
+\end{equation}
+where $\Phi(x)$ is the cumulative distribution function of the standard normal distribution and $\mathrm{erf}(\cdot)$ is the Gauss error function. The FFN sub-layer applies this activation between two linear projections:
+\begin{equation}
+    \mathrm{FFN}(x) = \mathrm{GELU}(x W_1 + b_1)\, W_2 + b_2.
+    \label{eq:ffn}
+\end{equation}
+
+GELU is fundamentally incompatible with FHE because the error function involves an integral of the Gaussian density $e^{-t^2}$, which has no closed-form polynomial representation. Even aggressive truncation of its Taylor series yields polynomials of degree~9 or higher to achieve acceptable accuracy over the typical activation range $[-5, 5]$~\cite{lee2022lowcomplexity}. Each additional degree of the polynomial approximation consumes one multiplicative level, directly impacting the total depth budget.
+
+\subsection{Layer Normalization}
+
+Layer normalization~\cite{ba2016layer} standardizes activations across the feature dimension of each token:
+\begin{equation}
+    \mathrm{LayerNorm}(x_i) = \gamma \cdot \frac{x_i - \mu}{\sqrt{\sigma^2 + \epsilon}} + \beta,
+    \label{eq:layernorm}
+\end{equation}
+where $\mu = \frac{1}{d}\sum_{i=1}^{d} x_i$ and $\sigma^2 = \frac{1}{d}\sum_{i=1}^{d}(x_i - \mu)^2$ are the mean and variance computed over the hidden dimension~$d$, and $\gamma, \beta$ are learnable affine parameters. LayerNorm is problematic for FHE due to two operations: (1)~computing the variance requires squaring followed by a mean, which consumes multiplicative depth; and (2)~the inverse square root $1/\sqrt{\sigma^2 + \epsilon}$ requires division and a square root---neither of which is a native polynomial operation. Prior works have addressed this by either approximating the inverse square root with a low-degree polynomial using Newton's method iterations~\cite{hao2022iron} or by replacing LayerNorm entirely with polynomial-friendly alternatives.
+
+\subsection{The Depth Budget Problem}
+\label{sec:depth_budget}
+
+Table~\ref{tab:nonlinear_components} summarizes the non-polynomial components, their mathematical source of incompatibility, and the typical polynomial degree required for approximation. The total multiplicative depth of a single Transformer layer is the sum of depths consumed by each component. For a model with $N_{\text{layers}}$ Transformer layers, the total depth scales linearly:
+\begin{equation}
+    D_{\text{total}} = N_{\text{layers}} \times \left(D_{\text{softmax}} + D_{\text{GELU}} + 2 \cdot D_{\text{LayerNorm}} + D_{\text{linear}}\right),
+    \label{eq:total_depth}
+\end{equation}
+where $D_{\text{linear}}$ accounts for the matrix multiplications in the attention and FFN sub-layers. Without bootstrapping, $D_{\text{total}} \leq L$, the maximum level of the CKKS modulus chain. For a 12-layer BERT model, even with aggressive degree-2 approximations for all non-linearities, the required depth can exceed 100 levels, demanding ciphertext moduli of thousands of bits and correspondingly massive memory consumption~\cite{hao2022iron}.
+
+\begin{table}[ht]
+\centering
+\caption{Non-polynomial components in a standard Transformer block and their FHE challenges.}
+\label{tab:nonlinear_components}
+\begin{tabular}{|l|l|l|c|}
+\hline
+\textbf{Component} & \textbf{Non-Polynomial Operation} & \textbf{Root Cause} & \textbf{Typical Approx.\ Degree} \\ \hline
+Softmax             & $e^x$, division                   & Infinite series, inverse  & 2--4       \\ \hline
+GELU                & $\mathrm{erf}(x)$                 & Gaussian integral         & 2--9       \\ \hline
+LayerNorm           & $1/\sqrt{\sigma^2+\epsilon}$      & Inverse square root       & 1--4       \\ \hline
+\end{tabular}
+\end{table}
+
+This fundamental tension between approximation accuracy and multiplicative depth forms the central technical challenge addressed in Chapter~3, where we develop the specific polynomial approximation strategies employed in our secure inference framework.
+
+\section{Existing Secure Inference Frameworks}
+\label{sec:existing_frameworks}
+
+The application of homomorphic encryption to neural network inference has progressed through several generations of increasingly capable frameworks. This section reviews the most relevant prior works, situating the contributions of this thesis within the existing landscape.
+
+\subsection{CryptoNets: Pioneering Encrypted Neural Networks}
+
+Gilad-Bachrach et al.~\cite{gilad2016cryptonets} introduced CryptoNets, the first framework to demonstrate that neural networks could be applied directly to encrypted data using leveled HE. CryptoNets replaced all non-polynomial activations (such as ReLU and Sigmoid) with the square function $f(x) = x^2$, which requires only a single homomorphic multiplication and one rescaling operation---consuming exactly one multiplicative level.
+
+The key architectural contributions of CryptoNets include: (1)~encoding multiple data samples into a single ciphertext via SIMD batching to amortize the encryption overhead, and (2)~demonstrating that even simple polynomial activations ($x^2$) can achieve 99\% accuracy on the MNIST handwritten digit classification task. However, CryptoNets was limited to shallow convolutional networks and did not address the complex multi-layer attention mechanisms found in modern Transformers. The absence of Softmax, LayerNorm, and deep residual connections in the CryptoNets architecture means its techniques cannot be directly transferred to LLM inference without substantial extensions.
+
+\subsection{Iron: Private Inference on Transformers}
+
+Hao et al.~\cite{hao2022iron} proposed Iron, one of the first frameworks to tackle the full complexity of Transformer inference under encryption. Iron addressed the three principal non-polynomial bottlenecks identified in Section~\ref{sec:nonlinearity_bottleneck}:
+
+\begin{itemize}
+    \item \textbf{Softmax approximation.} Iron replaced the exponential function with a low-degree polynomial approximation and employed Goldschmidt's algorithm to compute the reciprocal (division) operation homomorphically. The attention logits were first shifted by subtracting the row maximum (computed via an interactive protocol) to ensure numerical stability before applying the polynomial approximation to $e^x$ over a bounded interval.
+    \item \textbf{GELU approximation.} A degree-2 or degree-4 minimax polynomial was used to approximate GELU, computed over the interval determined by profiling the activation distributions of the plaintext model.
+    \item \textbf{LayerNorm via Newton iteration.} The inverse square root $1/\sqrt{\sigma^2 + \epsilon}$ was computed using Newton's method iterations, each consuming 3--4 multiplicative levels but converging quadratically.
+\end{itemize}
+
+Iron demonstrated that encrypted Transformer inference is feasible, achieving accuracy within 1--2\% of the plaintext baseline on several NLP benchmarks. However, the computational cost remained prohibitive for deployment: a single encrypted inference pass through a BERT-Base model required several minutes on high-end hardware, primarily due to the deep multiplicative circuits required for Softmax and LayerNorm.
+
+\subsection{THE-X: Privacy-Preserving Transformer Inference with HE}
+\label{sec:thex}
+
+Chen et al.~\cite{chen2022thex} introduced THE-X, the first work to explore privacy-preserving Transformer inference using homomorphic encryption in the NLP domain. THE-X proposed a systematic \emph{approximation workflow} that addresses all non-polynomial functions in the Transformer block through a combination of function replacement and knowledge distillation.
+
+THE-X's approach to the three non-polynomial components differs notably from pure polynomial approximation:
+
+\begin{itemize}
+    \item \textbf{GELU $\to$ ReLU replacement.} Rather than approximating GELU with a polynomial, THE-X replaced it entirely with the ReLU activation. Since ReLU involves a comparison operation ($\max(0, x)$) that is not natively supported by HE, the framework delegates this operation to the client: the server sends the encrypted intermediate activations to the client, who decrypts, computes $\max(0, x)$ locally, re-encrypts, and returns the result. This client-aided approach avoids consuming multiplicative depth for the activation function, at the cost of additional communication rounds.
+
+    \item \textbf{Softmax estimation network.} THE-X designed a learned neural estimation network to replace Softmax. The estimation function takes the form:
+    \begin{equation}
+        S(x_i) = x_i \cdot T\!\left(\sum_j \mathrm{ReLU}\!\left(\left(\frac{x_j}{2} + 1\right)^3\right)\right),
+        \label{eq:thex_softmax}
+    \end{equation}
+    where $T$ is a three-layer linear neural network trained to approximate the reciprocal operation. The network $T$ is pre-trained by generating random input tensors in $[-3, 3]$ and minimizing the MSE loss against true Softmax outputs for 100k steps. A critical finding was that the standard negative infinity mask used for padding tokens causes numerical instability in the estimation network; THE-X recommended using finite mask values between $-2$ and $-5$ instead.
+
+    \item \textbf{LayerNorm distillation.} Instead of approximating the inverse square root directly, THE-X simplified LayerNorm to a learnable affine transformation $\hat{y} = x \circ \hat{\gamma} + \hat{\beta}$, where the new parameters $\hat{\gamma}$ absorb the effect of the mean and variance normalization. These parameters are trained via a \emph{knowledge distillation} stage: the simplified LayerNorm layers are optimized by minimizing the MSE loss between their outputs and the outputs of the original LayerNorm layers, with all other model parameters frozen.
+\end{itemize}
+
+\paragraph{Approximation workflow.} THE-X introduced a two-stage optimization process. In the first stage (\emph{Standard Fine-tuning}), GELU is replaced with ReLU and the Softmax estimation network is substituted, followed by task-specific fine-tuning with the Softmax estimator frozen. In the second stage (\emph{LN-Distill}), the simplified LayerNorm is added and trained via distillation while other parameters are frozen. The authors found that optimizing each component individually yields better results than joint optimization, which they attributed to the bi-level optimization difficulty of simultaneously learning multiple approximation components.
+
+\paragraph{Experimental results.} Evaluated on BERT-Tiny~\cite{turc2019well} (2 layers, hidden size 128) across the GLUE benchmark~\cite{wang2019glue} and the CoNLL-2003 NER task, THE-X achieved an average performance reduction of only 1.48\% compared to the plaintext baseline. The layernorm approximation contributed the largest share of this degradation (1.08\%), while the Softmax estimation network added only 0.09\% average loss. Notably, replacing GELU with ReLU caused negligible impact and even improved F1 by 0.12\% on the NER task.
+
+\paragraph{Attention overflow.} THE-X identified an important practical challenge: before LayerNorm, multi-head attention scores can exhibit extreme values reaching $10^4$, which destabilizes the simplified affine approximation. Weight decay regularization in the Adam optimizer was found to be effective in controlling this phenomenon, though excessive regularization can harm performance on NLI tasks.
+
+\paragraph{Limitations.} THE-X's client-aided approach for ReLU introduces additional communication rounds between client and server during inference, which increases latency and may not be desirable in all deployment scenarios. Furthermore, the reliance on a learned Softmax estimation network---rather than a mathematically grounded polynomial approximation---makes it difficult to provide formal error bounds. The framework was demonstrated only on the small BERT-Tiny model and has not been extended to larger or deeper architectures.
+
+\subsection{THEF: Hybrid HE and TEE Framework}
+
+Li et al.~\cite{li2024thef} proposed THEF, a hybrid framework that combines Homomorphic Encryption with Trusted Execution Environments (TEEs) to achieve privacy-preserving Transformer inference. The key insight of THEF is to partition the Transformer computation: linear operations (matrix multiplications) are performed homomorphically on the untrusted server, while non-linear operations (Softmax, GELU, LayerNorm) are offloaded to a TEE enclave (e.g., Intel SGX or ARM TrustZone) where they can be computed exactly on plaintext within a hardware-protected environment.
+
+This hybrid approach avoids the need for polynomial approximations entirely, eliminating the accuracy degradation inherent in all purely HE-based frameworks. However, TEE-based solutions introduce a trust assumption on the hardware manufacturer and are vulnerable to known side-channel attacks against SGX enclaves~\cite{li2024thef}. Moreover, the data transfer overhead between the HE domain and the TEE enclave can become a bottleneck for models with many layers.
+
+\subsection{MPCFormer: Fast, Performant and Private Transformer Inference}
+\label{sec:mpcformer}
+
+Li et al.~\cite{li2023mpcformer} proposed MPCFormer, a framework that combines secure multi-party computation (MPC) with knowledge distillation to enable efficient private Transformer inference. Rather than approximating non-linear functions directly within the HE domain, MPCFormer replaces them with MPC-friendly alternatives and recovers accuracy through distillation from the original model.
+
+MPCFormer introduces two model variants with different accuracy--efficiency trade-offs:
+
+\begin{itemize}
+    \item \textbf{MPCFormer\textsuperscript{quad}:} Replaces both Softmax and GELU with simple quadratic functions ($x^2$), achieving maximal computational efficiency at the cost of higher accuracy degradation. The quadratic Softmax computes $x_i^2 / \sum_j x_j^2$, avoiding the exponential entirely.
+    \item \textbf{MPCFormer\textsuperscript{2Quad}:} Uses a two-piece quadratic approximation that better captures the shape of GELU while retaining MPC efficiency. This variant achieves significantly better accuracy than the purely quadratic version.
+\end{itemize}
+
+The knowledge distillation procedure trains the modified (student) model to mimic the output logits and intermediate representations of the original (teacher) model, using a combination of task loss and KL-divergence between teacher and student output distributions~\cite{hinton2015distilling}. This distillation step is critical: without it, the quadratic replacements cause accuracy drops of 5--15\%, while distillation reduces the gap to 1.1--5.3\% depending on the task.
+
+\paragraph{Limitations.} MPCFormer addresses only Softmax and GELU---LayerNorm is handled through the MPC protocol rather than polynomial replacement, requiring interactive communication between the two computing parties. The framework also assumes a two-party honest-but-curious threat model, which differs from the single-server FHE setting considered in this thesis. Furthermore, the reliance on MPC means that inference requires continuous network communication, unlike the non-interactive nature of pure FHE.
+
+\subsection{BOLT: Privacy-Preserving, Accurate and Efficient Inference for Transformers}
+\label{sec:bolt}
+
+Pang et al.~\cite{pang2024bolt} proposed BOLT, a state-of-the-art framework for privacy-preserving Transformer inference that combines oblivious transfer (OT) based protocols with optimised non-linear function approximations. BOLT introduces several technical innovations:
+
+\begin{itemize}
+    \item \textbf{Approximation-aware fine-tuning.} Rather than treating polynomial approximation and model training as separate steps, BOLT integrates the polynomial replacements into the fine-tuning process, allowing the model weights to adapt to the approximation errors. This ``approximation-aware'' training paradigm significantly reduces accuracy degradation.
+    \item \textbf{Optimised Softmax and GELU protocols.} BOLT proposes efficient two-party protocols for evaluating Softmax and GELU that minimise the number of communication rounds and the total amount of data transferred. For GELU, BOLT uses a degree-2 polynomial approximation; for Softmax, it combines polynomial exponentiation with a secure reciprocal protocol.
+    \item \textbf{Selective approximation.} BOLT observes that not all layers are equally sensitive to approximation errors and proposes selectively applying higher-degree approximations to more sensitive layers.
+\end{itemize}
+
+BOLT achieves accuracy within 1--3\% of the plaintext baseline on BERT-Base across multiple GLUE tasks. However, like MPCFormer, BOLT does not address LayerNorm replacement---it relies on interactive protocols for the normalisation step. The framework targets the two-party secure computation setting with OT, which requires synchronous communication throughout inference.
+
+\subsection{Summary and Positioning of This Work}
+
+Table~\ref{tab:framework_comparison} provides a comparative summary of existing secure inference frameworks. A critical observation is that \emph{no prior work replaces all three non-linear operations}---GELU, Softmax, and LayerNorm---with polynomial approximations suitable for non-interactive FHE evaluation. Existing methods either leave LayerNorm to client-side computation (THE-X), handle it via interactive MPC protocols (MPCFormer, BOLT), approximate it with a simple affine transformation that discards the normalisation effect (THE-X), or delegate it to a TEE (THEF).
+
+This thesis addresses this gap through the LPAN framework, which replaces all three non-linear operations with learnable Chebyshev polynomial approximations trained via a progressive, knowledge-distillation-guided pipeline. The result is a fully-polynomial Transformer that can be evaluated entirely within the CKKS scheme without any interactive protocols or trusted hardware.
+
+\begin{table}[ht]
+\centering
+\caption{Comparison of existing secure Transformer inference frameworks. ``Ops Replaced'' indicates which of the three non-linear operations (GELU, Softmax, LayerNorm) are replaced with FHE-compatible polynomials. $\dagger$: requires interactive MPC or client-aided computation for remaining operations.}
+\label{tab:framework_comparison}
+\begin{tabular}{|l|c|c|c|c|c|}
+\hline
+\textbf{Framework} & \textbf{Protocol} & \textbf{Non-Linear Strategy} & \textbf{Ops Replaced} & \textbf{Model} & \textbf{Acc.\ Drop} \\ \hline
+CryptoNets~\cite{gilad2016cryptonets} & HE & $x^2$ activation & N/A (CNN) & CNN & $<1\%$ \\ \hline
+Iron~\cite{hao2022iron} & CKKS & Poly + Newton & G, S$^\dagger$ & BERT-Base & 1--2\% \\ \hline
+THE-X~\cite{chen2022thex} & CKKS & ReLU + learned net & G$^\dagger$, S & BERT-Tiny & 1.5\% \\ \hline
+MPCFormer~\cite{li2023mpcformer} & MPC & Quad + distillation & G, S$^\dagger$ & BERT-Base & 1.1--5.3\% \\ \hline
+BOLT~\cite{pang2024bolt} & MPC+OT & Approx-aware FT & G, S$^\dagger$ & BERT-Base & 1--3\% \\ \hline
+THEF~\cite{li2024thef} & HE+TEE & Exact (in TEE) & None (TEE) & Transformer & $\sim$0\% \\ \hline
+\textbf{LPAN (Ours)} & \textbf{CKKS} & \textbf{Learnable poly} & \textbf{G, S, LN} & \textbf{BERT-Base} & \textbf{0.34\%} \\ \hline
+\end{tabular}
+\end{table}

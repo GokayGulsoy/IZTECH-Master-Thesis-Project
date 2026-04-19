@@ -1,0 +1,48 @@
+# Virtual environment
+fhe_venv/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Model checkpoints and results (large files)
+results/
+checkpoints/
+*.pt
+*.bin
+*.safetensors
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# LaTeX build artifacts
+*.aux
+*.log
+*.out
+*.toc
+*.lof
+*.lot
+*.bbl
+*.blg
+*.synctex.gz
+*.fdb_latexmk
+*.fls
+
+# Thesis backups (created during rewrite)
+IZTECH_Master_Thesis/chapters/*.bak
+IZTECH_Master_Thesis/frontmatter/*.bak
+
+# HuggingFace cache
+.cache/

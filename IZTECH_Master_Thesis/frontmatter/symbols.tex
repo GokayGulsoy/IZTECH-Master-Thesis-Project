@@ -1,0 +1,60 @@
+\chapter*{LIST OF SYMBOLS}
+\addcontentsline{toc}{chapter}{LIST OF SYMBOLS}
+\vspace{2\baselineskip}
+
+\begin{longtable}{@{}p{3.5cm}p{11cm}@{}}
+% --- Cryptography / FHE Symbols ---
+$\mathcal{R}$        & Polynomial ring $\mathbb{Z}[X]/(X^N + 1)$ \\
+$\mathcal{R}_q$      & Polynomial quotient ring $\mathcal{R}/q\mathcal{R}$ \\
+$M$                  & Cyclotomic index (power of two, $M = 2N$) \\
+$N$                  & Polynomial ring dimension ($\deg \Phi_M = N$) \\
+$\Phi_M(X)$          & $M$-th cyclotomic polynomial ($X^N + 1$) \\
+$\zeta$              & Primitive $M$-th root of unity ($e^{2\pi i / M}$) \\
+$\sigma$             & Complex canonical embedding $\mathcal{R} \to \mathbb{C}^N$ \\
+$\mathbb{H}$         & Conjugate-invariant subspace of $\mathbb{C}^N$ \\
+$\pi$                & Natural projection $\mathbb{H} \to \mathbb{C}^{N/2}$ \\
+$\Delta$             & Scaling factor in the CKKS encryption scheme \\
+$\mathrm{Ecd}(\cdot)$ & CKKS encoding function \\
+$\mathrm{Dcd}(\cdot)$ & CKKS decoding function \\
+$\mathrm{Enc}(\cdot)$ & Encryption function \\
+$\mathrm{Dec}(\cdot)$ & Decryption function \\
+$pk$                 & Public key \\
+$sk$                 & Secret key \\
+$evk$                & Evaluation key (relinearization or Galois keys) \\
+$ct$                 & Ciphertext \\
+$pt$                 & Plaintext (message) \\
+$q_l$                & Ciphertext modulus at level $l$ \\
+$L$                  & Maximum level in the CKKS modulus chain \\
+$p_l$                & Prime factor at level $l$ in the modulus chain \\
+$P$                  & Auxiliary modulus for relinearization \\
+$\chi_{\mathit{key}}$  & Secret key distribution \\
+$\chi_{\mathit{err}}$  & Error (discrete Gaussian) distribution \\
+$\chi_{\mathit{enc}}$  & Encryption randomness distribution \\
+$\sigma_e$           & Standard deviation of the error distribution \\
+$\mathrm{RS}(\cdot)$  & Rescaling procedure \\
+$\oplus$             & Homomorphic addition operation \\
+$\otimes$            & Homomorphic multiplication operation \\
+$\text{rot}(\cdot)$  & Homomorphic vector rotation \\
+
+\vspace{0.5cm} & \vspace{0.5cm} \\ % Adds a small gap between categories
+
+% --- LLM / Transformer Symbols ---
+$Q, K, V$            & Query, Key, and Value matrices in Self-Attention \\
+$W_Q, W_K, W_V$      & Learned weight projections for Attention mechanism \\
+$d_k$                & Dimension of the key/query vectors \\
+$H$                  & Hidden state representation matrix \\
+$L_{\text{seq}}$     & Sequence length (context window size) \\
+$\sigma(x)$          & Generic non-linear activation function \\
+$\text{softmax}(x)$  & Softmax normalization function \\
+$\text{GELU}(x)$     & Gaussian Error Linear Unit activation function \\
+$\mathrm{erf}(x)$    & Gauss error function \\
+$\Phi(x)$            & CDF of the standard normal distribution \\
+$\mathrm{LayerNorm}$  & Layer normalization function \\
+$\gamma, \beta$       & Learnable affine parameters in LayerNorm \\
+$\mu, \sigma^2$       & Mean and variance in LayerNorm \\
+$T_k(x)$             & Chebyshev polynomial of degree $k$ \\
+$\mathcal{P}_n$      & Set of polynomials of degree at most $n$ \\
+$D_{\text{total}}$    & Total multiplicative depth of a circuit \\
+$N_{\text{layers}}$   & Number of Transformer layers \\
+$\approx$            & Polynomial approximation of a non-linear function \\
+\end{longtable}
