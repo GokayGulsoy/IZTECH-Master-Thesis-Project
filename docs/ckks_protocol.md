@@ -1,6 +1,6 @@
 # LPAN-FHE Protocol Specification
 
-> **Status:** Phase 1 design.
+> **Status:** Phases 1–3 implemented (model-agnostic for all `MODEL_REGISTRY` BERT variants).
 > **Branch:** `feature/ckks-protocol`.
 
 ## 1. Motivation
@@ -156,22 +156,31 @@ which is sufficient for the FFN+LN block alone (depth = 9).
 |---|---|---|
 | **1** ✅ | Design doc, backend abstraction, token-packed tensor, encrypted FFN+LN block | scaffold + Tiny FFN |
 | **2** ✅ | Encrypted multi-head self-attention (Q/K/V projections per head, scaled-dot-product scores, softmax-poly, attn·V, zero-pad head concat) | adds `enc_self_attention` |
-| 3 | Full Tiny encrypted layer + classifier head end-to-end | wires Phase 1+2 + final pooler/classifier |
-| 4 | Scale to Mini / Small / Base, depth-budget audit per model | benchmark table |
+| **3** ✅ | Model-agnostic full layer + classifier head, unified CLI runner | adds `protocol.py`, `coefficients.py`, `experiments/run_protocol.py` |
+| 4 | Scaling benchmark across Tiny / Mini / Small / Base | benchmark table |
 | 5 | GPU-backend port (Phantom-FHE or OpenFHE-CUDA) | optional, perf-only |
 
 ## 7. Module Layout
 
 ```
 fhe_thesis/encryption/
-  __init__.py
-  context.py     # existing: CKKS context factories
-  backend.py     # NEW: CKKSBackend ABC + TenSEALBackend
-  packing.py     # NEW: TokenPackedTensor
-  ops.py         # NEW: enc_linear, enc_gelu_poly, enc_ln_poly, enc_softmax_poly
-  depth.py       # NEW: symbolic depth tracker for budget audits
+  __init__.py       # PEP-562 lazy imports (so design machine works without TenSEAL)
+  context.py        # CKKS context factories
+  backend.py        # CKKSBackend ABC + TenSEALBackend
+  packing.py        # TokenPackedTensor
+  ops.py            # enc_linear, enc_gelu_poly, enc_ln_poly,
+                    # enc_qk_scores, enc_softmax_poly,
+                    # enc_attention_apply, enc_self_attention
+  coefficients.py   # PolyCoeffs + load_coefficients(model_key)
+  protocol.py       # encrypt_ffn_block / encrypt_attention_block /
+                    # encrypt_layer / encrypt_inference / run_phase
+  depth.py          # symbolic depth tracker (DEPTH_COST, DepthAudit,
+                    #   transformer_layer_depth() = 23)
+experiments/
+  run_protocol.py   # unified CLI: --model {tiny|mini|small|base}
+                    #              --phase {ffn|attention|layer|model}
 docs/
-  ckks_protocol.md   # this document
+  ckks_protocol.md  # this document
 ```
 
 ## 8. Out of Scope (for Phases 1–2)

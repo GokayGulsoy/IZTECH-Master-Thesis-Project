@@ -93,7 +93,7 @@ This repository contains the implementation and thesis document for privacy-pres
 - GPU-accelerated CKKS operations for practical deployment
 - Formal circuit depth analysis for each BERT variant
 
-## CKKS Encrypted Inference (Phase 1 — `feature/ckks-protocol`)
+## CKKS Encrypted Inference (`feature/ckks-protocol`)
 
 The CKKS work is being landed in incremental, runnable phases on the
 `feature/ckks-protocol` branch. The full design is in
@@ -123,17 +123,29 @@ One round-trip total, independent of model depth.
 
 ```
 fhe_thesis/encryption/
-  context.py     # CKKS context factories (existing)
-  backend.py     # CKKSBackend ABC + TenSEALBackend reference impl
-  packing.py     # TokenPackedTensor — token-packed slot layout
-  ops.py         # enc_linear, enc_gelu_poly, enc_ln_poly
-  depth.py       # symbolic depth audit (DepthAudit, DEPTH_COST)
+  context.py       # CKKS context factories (existing)
+  backend.py       # CKKSBackend ABC + TenSEALBackend reference impl
+  packing.py       # TokenPackedTensor — token-packed slot layout
+  ops.py           # enc_linear, enc_gelu_poly, enc_ln_poly,
+                   # enc_qk_scores, enc_softmax_poly,
+                   # enc_attention_apply, enc_self_attention
+  coefficients.py  # PolyCoeffs + load_coefficients(model_key)
+                   #   reads results/coefficients/bert_<model>_coeffs.json
+                   #   (LPAN-trained), falls back to profile-and-fit
+  protocol.py      # model-agnostic encrypted blocks:
+                   #   encrypt_ffn_block / encrypt_attention_block /
+                   #   encrypt_layer / encrypt_inference / run_phase
+  depth.py         # symbolic depth audit (DepthAudit, DEPTH_COST)
 docs/
   ckks_protocol.md   # full protocol specification
 experiments/
-  07_encrypted_inference.py    # legacy FFN-only benchmark
-  12_lpan_fhe_protocol.py      # NEW: Phase-1 FFN+LN block
+  run_protocol.py    # unified CLI: --model {tiny|mini|small|base}
+                     #              --phase {ffn|attention|layer|model}
 ```
+
+The model-agnostic protocol pulls `hidden`, `heads`, `layers` from
+`MODEL_REGISTRY` so the **same code path runs on Tiny / Mini / Small /
+Base** — no per-model branching.
 
 ### Packing strategy (token-packed)
 
@@ -145,45 +157,40 @@ rotations**. Linear layers use a per-row plaintext-weight matmul.
 ### Multiplicative-depth budget
 
 Critical-path depth per LPAN BERT layer (Q/K/V parallel, two LN-polys
-sequential, degree-8 polys via Horner) = **20 levels**. Computed by
+sequential, degree-8 polys via Horner, multi-head concat under FHE) =
+**23 levels**. Computed by
 `fhe_thesis.encryption.depth.transformer_layer_depth()`. The Phase-1
 FFN+LN block alone is 9 levels and fits a TenSEAL N=16384 chain
-without bootstrapping.
+without bootstrapping; full layers / multi-layer models need
+N=32768 or bootstrapping.
 
-### Running Phase 1 on the MSI box
+### Running on the MSI box
+
+Same single command for every variant and every phase:
 
 ```bash
-git fetch
-git checkout feature/ckks-protocol
-# (Phase 1 has no extra deps beyond the existing fhe_venv: tenseal,
-#  numpy, torch, transformers, scipy.)
-python experiments/12_lpan_fhe_protocol.py
+git fetch && git checkout feature/ckks-protocol
+# 1) (optional) extract LPAN-trained coefficients
+python extract_coefficients.py
+# 2) run any phase × model combination
+python experiments/run_protocol.py --model tiny --phase ffn
+python experiments/run_protocol.py --model tiny --phase attention
+python experiments/run_protocol.py --model mini --phase layer
+python experiments/run_protocol.py --model base --phase model
 ```
 
-Outputs a JSON record with latency breakdown and decryption error to
-`results/encrypted_inference/phase1_protocol.json`. The legacy FFN-only
-[experiments/07_encrypted_inference.py](experiments/07_encrypted_inference.py)
-is left unchanged and still runnable.
+Outputs land in `results/encrypted_inference/<model>_<phase>.json`
+with per-step latency, output norm, and depth-budget summary.
 
-### Roadmap (further phases on this branch)
+### Roadmap
 
 | Phase | Deliverable |
 |---|---|
 | 1 ✅ | Protocol design, backend abstraction, FFN+LN block |
-| 2 ✅ | Encrypted multi-head self-attention (Q/K/V per head, scaled scores, softmax-poly, attn·V, zero-pad head concat) |
-| 3 | Full BERT-Tiny encrypted layer + classifier head |
-| 4 | Scale to Mini / Small / Base, depth-budget audit per model |
+| 2 ✅ | Encrypted multi-head self-attention |
+| 3 ✅ | Model-agnostic full layer + classifier head, unified CLI |
+| 4 | Scaling benchmark across Tiny / Mini / Small / Base |
 | 5 | GPU-backend port (Phantom-FHE or OpenFHE-CUDA) — perf-only |
-
-### Running Phase 2 on the MSI box
-
-```bash
-git pull
-python experiments/13_lpan_fhe_attention.py
-```
-
-Outputs `results/encrypted_inference/phase2_protocol.json` with
-multi-head attention latency breakdown and decryption error.
 
 ### Notes for the MSI box
 
@@ -192,8 +199,8 @@ multi-head attention latency breakdown and decryption error.
   subclass — no protocol code changes.
 - `fhe_thesis/encryption/__init__.py` uses lazy (PEP-562) imports so
   the design machine can load `depth` and `packing` even without
-  `tenseal` installed; importing `TenSEALBackend` triggers the heavy
-  import only when needed.
+  `tenseal` installed; importing `TenSEALBackend` / `protocol`
+  triggers the heavy import only when needed.
 - Bootstrapping is intentionally **not** in scope yet. If a future
   phase needs it for BERT-Base, it will be added behind the
   `BackendCapabilities.supports_bootstrapping` flag.
