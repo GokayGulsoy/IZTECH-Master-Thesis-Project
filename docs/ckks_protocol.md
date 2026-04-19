@@ -120,16 +120,17 @@ levels each):
 |---|---|
 | LN-poly (pre-attn) | 4 |
 | Q-linear (∥ K, V) | 1 |
-| Q · Kᵀ | 1 |
+| Q · Kᵀ scores (dot + slot mask) | 2 |
 | Softmax-poly | 3 |
-| attn · V | 1 |
+| attn · V (mul_plain mask + ct·ct broadcast) | 2 |
+| Head concat (mul_plain mask) | 1 |
 | O-linear | 1 |
 | residual + LN-poly | 4 |
 | W₁ | 1 |
 | GELU-poly | 3 |
 | W₂ | 1 |
 | residual | 0 |
-| **Total per layer** | **20** |
+| **Total per layer** | **23** |
 
 The exact value is computed by `fhe_thesis.encryption.depth.transformer_layer_depth()`.
 
@@ -153,9 +154,9 @@ which is sufficient for the FFN+LN block alone (depth = 9).
 
 | Phase | Deliverable | Branch state |
 |---|---|---|
-| **1** (this commit) | Design doc, backend abstraction, token-packed tensor, encrypted FFN+LN block | scaffold + Tiny FFN |
-| 2 | Encrypted self-attention (Q/K/V, softmax-poly, attn·V) | adds `enc_attention` |
-| 3 | Full Tiny encrypted layer + classifier head | end-to-end Tiny inference |
+| **1** ✅ | Design doc, backend abstraction, token-packed tensor, encrypted FFN+LN block | scaffold + Tiny FFN |
+| **2** ✅ | Encrypted multi-head self-attention (Q/K/V projections per head, scaled-dot-product scores, softmax-poly, attn·V, zero-pad head concat) | adds `enc_self_attention` |
+| 3 | Full Tiny encrypted layer + classifier head end-to-end | wires Phase 1+2 + final pooler/classifier |
 | 4 | Scale to Mini / Small / Base, depth-budget audit per model | benchmark table |
 | 5 | GPU-backend port (Phantom-FHE or OpenFHE-CUDA) | optional, perf-only |
 
@@ -173,9 +174,55 @@ docs/
   ckks_protocol.md   # this document
 ```
 
-## 8. Out of Scope (for Phase 1)
+## 8. Out of Scope (for Phases 1–2)
 
 * Bootstrapping — we aim to avoid it entirely.
 * GPU backend — will be added in Phase 5 if needed.
 * Malicious-server security — honest-but-curious is enough for thesis.
 * Encrypted embeddings — client owns the embedding table.
+
+## 9. Phase 2 Notes — Encrypted Multi-Head Self-Attention
+
+### 9.1 Per-head splitting under FHE
+
+Each attention head is realised by **slicing the plaintext Q/K/V
+weight matrices row-wise** into pieces of shape `(head_dim, hidden)`
+and running `enc_linear` per head. The result is `num_heads`
+independent `TokenPackedTensor`s, each of width `head_dim`. No
+ciphertext is ever decrypted to materialise heads — the PF-SR
+invariant is preserved.
+
+### 9.2 Q·Kᵀ scores layout
+
+For a query row `i`, scores against all keys are packed into a single
+ciphertext of `seq_len` slots:
+
+```
+for j in 0..L-1:
+    s_j        = backend.dot(Q[i], K[j])         # broadcast scalar
+    masked     = mul_plain(s_j, one_hot(j) * 1/√d)
+    row_ct    += masked
+```
+
+The `1/√d` scale is folded into the mask so the softmax polynomial
+sees scores in its profiled interval.
+
+### 9.3 attn·V layout
+
+For each output row `i`:
+
+```
+for j in 0..L-1:
+    a_ij_scalar = sum_slots(mul_plain(attn[i], one_hot(j)))
+    out_i      += V[j] * a_ij_scalar     # ct·ct broadcast
+```
+
+Cost per row: `seq_len × (mul_plain + sum_slots + ct·ct + add)`.
+
+### 9.4 Head concatenation without decryption
+
+Each head's output occupies its `head_dim` slots of every token ct
+(rest are zero by encoding). To concatenate, multiply each head's
+ciphertext by a per-head plaintext mask that is `1` only inside that
+head's destination slot range, then add. The cost is `num_heads ×
+seq_len × (mul_plain + add)` and consumes one extra level.

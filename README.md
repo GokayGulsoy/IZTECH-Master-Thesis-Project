@@ -169,11 +169,21 @@ is left unchanged and still runnable.
 
 | Phase | Deliverable |
 |---|---|
-| 1 ✅ | Protocol design, backend abstraction, FFN+LN block (this commit) |
-| 2 | Encrypted self-attention (Q/K/V, softmax-poly, attn·V) |
+| 1 ✅ | Protocol design, backend abstraction, FFN+LN block |
+| 2 ✅ | Encrypted multi-head self-attention (Q/K/V per head, scaled scores, softmax-poly, attn·V, zero-pad head concat) |
 | 3 | Full BERT-Tiny encrypted layer + classifier head |
 | 4 | Scale to Mini / Small / Base, depth-budget audit per model |
 | 5 | GPU-backend port (Phantom-FHE or OpenFHE-CUDA) — perf-only |
+
+### Running Phase 2 on the MSI box
+
+```bash
+git pull
+python experiments/13_lpan_fhe_attention.py
+```
+
+Outputs `results/encrypted_inference/phase2_protocol.json` with
+multi-head attention latency breakdown and decryption error.
 
 ### Notes for the MSI box
 

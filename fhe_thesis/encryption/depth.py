@@ -20,6 +20,9 @@ DEPTH_COST: Dict[str, int] = {
     "ln_poly": 4,  # Σx² (1) + invsqrt-poly deg-8 (3)
     "softmax_poly": 3,  # deg-8 polyval
     "residual_add": 0,
+    "qk_scores": 2,  # ⟨Q[i], K[j]⟩ via dot (1) + mul_plain mask (1)
+    "attn_apply": 2,  # mul_plain mask (1) + ct·ct broadcast (1); sum_slots is rotation-only
+    "head_concat": 1,  # mul_plain by per-head mask
 }
 
 
@@ -63,18 +66,19 @@ def transformer_layer_depth() -> int:
     pre-attn, one pre-FFN), which are sequential. Sequence (per
     ``docs/ckks_protocol.md`` §5):
 
-        LN-poly → Q-linear (∥ K, V) → Q·Kᵀ → softmax-poly → attn·V →
-        O-linear → residual → LN-poly → W₁ → GELU-poly → W₂ → residual
+        LN-poly → Q-linear (∥ K, V) → Q·Kᵀ scores → softmax-poly →
+        attn·V → O-linear → residual → LN-poly → W₁ → GELU-poly → W₂
     """
     return (
         DEPTH_COST["ln_poly"]
-        + DEPTH_COST["linear"]        # Q (K, V parallel)
-        + DEPTH_COST["ct_ct_mul"]     # Q·Kᵀ
+        + DEPTH_COST["linear"]  # Q (K, V parallel)
+        + DEPTH_COST["qk_scores"]  # ⟨Q[i], K[j]⟩ + slot mask
         + DEPTH_COST["softmax_poly"]
-        + DEPTH_COST["ct_ct_mul"]     # attn·V
-        + DEPTH_COST["linear"]        # O
+        + DEPTH_COST["attn_apply"]  # mul_plain mask + ct·ct broadcast
+        + DEPTH_COST["head_concat"]  # zero-pad mask + add
+        + DEPTH_COST["linear"]  # O
         + DEPTH_COST["ln_poly"]
-        + DEPTH_COST["linear"]        # W₁
+        + DEPTH_COST["linear"]  # W₁
         + DEPTH_COST["polyval_deg8"]  # GELU
-        + DEPTH_COST["linear"]        # W₂
+        + DEPTH_COST["linear"]  # W₂
     )

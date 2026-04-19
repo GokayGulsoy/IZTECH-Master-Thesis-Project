@@ -18,9 +18,13 @@ __all__ = [
     "TenSEALBackend",
     "TokenPackedTensor",
     "create_ckks_context",
+    "enc_attention_apply",
     "enc_gelu_poly",
     "enc_linear",
     "enc_ln_poly",
+    "enc_qk_scores",
+    "enc_self_attention",
+    "enc_softmax_poly",
     "make_context",
     "transformer_layer_depth",
 ]
@@ -39,7 +43,15 @@ def __getattr__(name):  # PEP 562 lazy import
         from . import packing
 
         return packing.TokenPackedTensor
-    if name in {"enc_gelu_poly", "enc_linear", "enc_ln_poly"}:
+    if name in {
+        "enc_attention_apply",
+        "enc_gelu_poly",
+        "enc_linear",
+        "enc_ln_poly",
+        "enc_qk_scores",
+        "enc_self_attention",
+        "enc_softmax_poly",
+    }:
         from . import ops
 
         return getattr(ops, name)

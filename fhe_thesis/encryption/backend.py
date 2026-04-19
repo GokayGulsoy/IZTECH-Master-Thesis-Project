@@ -79,6 +79,16 @@ class CKKSBackend(ABC):
         `weight` is shape (out_dim, in_dim) row-major.
         """
 
+    # ── attention primitives (Phase 2) ────────────────────────────────
+    @abstractmethod
+    def dot(self, a: Ciphertext, b: Ciphertext) -> Ciphertext:
+        """Inner product ⟨a, b⟩. Returned ct holds the scalar in slot 0
+        (and may broadcast it across slots, depending on the backend)."""
+
+    @abstractmethod
+    def sum_slots(self, ct: Ciphertext) -> Ciphertext:
+        """Sum of all slots, broadcast back to slot 0 (scalar ct)."""
+
 
 # ──────────────────────────────────────────────────────────────────────
 # Reference backend: TenSEAL
@@ -153,3 +163,10 @@ class TenSEALBackend(CKKSBackend):
         if bias is not None:
             out = out + list(bias)
         return out
+
+    # ── attention primitives ──────────────────────────────────────────
+    def dot(self, a, b):
+        return a.dot(b)
+
+    def sum_slots(self, ct):
+        return ct.sum()
