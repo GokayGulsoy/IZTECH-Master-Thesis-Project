@@ -45,13 +45,19 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     targets = list(ANALYSES) if args.which == "all" else [args.which]
+    # Strip our own positional so each sub-script's argparse sees a clean argv.
+    saved_argv = sys.argv
     for key in targets:
         mod_name = ANALYSES[key]
         print(f"\n{'=' * 70}\n→ {mod_name}\n{'=' * 70}")
         mod = importlib.import_module(mod_name)
         if not hasattr(mod, "main"):
             raise RuntimeError(f"{mod_name} has no main() function")
-        mod.main()
+        sys.argv = [mod_name]
+        try:
+            mod.main()
+        finally:
+            sys.argv = saved_argv
     return 0
 
 
