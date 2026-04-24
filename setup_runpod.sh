@@ -30,8 +30,17 @@ if command -v nvcc &>/dev/null; then
 elif [ -f /usr/local/cuda/version.json ]; then
     CUDA_VERSION=$(python3 -c "import json; d=json.load(open('/usr/local/cuda/version.json')); print(d['cuda']['version'])")
     echo "  version.json reported: $CUDA_VERSION"
+elif [ -f /usr/local/cuda/version.txt ]; then
+    CUDA_VERSION=$(cat /usr/local/cuda/version.txt | awk '{print $3}')
+    echo "  version.txt reported: $CUDA_VERSION"
+elif ls /usr/local/cuda-* &>/dev/null 2>&1; then
+    CUDA_VERSION=$(ls -d /usr/local/cuda-* | tail -1 | grep -oP '\d+\.\d+')
+    echo "  cuda directory reported: $CUDA_VERSION"
+elif python3 -c "import torch; print(torch.version.cuda)" &>/dev/null 2>&1; then
+    CUDA_VERSION=$(python3 -c "import torch; print(torch.version.cuda)")
+    echo "  pre-installed torch reported: $CUDA_VERSION"
 else
-    CUDA_VERSION="12.1"
+    CUDA_VERSION="12.4"
     echo "  WARNING: Could not detect CUDA version, defaulting to $CUDA_VERSION"
 fi
 
