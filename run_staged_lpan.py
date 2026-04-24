@@ -158,14 +158,34 @@ def _set_reproducibility(seed: int) -> None:
         torch.backends.cudnn.benchmark = False
 
 
-def load_data(model_name: str):
-    """Load and tokenize SST-2 dataset."""
+# GLUE tasks used by SOTA FHE papers (THE-X, Iron, MPCFormer, BOLT)
+SOTA_GLUE_TASKS = ["sst2", "qnli", "qqp", "mrpc"]
+
+# Column mapping for each supported GLUE task
+TASK_CONFIG = {
+    "sst2": {"text_a": "sentence",   "text_b": None},
+    "qnli": {"text_a": "question",   "text_b": "sentence"},
+    "qqp":  {"text_a": "question1",  "text_b": "question2"},
+    "mrpc": {"text_a": "sentence1",  "text_b": "sentence2"},
+}
+
+
+def load_data(model_name: str, task: str = "sst2"):
+    """Load and tokenize a GLUE task dataset (sst2/qnli/qqp/mrpc)."""
+    if task not in TASK_CONFIG:
+        raise ValueError(f"Unsupported task '{task}'. Choose from: {list(TASK_CONFIG.keys())}")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    dataset = load_dataset("glue", "sst2")
+    dataset = load_dataset("glue", task)
+    col_a = TASK_CONFIG[task]["text_a"]
+    col_b = TASK_CONFIG[task]["text_b"]
 
     def tokenize_fn(ex):
+        if col_b is None:
+            return tokenizer(
+                ex[col_a], truncation=True, padding="max_length", max_length=128
+            )
         return tokenizer(
-            ex["sentence"], truncation=True, padding="max_length", max_length=128
+            ex[col_a], ex[col_b], truncation=True, padding="max_length", max_length=128
         )
 
     tokenized = dataset.map(tokenize_fn, batched=True)
@@ -709,8 +729,51 @@ def run_progressive_ln_stage(
     return acc, poly_params
 
 
-def run_staged_lpan(model_key: str, degree: int = 8, start_stage: int = 1, seed: int = 42, start_layer: int = 0, start_ln_layer: int = 0):
-    """Run the full 3-stage LPAN pipeline for one model variant."""
+def _train_baseline(model_name: str, task: str, result_dir: Path,
+                    bs: int, lr: float, device, seed: int) -> float:
+    """Fine-tune a baseline model on a GLUE task and save to result_dir/baseline/best_model."""
+    from fhe_thesis.training.trainer import NaNSafeTrainer, compute_metrics
+    baseline_save = str(result_dir / "baseline" / "best_model")
+    os.makedirs(baseline_save, exist_ok=True)
+    print(f"  Fine-tuning baseline on '{task}'...")
+    train_ds, eval_ds = load_data(model_name, task)
+    model = AutoModelForSequenceClassification.from_pretrained(model_name, num_labels=2)
+    model.to(device)
+    args = TrainingArguments(
+        output_dir=str(result_dir / "baseline"),
+        num_train_epochs=3,
+        per_device_train_batch_size=bs,
+        per_device_eval_batch_size=bs * 2,
+        learning_rate=lr,
+        eval_strategy="epoch",
+        save_strategy="epoch",
+        load_best_model_at_end=True,
+        metric_for_best_model="accuracy",
+        fp16=torch.cuda.is_available(),
+        seed=seed,
+        report_to="none",
+        logging_steps=100,
+    )
+    trainer = NaNSafeTrainer(
+        model=model, args=args,
+        train_dataset=train_ds, eval_dataset=eval_ds,
+        compute_metrics=compute_metrics,
+    )
+    trainer.train()
+    metrics = trainer.evaluate()
+    acc = metrics.get("eval_accuracy", 0.0)
+    model.save_pretrained(baseline_save)
+    # Persist accuracy
+    with open(result_dir / "results.json", "w") as f:
+        json.dump({"baseline_acc": acc, "task": task}, f, indent=2)
+    print(f"  Baseline accuracy on {task}: {acc:.4f}")
+    return acc
+
+
+def run_staged_lpan(model_key: str, task: str = "sst2", degree: int = 8,
+                    start_stage: int = 1, seed: int = 42,
+                    start_layer: int = 0, start_ln_layer: int = 0):
+    """Run the full 3-stage LPAN pipeline for one model variant on a GLUE task."""
     cfg = MODEL_REGISTRY[model_key]
     model_name = cfg["name"]
     short = cfg["short"]
@@ -719,27 +782,31 @@ def run_staged_lpan(model_key: str, degree: int = 8, start_stage: int = 1, seed:
     bs = cfg["batch_size"]
     lr = cfg["lr"]
 
-    result_dir = MULTI_MODEL_DIR / model_key
+    # Task-scoped output directory: results/multi_model/<task>/<model_key>
+    result_dir = MULTI_MODEL_DIR / task / model_key
+    result_dir.mkdir(parents=True, exist_ok=True)
     baseline_path = result_dir / "baseline" / "best_model"
 
-    if not baseline_path.exists():
-        print(f"  ERROR: Baseline not found at {baseline_path}")
-        print(f"  Run experiment 05 first to create the baseline.")
-        return None
+    device = detect_device()
 
-    # Load baseline accuracy
+    # Auto-train baseline if it doesn't exist for this task
     results_file = result_dir / "results.json"
     baseline_acc = 0.0
-    if results_file.exists():
-        with open(results_file) as f:
-            prev = json.load(f)
-        baseline_acc = prev.get("baseline_acc", 0.0)
+    if not baseline_path.exists():
+        print(f"  Baseline not found for task='{task}', model='{model_key}' — training now...")
+        baseline_acc = _train_baseline(model_name, task, result_dir, bs, lr, device, seed)
+    else:
+        if results_file.exists():
+            with open(results_file) as f:
+                prev = json.load(f)
+            baseline_acc = prev.get("baseline_acc", 0.0)
 
     print(f"\n{'='*70}")
     print(f"  {short} — Staged LPAN Pipeline")
     print(f"  Baseline: {baseline_acc:.4f} ({baseline_acc:.2%})")
     print(f"  Stages: GELU(CE) → Softmax(Progressive AttnKD) → LayerNorm(KD)")
     print(f"  Degree: {degree} (adaptive per operation/depth)")
+    print(f"  Task:  {task}")
     print(f"  Seed: {seed}")
     print(f"{'='*70}")
 
@@ -747,20 +814,18 @@ def run_staged_lpan(model_key: str, degree: int = 8, start_stage: int = 1, seed:
 
     # Load data
     print("\n[0/5] Loading data...")
-    train_ds, eval_ds = load_data(model_name)
+    train_ds, eval_ds = load_data(model_name, task)
 
     # Profile activations
     print("\n[1/5] Profiling activations...")
     profile_data = profile_model(model_name, num_layers, 1000)
     poly_coeffs = compute_poly_coefficients(profile_data, num_layers, degree)
 
-    device = detect_device()
-
     # Load baseline model
     model = AutoModelForSequenceClassification.from_pretrained(
         str(baseline_path), num_labels=2
     )
-    model.to(device)
+    model.to(device)  # device already set above
 
     # ── Stage 1: GELU (CE) ──
     s1_output = str(result_dir / "staged_lpan_s1_gelu")
@@ -900,6 +965,7 @@ def run_staged_lpan(model_key: str, degree: int = 8, start_stage: int = 1, seed:
     return {
         "model": model_name,
         "short": short,
+        "task": task,
         "layers": num_layers,
         "hidden": hidden,
         "params_m": cfg["params_m"],
@@ -923,6 +989,10 @@ def main():
         "--model", nargs="+", default=["base"],
         help="Model key(s) from MODEL_REGISTRY, or 'all'",
     )
+    parser.add_argument(
+        "--task", nargs="+", default=["sst2"],
+        help=f"GLUE task(s) to run, or 'sota' for all SOTA tasks {SOTA_GLUE_TASKS}",
+    )
     parser.add_argument("--degree", type=int, default=8, help="Base polynomial degree")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument(
@@ -945,14 +1015,28 @@ def main():
             print(f"Unknown model key: {k}. Options: {list(MODEL_REGISTRY.keys())}")
             sys.exit(1)
 
-    all_results = []
-    for model_key in model_keys:
-        result = run_staged_lpan(model_key, args.degree, args.start_stage, args.seed, args.start_layer, args.start_ln_layer)
-        if result:
-            all_results.append(result)
+    task_keys = SOTA_GLUE_TASKS if "sota" in args.task else args.task
+    for t in task_keys:
+        if t not in TASK_CONFIG:
+            print(f"Unknown task: {t}. Options: {list(TASK_CONFIG.keys())}")
+            sys.exit(1)
 
-    # Save combined results
-    out_file = MULTI_MODEL_DIR / "staged_lpan_results.json"
+    all_results = []
+    for task in task_keys:
+        for model_key in model_keys:
+            print(f"\n{'#'*70}")
+            print(f"  Task: {task.upper()}  |  Model: {model_key}")
+            print(f"{'#'*70}")
+            result = run_staged_lpan(
+                model_key, task, args.degree, args.start_stage,
+                args.seed, args.start_layer, args.start_ln_layer
+            )
+            if result:
+                all_results.append(result)
+
+    # Save combined results scoped by task
+    out_file = MULTI_MODEL_DIR / f"staged_lpan_results_{'_'.join(task_keys)}.json"
+    out_file.parent.mkdir(parents=True, exist_ok=True)
     with open(out_file, "w") as f:
         json.dump(all_results, f, indent=2)
     print(f"\nResults saved to {out_file}")
