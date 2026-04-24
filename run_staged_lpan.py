@@ -911,7 +911,7 @@ def run_staged_lpan(model_key: str, task: str = "sst2", degree: int = 8,
         s3_acc, poly_params = run_progressive_ln_stage(
             model, train_ds, eval_ds, poly_coeffs, hidden, num_layers,
             stage_output=s3_output,
-            epochs_per_layer=2, bs=bs, lr=s3_lr, device=device,
+            epochs_per_layer=4, bs=bs, lr=s3_lr, device=device,
             stage2_path=stage2_model_path, seed=seed,
             start_layer=start_ln_layer,
         )
