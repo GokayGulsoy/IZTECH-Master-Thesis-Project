@@ -8,7 +8,7 @@
 set -e
 
 REPO_URL="https://github.com/GokayGulsoy/IZTECH-Master-Thesis-Project.git"
-BRANCH="main"
+BRANCH="feature/glue-experiments"
 PROJECT_DIR="/workspace/thesis"
 VENV_DIR="$PROJECT_DIR/venv"
 
