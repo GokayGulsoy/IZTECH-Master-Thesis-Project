@@ -847,7 +847,7 @@ def run_staged_lpan(model_key: str, task: str = "sst2", degree: int = 8,
             stage_output=s1_output,
             epochs=3, bs=bs, lr=lr, device=device, seed=seed,
         )
-    else:
+    elif start_stage == 2:
         # Load Stage 1 model, re-apply GELU replacement, restore trained coefficients.
         # from_pretrained ignores custom 'intermediate_act_fn.coeffs' keys, so we must
         # call replace_activations + _restore_poly_coeffs to get the trained polynomial.
@@ -862,6 +862,7 @@ def run_staged_lpan(model_key: str, task: str = "sst2", degree: int = 8,
         print(f"  Stage 1 GELU: poly modules created, {n_restored} coeff tensors restored from checkpoint.")
         model.to(device)
         s1_acc = 0.0  # will be read from previous results if available
+    # else: start_stage >= 3 — S2 else-branch below handles full model loading
 
     # ── Stage 2: Softmax (Attention KD) ──
     s2_output = str(result_dir / "staged_lpan_s2_softmax")
@@ -890,9 +891,11 @@ def run_staged_lpan(model_key: str, task: str = "sst2", degree: int = 8,
             model, poly_coeffs, hidden, learnable=False,
             replace_types=["GELU", "Softmax"],
         )
-        n1 = _restore_poly_coeffs(model, s1_model_path)  # GELU coeffs from Stage 1
+        # S2 checkpoint contains all trained coefficients (GELU + Softmax).
+        # Only attempt S1 restore if the checkpoint still exists (it may have been deleted after S2).
+        n1 = _restore_poly_coeffs(model, s1_model_path) if Path(s1_model_path).exists() else 0
         n2 = _restore_poly_coeffs(model, s2_model_path)  # Softmax coeffs from Stage 2
-        print(f"  Stage 1 GELU: {n1} coeff tensors restored from Stage 1 checkpoint.")
+        print(f"  Stage 1 GELU: {n1} coeff tensors restored from Stage 1 checkpoint (0 = S1 deleted, coeffs in S2).")
         print(f"  Stage 2 Softmax: {n2} coeff tensors restored from Stage 2 checkpoint.")
         model.to(device)
         s2_acc = 0.0
