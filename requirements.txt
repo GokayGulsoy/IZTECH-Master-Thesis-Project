@@ -18,6 +18,7 @@ evaluate
 numpy==2.2.6
 scipy==1.15.3
 scikit-learn==1.5.0
+matplotlib
 
 # Fully Homomorphic Encryption (CPU wheel; GPU backend compiled separately if needed)
 openfhe==1.5.1.0.22.4
