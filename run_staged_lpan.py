@@ -553,6 +553,9 @@ def run_progressive_softmax_stage(
         )
         acc = ft_res["accuracy"]
         print(f"  After L{li} fine-tune: {acc:.4f}")
+        # Remove intermediate layer checkpoint to keep disk usage low
+        import shutil
+        shutil.rmtree(sub_output, ignore_errors=True)
 
     # Save final Stage 2 model
     for p in model.parameters():
@@ -860,6 +863,9 @@ def run_progressive_ln_stage(
         )
         acc = ft_res["accuracy"]
         print(f"  After L{li} LN fine-tune: {acc:.4f}")
+        # Remove intermediate layer checkpoint to keep disk usage low
+        import shutil
+        shutil.rmtree(sub_output, ignore_errors=True)
 
     # Save final Stage 3 model
     for p in model.parameters():
@@ -1068,10 +1074,11 @@ def run_staged_lpan(
     else:
         # All-at-once LN replacement with vanilla KD for small models
         s3_output = str(result_dir / "staged_lpan_s3_ln_kd")
-        s3_lr = lr * 0.5
-        s3_epochs = 5
+        s3_lr = float(os.environ.get("S3_LR_OVERRIDE", lr * 0.5))
+        s3_epochs = int(os.environ.get("S3_EPOCHS_OVERRIDE", 5))
         print(f"\n{'='*70}")
         print(f"  Stage 3/3: Replace LayerNorm → Learnable Polynomial (KD)")
+        print(f"  s3_lr={s3_lr} s3_epochs={s3_epochs} (override-aware)")
         print(f"{'='*70}")
         s3_acc, poly_params = run_kd_stage(
             student=model,
