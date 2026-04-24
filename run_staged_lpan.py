@@ -467,6 +467,9 @@ def run_progressive_softmax_stage(
         )
         acc = ft_res["accuracy"]
         print(f"  After L{li} fine-tune: {acc:.4f} ({acc:.2%})")
+        # Remove intermediate layer checkpoint to keep disk usage low
+        import shutil
+        shutil.rmtree(sub_output, ignore_errors=True)
 
     # Save final Stage 2 model
     for p in model.parameters():
@@ -709,6 +712,9 @@ def run_progressive_ln_stage(
         )
         acc = ft_res["accuracy"]
         print(f"  After L{li} LN fine-tune: {acc:.4f} ({acc:.2%})")
+        # Remove intermediate layer checkpoint to keep disk usage low
+        import shutil
+        shutil.rmtree(sub_output, ignore_errors=True)
 
     # Save final Stage 3 model
     for p in model.parameters():
