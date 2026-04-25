@@ -705,8 +705,8 @@ def run_progressive_ln_stage(
             use_fp16=False,
             max_grad_norm=1.0,
             alpha=1.0,
-            beta=0.01,
-            gamma=0.0,  # LN replacement: HidMSE is O(768*0.15²)≈17 — overwhelms CE at any gamma>0
+            beta=0.0,   # AttnKL: raw KL≈2700 after LN replacement, overwhelms CE even at 0.01
+            gamma=0.0,  # HidMSE: O(768*err²)≈17, overwhelms CE
             seed=seed,
             lr_scheduler_type="constant_with_warmup",
         )
