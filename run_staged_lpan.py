@@ -706,7 +706,7 @@ def run_progressive_ln_stage(
             max_grad_norm=1.0,
             alpha=1.0,
             beta=0.01,
-            gamma=10.0,
+            gamma=1.0,  # reduced from 10.0: LN replacement is more disruptive than Softmax
             seed=seed,
             lr_scheduler_type="constant_with_warmup",
         )
@@ -946,13 +946,24 @@ def run_staged_lpan(model_key: str, task: str = "sst2", degree: int = 8,
                 d = poly_coeffs[k]["degree"]
                 total_depth += max(1, math.ceil(math.log2(d + 1)))
 
-    # ── Compute F1 for tasks that use it as primary metric (e.g. MRPC) ──
-    from fhe_thesis.tasks import get_task as _get_task
-    from fhe_thesis.training.trainer import compute_metrics_for_task as _cmft
-    _task_cfg = _get_task(task)
+    # ── Compute F1 for tasks that use it as primary metric (e.g. MRPC, QQP) ──
+    _F1_TASKS = {"mrpc", "qqp"}
     final_f1 = None
-    if "f1" in _task_cfg.eval_metrics:
+    if task in _F1_TASKS:
         import shutil as _shutil
+        import numpy as np
+        from transformers import EvalPrediction
+        def _f1_metrics(eval_pred: EvalPrediction):
+            preds = np.argmax(eval_pred.predictions, axis=-1)
+            labels = eval_pred.label_ids
+            acc = float((preds == labels).mean())
+            tp = float(((preds == 1) & (labels == 1)).sum())
+            fp = float(((preds == 1) & (labels == 0)).sum())
+            fn = float(((preds == 0) & (labels == 1)).sum())
+            prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+            rec = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+            f1 = 2 * prec * rec / (prec + rec) if (prec + rec) > 0 else 0.0
+            return {"accuracy": acc, "f1": f1}
         _f1_out = str(result_dir / "_f1_eval_tmp")
         _f1_args = TrainingArguments(
             output_dir=_f1_out,
@@ -961,10 +972,10 @@ def run_staged_lpan(model_key: str, task: str = "sst2", degree: int = 8,
         )
         _f1_trainer = Trainer(
             model=model, args=_f1_args, eval_dataset=eval_ds,
-            compute_metrics=_cmft(_task_cfg),
+            compute_metrics=_f1_metrics,
         )
-        _f1_metrics = _f1_trainer.evaluate()
-        final_f1 = _f1_metrics.get("eval_f1", None)
+        _f1_metrics_result = _f1_trainer.evaluate()
+        final_f1 = _f1_metrics_result.get("eval_f1", None)
         _shutil.rmtree(_f1_out, ignore_errors=True)
 
     # ── Final Summary ──
