@@ -913,10 +913,17 @@ def run_staged_lpan(model_key: str, task: str = "sst2", degree: int = 8,
         print(f"  Stage 3/3: Replace LayerNorm → Learnable Polynomial (Progressive AttnKD)")
         print(f"  Replacing layer-by-layer: {num_layers} layers, depth-adaptive epochs + LR scaling")
         print(f"{'='*70}")
+        # Adaptive epochs: target ~16800 gradient steps/layer (SST-2@4epochs baseline).
+        # Small datasets (e.g. MRPC) need more epochs to recover from LN replacement.
+        _ref_steps = 4 * (67349 // bs)          # SST-2 reference
+        _steps_per_epoch = max(1, len(train_ds) // bs)
+        s3_epochs_per_layer = min(20, max(4, math.ceil(_ref_steps / _steps_per_epoch)))
+        print(f"  Adaptive Stage 3 epochs/layer: {s3_epochs_per_layer}"
+              f"  (train_size={len(train_ds)}, ref_steps={_ref_steps})")
         s3_acc, poly_params = run_progressive_ln_stage(
             model, train_ds, eval_ds, poly_coeffs, hidden, num_layers,
             stage_output=s3_output,
-            epochs_per_layer=4, bs=bs, lr=s3_lr, device=device,
+            epochs_per_layer=s3_epochs_per_layer, bs=bs, lr=s3_lr, device=device,
             stage2_path=stage2_model_path, seed=seed,
             start_layer=start_ln_layer,
         )
