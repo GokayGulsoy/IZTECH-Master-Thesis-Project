@@ -946,6 +946,27 @@ def run_staged_lpan(model_key: str, task: str = "sst2", degree: int = 8,
                 d = poly_coeffs[k]["degree"]
                 total_depth += max(1, math.ceil(math.log2(d + 1)))
 
+    # ── Compute F1 for tasks that use it as primary metric (e.g. MRPC) ──
+    from fhe_thesis.tasks import get_task as _get_task
+    from fhe_thesis.training.trainer import compute_metrics_for_task as _cmft
+    _task_cfg = _get_task(task)
+    final_f1 = None
+    if "f1" in _task_cfg.eval_metrics:
+        import shutil as _shutil
+        _f1_out = str(result_dir / "_f1_eval_tmp")
+        _f1_args = TrainingArguments(
+            output_dir=_f1_out,
+            per_device_eval_batch_size=bs * 2,
+            report_to="none", disable_tqdm=True, seed=seed,
+        )
+        _f1_trainer = Trainer(
+            model=model, args=_f1_args, eval_dataset=eval_ds,
+            compute_metrics=_cmft(_task_cfg),
+        )
+        _f1_metrics = _f1_trainer.evaluate()
+        final_f1 = _f1_metrics.get("eval_f1", None)
+        _shutil.rmtree(_f1_out, ignore_errors=True)
+
     # ── Final Summary ──
     drop = (baseline_acc - s3_acc) * 100
     print(f"\n{'='*70}")
@@ -955,6 +976,8 @@ def run_staged_lpan(model_key: str, task: str = "sst2", degree: int = 8,
     print(f"  Stage 1 (GELU, CE):    {s1_acc:.4f} ({s1_acc:.2%})")
     print(f"  Stage 2 (Softmax,KD):  {s2_acc:.4f} ({s2_acc:.2%})")
     print(f"  Stage 3 (LN, KD):     {s3_acc:.4f} ({s3_acc:.2%})")
+    if final_f1 is not None:
+        print(f"  Stage 3 F1:            {final_f1:.4f} ({final_f1:.2%})")
     print(f"  Drop from baseline:    {drop:.2f}%")
     print(f"  Depth:                 {total_depth}")
     print(f"  Poly params:           {poly_params}")
@@ -984,6 +1007,7 @@ def run_staged_lpan(model_key: str, task: str = "sst2", degree: int = 8,
         "stage1_acc": s1_acc,
         "stage2_acc": s2_acc,
         "stage3_acc": s3_acc,
+        "stage3_f1": final_f1,
         "accuracy_drop_pct": drop,
         "poly_degree": degree,
         "seed": seed,
