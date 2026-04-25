@@ -877,7 +877,7 @@ def run_staged_lpan(model_key: str, task: str = "sst2", degree: int = 8,
         s2_acc = run_progressive_softmax_stage(
             model, train_ds, eval_ds, poly_coeffs, hidden, num_layers,
             stage_output=s2_output,
-            epochs_per_layer=2, bs=bs, lr=lr, device=device,
+            epochs_per_layer=4, bs=bs, lr=lr, device=device,
             stage1_path=s1_model_path, seed=seed,
             start_layer=start_layer,
         )
