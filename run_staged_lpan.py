@@ -836,6 +836,8 @@ def run_staged_lpan(model_key: str, task: str = "sst2", degree: int = 8,
     # ── Stage 1: GELU (CE) ──
     s1_output = str(result_dir / "staged_lpan_s1_gelu")
     s1_model_path = Path(s1_output) / "best_model"
+    s1_acc = 0.0  # default when stage is skipped
+    s2_acc = 0.0  # default when stage is skipped
     if start_stage <= 1:
         print(f"\n{'='*70}")
         print(f"  Stage 1/3: Replace GELU → Learnable Polynomial (CE)")
