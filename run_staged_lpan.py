@@ -559,6 +559,82 @@ def run_kd_stage(
     return ft_res["accuracy"], poly_params
 
 
+def run_all_ln_ce_stage(
+    model, train_ds, eval_ds, poly_coeffs, hidden,
+    stage_output, epochs, bs, lr, device, stage2_path, seed,
+):
+    """Replace ALL LayerNorms at once then fine-tune with pure CE.
+
+    Unlike progressive replacement, replacing all LNs simultaneously means
+    every layer is polynomial from the first gradient step, so CE can propagate
+    cleanly through the whole network without hitting real-LN barriers.
+    Used for small datasets (e.g. MRPC) where per-layer progressive approach
+    produces weak gradients due to distance from the task head.
+    """
+    # Replace all LNs simultaneously
+    replace_activations(
+        model, poly_coeffs, hidden, learnable=True, replace_types=["LN"]
+    )
+
+    poly_params = sum(p.numel() for n, p in model.named_parameters() if "coeffs" in n)
+    print(f"  Learnable poly coefficients: {poly_params}")
+
+    # Zero-shot eval after replacement
+    zs_args = TrainingArguments(
+        output_dir=stage_output + "_zs", per_device_eval_batch_size=32,
+        report_to="none", disable_tqdm=True, seed=seed, data_seed=seed,
+    )
+    zs_trainer = Trainer(
+        model=model, args=zs_args, eval_dataset=eval_ds,
+        compute_metrics=compute_metrics,
+    )
+    zs_acc = zs_trainer.evaluate()["eval_accuracy"]
+    print(f"  After all-LN replacement (before FT): {zs_acc:.4f}")
+
+    # Pure CE fine-tune — full model, higher lr to recover from whole-network disruption
+    ft_args = TrainingArguments(
+        output_dir=stage_output,
+        num_train_epochs=epochs,
+        per_device_train_batch_size=bs,
+        per_device_eval_batch_size=bs * 2,
+        learning_rate=lr,
+        weight_decay=0.01,
+        warmup_ratio=0.1,
+        eval_strategy="epoch",
+        save_strategy="epoch",
+        logging_steps=20,
+        load_best_model_at_end=True,
+        metric_for_best_model="eval_accuracy",
+        greater_is_better=True,
+        report_to="none",
+        disable_tqdm=True,
+        fp16=False,  # fp32 for stability with polynomial LN
+        max_grad_norm=1.0,
+        seed=seed,
+        data_seed=seed,
+    )
+    trainer = NaNSafeTrainer(
+        model=model, args=ft_args,
+        train_dataset=train_ds, eval_dataset=eval_ds,
+        compute_metrics=compute_metrics,
+    )
+    print(f"  Fine-tuning all-LN model for {epochs} epochs (pure CE, lr={lr})...")
+    trainer.train()
+    results = trainer.evaluate()
+    acc = results["eval_accuracy"]
+    print(f"  After all-LN fine-tune: {acc:.4f} ({acc:.2%})")
+
+    for p in model.parameters():
+        p.data = p.data.contiguous()
+    try:
+        trainer.save_model(os.path.join(stage_output, "best_model"))
+    except Exception as e:
+        print(f"  Warning: Could not save model: {e}")
+
+    torch.cuda.empty_cache()
+    return acc, poly_params
+
+
 def run_progressive_ln_stage(
     model, train_ds, eval_ds, poly_coeffs, hidden, num_layers,
     stage_output, epochs_per_layer, bs, lr, device,
@@ -906,26 +982,47 @@ def run_staged_lpan(model_key: str, task: str = "sst2", degree: int = 8,
     stage2_model_path = Path(s2_output) / "best_model"
 
     if num_layers >= 12:
-        # Progressive LN replacement with AttnKD for deep models (Base)
-        s3_output = str(result_dir / "staged_lpan_s3_ln_progressive")
-        s3_lr = 5e-6
-        print(f"\n{'='*70}")
-        print(f"  Stage 3/3: Replace LayerNorm → Learnable Polynomial (Progressive AttnKD)")
-        print(f"  Replacing layer-by-layer: {num_layers} layers, depth-adaptive epochs + LR scaling")
-        print(f"{'='*70}")
-        # Adaptive epochs: pure CE needs more steps to recover from LN replacement.
-        # Target ~16800 gradient steps/layer (SST-2 @ 4 epochs baseline), cap at 20.
-        _ref_steps = 4 * (67349 // bs)
-        _steps_per_epoch = max(1, len(train_ds) // bs)
-        s3_epochs_per_layer = min(20, max(4, math.ceil(_ref_steps / _steps_per_epoch)))
-        print(f"  Stage 3 epochs/layer: {s3_epochs_per_layer} (train_size={len(train_ds)})")
-        s3_acc, poly_params = run_progressive_ln_stage(
-            model, train_ds, eval_ds, poly_coeffs, hidden, num_layers,
-            stage_output=s3_output,
-            epochs_per_layer=s3_epochs_per_layer, bs=bs, lr=s3_lr, device=device,
-            stage2_path=stage2_model_path, seed=seed,
-            start_layer=start_ln_layer,
-        )
+        # Choose Stage 3 strategy based on dataset size:
+        # Small datasets (< 10k): replace all LNs at once + pure CE global fine-tune.
+        #   Progressive fails because CE gradient from task head is too weak to
+        #   propagate through 11 real-LN layers to reach the polynomial at L0.
+        # Large datasets (>= 10k): progressive layer-by-layer with pure CE.
+        _small_dataset = len(train_ds) < 10_000
+
+        if _small_dataset:
+            s3_output = str(result_dir / "staged_lpan_s3_ln_all_ce")
+            s3_lr = 2e-5   # full fine-tune LR — whole network is plastic
+            s3_epochs = 5
+            print(f"\n{'='*70}")
+            print(f"  Stage 3/3: Replace ALL LayerNorms → Poly (all-at-once, pure CE)")
+            print(f"  Small dataset ({len(train_ds)} samples) — progressive approach fails")
+            print(f"  Strategy: all-LN replacement + {s3_epochs} epochs global CE fine-tune")
+            print(f"{'='*70}")
+            s3_acc, poly_params = run_all_ln_ce_stage(
+                model, train_ds, eval_ds, poly_coeffs, hidden,
+                stage_output=s3_output,
+                epochs=s3_epochs, bs=bs, lr=s3_lr, device=device,
+                stage2_path=stage2_model_path, seed=seed,
+            )
+        else:
+            # Progressive LN replacement with pure CE for large datasets
+            s3_output = str(result_dir / "staged_lpan_s3_ln_progressive")
+            s3_lr = 5e-6
+            print(f"\n{'='*70}")
+            print(f"  Stage 3/3: Replace LayerNorm → Learnable Polynomial (Progressive, pure CE)")
+            print(f"  Replacing layer-by-layer: {num_layers} layers, depth-adaptive epochs")
+            print(f"{'='*70}")
+            _ref_steps = 4 * (67349 // bs)
+            _steps_per_epoch = max(1, len(train_ds) // bs)
+            s3_epochs_per_layer = min(20, max(4, math.ceil(_ref_steps / _steps_per_epoch)))
+            print(f"  Stage 3 epochs/layer: {s3_epochs_per_layer} (train_size={len(train_ds)})")
+            s3_acc, poly_params = run_progressive_ln_stage(
+                model, train_ds, eval_ds, poly_coeffs, hidden, num_layers,
+                stage_output=s3_output,
+                epochs_per_layer=s3_epochs_per_layer, bs=bs, lr=s3_lr, device=device,
+                stage2_path=stage2_model_path, seed=seed,
+                start_layer=start_ln_layer,
+            )
     else:
         # All-at-once LN replacement with vanilla KD for small models
         s3_output = str(result_dir / "staged_lpan_s3_ln_kd")
