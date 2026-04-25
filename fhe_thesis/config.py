@@ -62,7 +62,7 @@ DEFAULT_MODEL_NAME = "google/bert_uncased_L-2_H-128_A-2"
 MAX_INTERVALS: Dict[str, Interval] = {
     "GELU": (-10.0, 10.0),
     "Softmax": (-20.0, 0.5),  # shifted scores: always ≤ 0 (+ small margin)
-    "LN": (0.01, 50.0),
+    "LN": (0.01, 10.0),    # capped at 10: typical BERT variance is [0.1, 8]; degree-4 poly can fit 1/√x accurately over this range
 }
 
 # ── Fallback approximation intervals ─────────────────────────────────────────
