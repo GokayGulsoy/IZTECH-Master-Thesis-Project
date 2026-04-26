@@ -202,9 +202,10 @@ def compute_poly_coefficients(
                     center=sum(interval) / 2, std=(interval[1] - interval[0]) / 4
                 )
             else:
-                if op_name == "Softmax":
-                    # Tighter percentiles for Softmax: shifted scores have
-                    # a heavy left tail ("don't attend") that's safe to clamp.
+                if op_name in ("Softmax", "LN"):
+                    # Tight percentiles: Softmax (shifted scores) and LN (variance)
+                    # both have heavy tails that inflate the interval and break
+                    # low-degree polynomial approximation.
                     p_low, p_high = np.percentile(samples, [2, 98])
                 else:
                     p_low, p_high = np.percentile(samples, [0.5, 99.5])

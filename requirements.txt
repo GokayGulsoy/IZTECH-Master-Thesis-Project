@@ -1,0 +1,24 @@
+# ================================================================
+# LPAN FHE Thesis - Dependency Specification
+# ================================================================
+# PyTorch is installed SEPARATELY (see setup_runpod.sh) because the
+# correct build depends on the CUDA version available on the host.
+# DO NOT add torch/torchvision/torchaudio here.
+# ================================================================
+
+# HuggingFace stack
+transformers==4.43.4
+datasets==4.7.0
+accelerate==1.13.0
+tokenizers==0.19.1
+huggingface_hub==0.36.2
+evaluate
+
+# Numerical / ML
+numpy==2.2.6
+scipy==1.15.3
+scikit-learn==1.5.0
+matplotlib
+
+# Fully Homomorphic Encryption (CPU wheel; GPU backend compiled separately if needed)
+openfhe==1.5.1.0.22.4
