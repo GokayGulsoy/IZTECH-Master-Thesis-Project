@@ -15,13 +15,23 @@ Public API
 Each routine takes a plaintext numpy input, runs the encrypted
 pipeline under the supplied :class:`CKKSBackend`, decrypts at the end,
 and returns the numpy result plus a latency dict.
+
+Threading / seq-len options
+---------------------------
+All block functions accept an optional ``n_jobs`` parameter (default 1)
+which is forwarded to token-parallel ops in ``ops.py`` (O5).
+
+``encrypt_inference`` additionally accepts ``max_seq_len`` (default None)
+to truncate the token sequence before encryption (O4). SST-2 average
+sentence is 17–25 tokens, so ``max_seq_len=64`` is lossless in practice
+while cutting O(L²) attention cost by 4×.
 """
 
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -148,24 +158,26 @@ def encrypt_ffn_block(
     x: TokenPackedTensor,
     layer: LayerWeights,
     coeffs: Dict[str, PolyCoeffs],
+    n_jobs: int = 1,
 ) -> Tuple[TokenPackedTensor, Dict[str, float]]:
     """Run FFN + post-LN under FHE.
 
     Pipeline: ``W₁ → GELU-poly → W₂ → residual → LN-poly``.
+    ``n_jobs`` parallelises token-level loops (O5).
     """
     timings: Dict[str, float] = {}
 
     t = time.time()
-    h = enc_linear(backend, x, layer.W1, layer.b1)
+    h = enc_linear(backend, x, layer.W1, layer.b1, n_jobs=n_jobs)
     timings["W1"] = time.time() - t
 
     t = time.time()
     g = coeffs["GELU"]
-    h = enc_gelu_poly(backend, h, g.power_coeffs, g.interval)
+    h = enc_gelu_poly(backend, h, g.power_coeffs, g.interval, n_jobs=n_jobs)
     timings["GELU"] = time.time() - t
 
     t = time.time()
-    h = enc_linear(backend, h, layer.W2, layer.b2)
+    h = enc_linear(backend, h, layer.W2, layer.b2, n_jobs=n_jobs)
     timings["W2"] = time.time() - t
 
     t = time.time()
@@ -184,6 +196,7 @@ def encrypt_ffn_block(
         ln.interval,
         gamma=layer.ln2_gamma,
         beta=layer.ln2_beta,
+        n_jobs=n_jobs,
     )
     timings["LN"] = time.time() - t
     return out, timings
@@ -195,10 +208,12 @@ def encrypt_attention_block(
     layer: LayerWeights,
     coeffs: Dict[str, PolyCoeffs],
     num_heads: int,
+    n_jobs: int = 1,
 ) -> Tuple[TokenPackedTensor, Dict[str, float]]:
     """Run MHA + post-LN under FHE.
 
     Pipeline: ``MHA → residual → LN-poly``.
+    ``n_jobs`` parallelises token-level linear / LN loops (O5).
     """
     timings: Dict[str, float] = {}
 
@@ -215,8 +230,7 @@ def encrypt_attention_block(
         layer.bv,
         layer.Wo,
         layer.bo,
-        softmax_power_coeffs=sm.power_coeffs,
-        softmax_interval=sm.interval,
+        softmax_coeffs=sm,
         num_heads=num_heads,
     )
     timings["MHA"] = time.time() - t
@@ -237,6 +251,7 @@ def encrypt_attention_block(
         ln.interval,
         gamma=layer.ln1_gamma,
         beta=layer.ln1_beta,
+        n_jobs=n_jobs,
     )
     timings["LN"] = time.time() - t
     return out, timings
@@ -248,10 +263,11 @@ def encrypt_layer(
     layer: LayerWeights,
     coeffs: Dict[str, PolyCoeffs],
     num_heads: int,
+    n_jobs: int = 1,
 ) -> Tuple[TokenPackedTensor, Dict[str, float]]:
     """Run one full BERT encoder layer under FHE."""
-    h, t_attn = encrypt_attention_block(backend, x, layer, coeffs, num_heads)
-    h, t_ffn = encrypt_ffn_block(backend, h, layer, coeffs)
+    h, t_attn = encrypt_attention_block(backend, x, layer, coeffs, num_heads, n_jobs=n_jobs)
+    h, t_ffn = encrypt_ffn_block(backend, h, layer, coeffs, n_jobs=n_jobs)
     timings = {f"attn.{k}": v for k, v in t_attn.items()}
     timings.update({f"ffn.{k}": v for k, v in t_ffn.items()})
     return h, timings
@@ -262,8 +278,19 @@ def encrypt_inference(
     x_plain: np.ndarray,
     weights: ModelWeights,
     coeffs: Dict[int, Dict[str, PolyCoeffs]],
+    max_seq_len: Optional[int] = None,
+    n_jobs: int = 1,
 ) -> Tuple[np.ndarray, Dict[str, float]]:
     """Full encoder + (optional) classifier head under FHE.
+
+    Parameters
+    ----------
+    max_seq_len : int | None
+        Truncate ``x_plain`` to this many tokens before encryption (O4).
+        ``None`` means no truncation. Recommended: 64 for SST-2, 96 for QNLI.
+    n_jobs : int
+        Token-level parallelism forwarded to all block ops (O5).
+        1 = serial, -1 = all CPUs.
 
     The classifier head is a plaintext Linear; we apply it with one
     final ``enc_linear`` if ``weights.cls_W`` is set. Returns the
@@ -271,13 +298,17 @@ def encrypt_inference(
     """
     timings: Dict[str, float] = {}
 
+    # O4 — sequence truncation
+    if max_seq_len is not None and x_plain.shape[0] > max_seq_len:
+        x_plain = x_plain[:max_seq_len]
+
     t = time.time()
     ct_x = TokenPackedTensor.encrypt(backend, x_plain)
     timings["encrypt"] = time.time() - t
 
     h = ct_x
     for i, layer in enumerate(weights.layers):
-        h, layer_t = encrypt_layer(backend, h, layer, coeffs[i], weights.num_heads)
+        h, layer_t = encrypt_layer(backend, h, layer, coeffs[i], weights.num_heads, n_jobs=n_jobs)
         for k, v in layer_t.items():
             timings[f"L{i}.{k}"] = v
 
@@ -317,16 +348,24 @@ def run_phase(
     *,
     layer_idx: int = 0,
     checkpoint_path: str | None = None,
+    max_seq_len: Optional[int] = None,
+    n_jobs: int = 1,
 ) -> Tuple[np.ndarray, Dict[str, float]]:
     """Dispatch helper used by ``experiments/run_protocol.py``.
 
     ``phase ∈ {"ffn", "attention", "layer", "model"}``.
+    ``max_seq_len`` and ``n_jobs`` are forwarded to the relevant block function.
     """
     weights = load_model_weights(model_key, checkpoint_path=checkpoint_path)
     coeffs = load_coefficients(model_key)
 
     if phase == "model":
-        return encrypt_inference(backend, x_plain, weights, coeffs)
+        return encrypt_inference(backend, x_plain, weights, coeffs,
+                                 max_seq_len=max_seq_len, n_jobs=n_jobs)
+
+    # O4 — truncate for sub-model phases too
+    if max_seq_len is not None and x_plain.shape[0] > max_seq_len:
+        x_plain = x_plain[:max_seq_len]
 
     layer = weights.layers[layer_idx]
     layer_coeffs = coeffs[layer_idx]
@@ -337,14 +376,14 @@ def run_phase(
     timings_total["encrypt"] = time.time() - t
 
     if phase == "ffn":
-        out_ct, t_block = encrypt_ffn_block(backend, ct_x, layer, layer_coeffs)
+        out_ct, t_block = encrypt_ffn_block(backend, ct_x, layer, layer_coeffs, n_jobs=n_jobs)
     elif phase == "attention":
         out_ct, t_block = encrypt_attention_block(
-            backend, ct_x, layer, layer_coeffs, weights.num_heads
+            backend, ct_x, layer, layer_coeffs, weights.num_heads, n_jobs=n_jobs
         )
     elif phase == "layer":
         out_ct, t_block = encrypt_layer(
-            backend, ct_x, layer, layer_coeffs, weights.num_heads
+            backend, ct_x, layer, layer_coeffs, weights.num_heads, n_jobs=n_jobs
         )
     else:
         raise ValueError(f"unknown phase {phase!r}")

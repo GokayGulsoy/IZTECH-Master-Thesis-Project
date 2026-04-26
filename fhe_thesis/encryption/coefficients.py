@@ -39,11 +39,16 @@ from fhe_thesis.poly.chebyshev import chebyshev_to_power
 
 @dataclass(frozen=True)
 class PolyCoeffs:
-    """One polynomial fit: power-basis coefficients + approximation interval."""
+    """One polynomial fit: power-basis coefficients + approximation interval.
 
-    power_coeffs: np.ndarray
+    For per-head softmax, ``power_coeffs`` is a 2D array of shape
+    ``(num_heads, degree+1)`` and ``per_head`` is True.
+    """
+
+    power_coeffs: np.ndarray  # 1D for GELU/LN, 2D for per-head softmax
     interval: tuple[float, float]
     degree: int
+    per_head: bool = False
 
 
 # ── Public API ────────────────────────────────────────────────────────
@@ -52,22 +57,28 @@ class PolyCoeffs:
 def load_coefficients(
     model_key: str,
     *,
+    task: str = "sst2",
     degree: int = 8,
     profile_samples: int = 400,
     coefficients_dir: Optional[Path] = None,
 ) -> Dict[int, Dict[str, PolyCoeffs]]:
-    """Return ``{layer_idx: {op_name: PolyCoeffs}}`` for ``model_key``.
+    """Return ``{layer_idx: {op_name: PolyCoeffs}}`` for ``(model_key, task)``.
 
     Tries the LPAN checkpoint dump first, falls back to profile-and-fit.
+    All tasks use the unified ``results/coefficients/<task>/bert_<model>_coeffs.json``
+    layout. A legacy flat-path fallback exists for SST-2 files created before
+    the layout change.
     """
     if model_key not in MODEL_REGISTRY:
         raise ValueError(
             f"unknown model {model_key!r}; " f"options: {sorted(MODEL_REGISTRY)}"
         )
 
-    coeff_path = (
-        coefficients_dir or RESULTS_DIR / "coefficients"
-    ) / f"bert_{model_key}_coeffs.json"
+    base_dir = coefficients_dir or RESULTS_DIR / "coefficients"
+    coeff_path = base_dir / task / f"bert_{model_key}_coeffs.json"
+    # Legacy flat layout fallback for SST-2 (pre-unified layout)
+    if not coeff_path.exists() and task == "sst2":
+        coeff_path = base_dir / f"bert_{model_key}_coeffs.json"
     if coeff_path.exists():
         return _load_from_extracted(coeff_path)
 
@@ -94,15 +105,29 @@ def _load_from_extracted(path: Path) -> Dict[int, Dict[str, PolyCoeffs]]:
         if act not in op_map or layer_idx is None:
             continue
         op_name = op_map[act]
-        coeffs = np.asarray(entry["coefficients"], dtype=np.float64)
+        raw_coeffs = entry["coefficients"]
+        is_per_head = entry.get("num_heads") is not None
+        cheb = np.asarray(raw_coeffs, dtype=np.float64)
+        # Trained checkpoints store *Chebyshev* coefficients; the
+        # encrypted side evaluates polynomials in the *power* basis
+        # (TenSEAL ``polyval``), so convert here once on load.
+        if is_per_head:
+            coeffs = np.stack(
+                [np.asarray(chebyshev_to_power(row), dtype=np.float64)
+                 for row in cheb]
+            )
+        else:
+            coeffs = np.asarray(chebyshev_to_power(cheb), dtype=np.float64)
         interval = PROFILED_INTERVALS.get(
             f"L{layer_idx}_{op_name}",
             PROFILED_INTERVALS[f"L0_{op_name}"],
         )
+        degree = entry.get("degree", coeffs.shape[-1] - 1)
         out.setdefault(layer_idx, {})[op_name] = PolyCoeffs(
             power_coeffs=coeffs,
             interval=(float(interval[0]), float(interval[1])),
-            degree=len(coeffs) - 1,
+            degree=degree,
+            per_head=is_per_head,
         )
     return out
 

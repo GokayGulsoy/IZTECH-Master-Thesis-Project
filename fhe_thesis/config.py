@@ -61,7 +61,12 @@ DEFAULT_MODEL_NAME = "google/bert_uncased_L-2_H-128_A-2"
 # ── Safe maximum intervals (prevents polynomial blow-up on outliers) ─────────
 MAX_INTERVALS: Dict[str, Interval] = {
     "GELU": (-10.0, 10.0),
-    "Softmax": (-20.0, 0.5),  # shifted scores: always ≤ 0 (+ small margin)
+    # Softmax operates on shifted scores ≤ 0; exp(-15) ≈ 3e-7 is already
+    # negligible relative to slots near 0. Capping at -15 prevents
+    # degree-12 Chebyshev approximations of `exp` on absurdly wide
+    # intervals (where the polynomial oscillates wildly between sample
+    # points and produces meaningless decryptions).
+    "Softmax": (-15.0, 0.5),
     "LN": (0.01, 50.0),
 }
 
@@ -70,6 +75,37 @@ FALLBACK_INTERVALS: Dict[str, Interval] = {
     "GELU": (-5.0, 5.0),
     "Softmax": (-8.0, 0.0),
     "LN": (0.1, 4.0),
+}
+
+
+# ── LPAN-Hybrid checkpoint schedules (PBRP) ─────────────────────────────────
+# Per-model lists of (layer_idx, position) where position ∈ {'mid', 'end'}.
+# 'mid'  → checkpoint between attention and FFN of that layer
+# 'end'  → checkpoint after FFN of that layer
+# Empty list ⇒ pure-FHE (k=0). Heavier schedules trade interactivity for
+# wall-time / depth budget. See thesis chapter 3.
+CHECKPOINT_SCHEDULES: Dict[str, Dict[int, list]] = {
+    "tiny": {
+        0: [],                              # k=0: pure FHE baseline
+        1: [(0, "end")],                    # k=1: 1 chkpt
+        2: [(0, "mid"), (0, "end"),
+            (1, "mid"), (1, "end")],        # k=2: 4 chkpts
+    },
+    "mini": {
+        0: [],
+        1: [(i, "end") for i in range(4)],
+        2: [(i, p) for i in range(4) for p in ("mid", "end")],
+    },
+    "small": {
+        0: [],
+        1: [(i, "end") for i in range(4)],
+        2: [(i, p) for i in range(4) for p in ("mid", "end")],
+    },
+    "base": {
+        0: [],
+        1: [(i, "end") for i in (0, 3, 6, 9)],   # every 3 layers
+        2: [(i, "end") for i in range(0, 12, 2)],  # every 2 layers
+    },
 }
 
 # ── Profiled intervals from BERT-Tiny (used by GA, error propagation) ────────

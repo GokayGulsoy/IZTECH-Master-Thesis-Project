@@ -259,6 +259,50 @@ Algorithm~\ref{alg:lpan} presents the complete LPAN pipeline.
 \end{algorithmic}
 \end{algorithm}
 
+Figure~\ref{fig:lpan_pipeline} provides a visual overview of the pipeline complementing the formal algorithm above.
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+    stgbox/.style={draw, thick, rounded corners=5pt, minimum width=2.8cm, minimum height=1.4cm, align=center, font=\small},
+    prepost/.style={stgbox, fill=gray!12},
+    s1box/.style={stgbox, fill=blue!12, draw=blue!50!black},
+    s2box/.style={stgbox, fill=orange!12, draw=orange!50!black},
+    s3box/.style={stgbox, fill=red!12, draw=red!50!black},
+    arr/.style={-{Stealth[length=3mm]}, very thick},
+    detbox/.style={draw, dashed, rounded corners=3pt, font=\scriptsize, align=center, inner sep=4pt, text width=2.4cm},
+]
+\node[prepost] (pre) at (0,0) {\textbf{Pre-trained}\\BERT-$x$};
+\node[s1box]   (s1)  at (4,0) {\textbf{Stage 1}\\GELU\\Replacement};
+\node[s2box]   (s2)  at (8,0) {\textbf{Stage 2}\\Softmax\\Replacement};
+\node[s3box]   (s3)  at (12,0) {\textbf{Stage 3}\\LayerNorm\\Replacement};
+\node[prepost] (out) at (16,0) {\textbf{LPAN}\\Poly-BERT-$x$};
+
+\draw[arr] (pre) -- (s1);
+\draw[arr] (s1)  -- (s2);
+\draw[arr] (s2)  -- (s3);
+\draw[arr] (s3)  -- (out);
+
+% Operation-replaced badges above each stage
+\node[draw, rounded corners=2pt, fill=blue!18, font=\scriptsize, inner sep=2pt]   at (4,  1.2) {$\mathrm{GELU}\;\to\;\tilde{p}_{\mathrm{G}}(x)$};
+\node[draw, rounded corners=2pt, fill=orange!18, font=\scriptsize, inner sep=2pt] at (8,  1.2) {$\mathrm{Softmax}\;\to\;\tilde{p}_{\mathrm{S}}(x)$};
+\node[draw, rounded corners=2pt, fill=red!18, font=\scriptsize, inner sep=2pt]    at (12, 1.2) {$\mathrm{LN}\;\to\;\tilde{p}_{\mathrm{LN}}(v)$};
+
+% Detail boxes below each stage
+\draw[-{Stealth[length=2mm]}, blue!60, thick]         (4,  -1.0) -- (4,  -1.7);
+\draw[-{Stealth[length=2mm]}, orange!60!black, thick]  (8,  -1.0) -- (8,  -1.7);
+\draw[-{Stealth[length=2mm]}, red!60!black, thick]     (12, -1.0) -- (12, -1.7);
+
+\node[detbox, fill=blue!5,   draw=blue!40]          at (4,  -2.5) {All layers at once\\$\mathcal{L}_\mathrm{CE}$, 5 epochs\\lr $2\!\times\!10^{-5}$};
+\node[detbox, fill=orange!5, draw=orange!40]         at (8,  -2.5) {Layer-by-layer\\$L_0\!\to\!L_{L-1}$\\$\mathcal{L}_\mathrm{AttnKD}$};
+\node[detbox, fill=red!5,    draw=red!40]            at (12, -2.5) {Layer-by-layer\\$+$ co-adaptation\\\texttt{fp32}, $\mathcal{L}_\mathrm{AttnKD}$};
+\end{tikzpicture}%
+}
+\caption{LPAN three-stage pipeline overview. Stage~1 replaces all GELU activations simultaneously with learnable Chebyshev polynomials $\tilde{p}_\mathrm{G}$, fine-tuned via cross-entropy loss $\mathcal{L}_\mathrm{CE}$. Stage~2 replaces Softmax layer-by-layer ($L_0\!\to\!L_{L-1}$) using attention-level knowledge distillation $\mathcal{L}_\mathrm{AttnKD}$. Stage~3 replaces both LayerNorms per layer with polynomial $\tilde{p}_\mathrm{LN}$, additionally employing co-adaptation (previously-replaced LN layers remain unfrozen) and full-precision \texttt{fp32} training to handle the small gradient magnitudes.}
+\label{fig:lpan_pipeline}
+\end{figure}
+
 \subsection{Learnable Polynomial Modules}
 \label{sec:poly_modules}
 
@@ -343,6 +387,57 @@ LPAN replaces LayerNorm layer-by-layer from Layer~0 to Layer~$L-1$, with a criti
 Co-adaptation is essential because replacing a LayerNorm at layer $\ell$ shifts the activation statistics at that layer, which may require the polynomial LayerNorms at earlier layers to re-adjust. Without co-adaptation, accuracy degrades progressively and irrecoverably as more layers are replaced. With co-adaptation, the jointly refined ensemble of polynomial LayerNorms maintains stable activation distributions throughout the model.
 
 For BERT-Base (12 layers), Stage~3 uses a variable epoch schedule: $E_\ell = 4$ for layers 0--3 (where initial stabilisation is critical), $E_\ell = 2$ for layers 4--9, and $E_\ell = 3$ for layers 10--11 (final layers), totalling 34 training epochs.
+
+Figure~\ref{fig:coadaptation} illustrates the co-adaptation mechanism at an intermediate step $\ell$.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+    layrow/.style={draw, thick, rounded corners=3pt, minimum width=1.3cm, minimum height=0.65cm, font=\scriptsize, align=center},
+    adapted/.style={layrow, fill=green!18, draw=green!50!black},
+    current/.style={layrow, fill=orange!20, draw=orange!60!black, very thick},
+    frozen/.style={layrow, fill=gray!12, draw=gray!40, dashed},
+    lntag/.style={draw, rounded corners=2pt, minimum width=1.1cm, minimum height=0.45cm, font=\tiny, align=center, inner sep=1pt},
+]
+% Previously-replaced layers (co-adapted): 0, 1, 2
+\foreach \i in {0,1,2} {
+    \pgfmathsetmacro{\xp}{\i*2.4}
+    \node[adapted] (TL\i) at (\xp, 1.0) {Layer \i};
+    \node[lntag, fill=green!12, draw=green!40!black] at (\xp, 0.15) {poly LN};
+    \node[font=\tiny, text=green!60!black] at (\xp, 1.65) {unfrozen};
+}
+% Current layer being replaced: ell
+\node[current] (TLell) at (7.2, 1.0) {Layer $\ell$};
+\node[lntag, fill=orange!18, draw=orange!60!black] at (7.2, 0.15) {poly LN};
+\node[font=\tiny, text=orange!70!black] at (7.2, 1.65) {replace now};
+
+% Separator dots
+\node[font=\normalsize] at (9.2, 1.0) {$\cdots$};
+
+% Future frozen layer: L-1
+\node[frozen] (TLL) at (11.0, 1.0) {Layer $L{-}1$};
+\node[lntag, fill=gray!8, draw=gray!35] at (11.0, 0.15) {orig.\ LN};
+\node[font=\tiny, text=gray!55] at (11.0, 1.65) {frozen};
+
+% Co-adapt gradient arrow (dashed, backward direction)
+\draw[-{Stealth[length=2.5mm]}, green!55!black, thick, dashed]
+    (6.2, -0.4) -- node[below, font=\scriptsize, text=green!60!black] {co-adapt gradient} (1.2, -0.4);
+\draw[-{Stealth[length=2.5mm]}, orange!70!black, thick]
+    (7.2, 0.15) -- (7.2, -0.22);
+
+% Legend
+\begin{scope}[shift={(0,-1.6)}]
+    \node[adapted, minimum width=0.75cm, minimum height=0.42cm] at (0.38, 0) {};
+    \node[font=\scriptsize, anchor=west] at (0.8, 0) {Previously-replaced poly LN — unfrozen (co-adaptation)};
+    \node[current, minimum width=0.75cm, minimum height=0.42cm] at (0.38, -0.6) {};
+    \node[font=\scriptsize, anchor=west] at (0.8, -0.6) {Currently-replaced poly LN — being trained};
+    \node[frozen, minimum width=0.75cm, minimum height=0.42cm] at (0.38, -1.2) {};
+    \node[font=\scriptsize, anchor=west] at (0.8, -1.2) {Future layers — original LN, frozen};
+\end{scope}
+\end{tikzpicture}
+\caption{Co-adaptation in Stage~3 at step~$\ell$. The newly-replaced polynomial LayerNorm at layer~$\ell$ is trained jointly with all previously-replaced polynomial LayerNorms (layers $0,\ldots,\ell-1$), which are unfrozen to absorb the activation shift caused by the new replacement. Layers $\ell+1$ through $L-1$ retain their original LayerNorm and remain frozen. This joint optimisation prevents progressive accuracy degradation as the replacement front advances through the model.}
+\label{fig:coadaptation}
+\end{figure}
 
 
 \subsection{Attention-Level Knowledge Distillation}

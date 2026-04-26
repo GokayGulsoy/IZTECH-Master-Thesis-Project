@@ -83,8 +83,8 @@ def main() -> int:
 
     # Lazy import: tenseal/transformers are heavy and only needed here.
     from fhe_thesis.encryption import TenSEALBackend
-    from fhe_thesis.encryption.context import make_context
     from fhe_thesis.encryption.depth import (
+        DEPTH_COST,
         DepthAudit,
         transformer_layer_depth,
     )
@@ -93,16 +93,59 @@ def main() -> int:
     rng = np.random.default_rng(args.seed)
     x = rng.standard_normal((args.seq_len, hidden)).astype(np.float64) * 0.1
 
-    print("[1/3] Booting CKKS context (this can take a while on first call)…")
-    ctx = make_context()
-    backend = TenSEALBackend(ctx)
+    # Compute required multiplicative depth based on phase.
+    # Standardisation maps are absorbed into polynomial coefficients
+    # (zero CKKS levels) — see fhe_thesis/encryption/ops.py::_absorb_affine.
+    layer_depth = transformer_layer_depth()
+    if args.phase == "ffn":
+        # W1 → GELU-poly(deg6) → W2 → residual → LN-poly
+        mult_depth = (
+            DEPTH_COST["linear"]
+            + DEPTH_COST["polyval_deg6"]
+            + DEPTH_COST["linear"]
+            + DEPTH_COST["ln_poly"]
+        )
+    elif args.phase == "attention":
+        # Q (∥K,V) → QK scores → softmax-poly(deg12) → attn·V → head_concat
+        # → O → residual → LN
+        mult_depth = (
+            DEPTH_COST["linear"]
+            + DEPTH_COST["qk_scores"]
+            + DEPTH_COST["softmax_poly"]
+            + DEPTH_COST["attn_apply"]
+            + DEPTH_COST["head_concat"]
+            + DEPTH_COST["linear"]
+            + DEPTH_COST["ln_poly"]
+        )
+    elif args.phase == "layer":
+        mult_depth = layer_depth
+    elif args.phase == "model":
+        mult_depth = layer_depth * cfg["layers"] + 2  # +2 for pooler + classifier
+    else:
+        raise ValueError(f"unknown phase {args.phase!r}")
+
+    # Build coeff_mod chain: [60] + [40]*mult_depth + [60]
+    coeff_mod = [60] + [40] * mult_depth + [60]
+    total_bits = sum(coeff_mod)
+    if total_bits <= 218:
+        poly_mod = 8192
+    elif total_bits <= 438:
+        poly_mod = 16384
+    else:
+        poly_mod = 32768
+
+    print(f"[1/3] Booting CKKS context (N={poly_mod}, mult_depth={mult_depth})…")
+    backend = TenSEALBackend(
+        poly_modulus_degree=poly_mod,
+        coeff_mod_bit_sizes=coeff_mod,
+    )
     print(f"      capabilities: {backend.capabilities}")
 
     audit = DepthAudit(initial_levels=backend.capabilities.initial_levels)
     print(
         f"\n[2/3] Static depth budget: full layer = "
-        f"{transformer_layer_depth()} levels "
-        f"(have {audit.initial_levels})"
+        f"{layer_depth} levels "
+        f"(have {audit.initial_levels}, need {mult_depth})"
     )
 
     print("\n[3/3] Encrypted run …")
@@ -123,8 +166,11 @@ def main() -> int:
         "seq_len": args.seq_len,
         "hidden": hidden,
         "num_heads": cfg["heads"],
+        "num_layers": cfg["layers"],
         "checkpoint": args.checkpoint,
-        "static_layer_depth": transformer_layer_depth(),
+        "poly_modulus_degree": poly_mod,
+        "mult_depth_required": mult_depth,
+        "static_layer_depth": layer_depth,
         "backend_initial_levels": backend.capabilities.initial_levels,
         "timings_sec": timings,
         "output_norm": float(np.linalg.norm(out)),

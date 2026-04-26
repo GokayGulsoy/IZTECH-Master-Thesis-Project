@@ -15,9 +15,12 @@ __all__ = [
     "CKKSBackend",
     "DEPTH_COST",
     "DepthAudit",
+    "CheckpointSession",
+    "CheckpointStats",
     "PolyCoeffs",
     "TenSEALBackend",
     "TokenPackedTensor",
+    "reencrypt_checkpoint",
     "create_ckks_context",
     "enc_attention_apply",
     "enc_gelu_poly",
@@ -67,6 +70,10 @@ def __getattr__(name):  # PEP 562 lazy import
         from . import coefficients
 
         return getattr(coefficients, name)
+    if name in {"CheckpointSession", "CheckpointStats", "reencrypt_checkpoint"}:
+        from . import checkpoint
+
+        return getattr(checkpoint, name)
     if name in {
         "encrypt_attention_block",
         "encrypt_ffn_block",

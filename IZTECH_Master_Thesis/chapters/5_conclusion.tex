@@ -6,7 +6,7 @@
 This thesis presented the Learnable Polynomial Approximation Network (LPAN), a framework for replacing all non-linear operations in Transformer models with learnable polynomial approximations suitable for evaluation under CKKS homomorphic encryption. The five contributions are:
 
 \begin{enumerate}
-    \item \textbf{LPAN: A Three-Stage Progressive Polynomial Replacement Framework.} A complete pipeline that replaces GELU, Softmax, and LayerNorm in BERT models through staged training: Stage~1 replaces GELU via cross-entropy fine-tuning, Stage~2 progressively replaces Softmax with per-head polynomials via attention-level knowledge distillation, and Stage~3 progressively replaces LayerNorm with co-adaptation. The framework was validated on four BERT variants (Tiny, Mini, Small, Base), achieving accuracy drops of 0.11\%--0.34\% on SST-2 while replacing \emph{all three} non-linear operations---a capability no prior framework has demonstrated.
+    \item \textbf{LPAN: A Three-Stage Progressive Polynomial Replacement Framework.} A complete pipeline that replaces GELU, Softmax, and LayerNorm in BERT models through staged training: Stage~1 replaces GELU via cross-entropy fine-tuning, Stage~2 progressively replaces Softmax with per-head polynomials via attention-level knowledge distillation, and Stage~3 progressively replaces LayerNorm with co-adaptation. The framework was validated on four BERT variants (Tiny, Mini, Small, Base) on SST-2 and additionally on BERT-Base on MRPC, achieving accuracy competitive with or exceeding MPCFormer---the state-of-the-art MPC-based approach that replaces only GELU and Softmax---while replacing \emph{all three} non-linear operations non-interactively.
 
     \item \textbf{Distribution-Weighted Minimax Polynomial Initialisation.} A novel approximation method that incorporates the empirical activation distribution into the minimax objective, achieving $3.4\times$ lower weighted error than standard Chebyshev approximation on GELU at degree~8. These coefficients serve as informed initialisations that are subsequently refined through backpropagation.
 
@@ -19,38 +19,41 @@ This thesis presented the Learnable Polynomial Approximation Network (LPAN), a f
 
 \section{Key Results}
 
-The LPAN framework achieved the following results on SST-2:
+The LPAN framework achieved the following results on SST-2 and MRPC:
 
 \begin{table}[ht]
 \centering
-\caption{Summary of LPAN results across BERT model variants.}
+\caption{Summary of LPAN results. BERT-Base (SST-2 and MRPC) trained on RunPod H100 SXM; all others on NVIDIA RTX~5070~Ti laptop GPU.}
 \label{tab:conclusion_results}
-\begin{tabular}{lccc}
+\begin{tabular}{lcccc}
 \toprule
-\textbf{Model} & \textbf{Baseline} & \textbf{LPAN} & \textbf{$\Delta$} \\
+\textbf{Model / Task} & \textbf{Baseline} & \textbf{LPAN} & \textbf{$\Delta$} & \textbf{MPCFormer} \\
 \midrule
-BERT-Tiny  & 83.26\% & 83.14\% & $-$0.11\% \\
-BERT-Mini  & 87.16\% & 86.81\% & $-$0.34\% \\
-BERT-Small & 87.73\% & 88.53\% & $+$0.80\% \\
-BERT-Base  & 92.20\% & 91.86\% & $-$0.34\% \\
+BERT-Tiny (SST-2)      & 83.26\% & 83.14\%               & $-$0.11\% & --- \\
+BERT-Mini (SST-2)      & 87.16\% & 86.81\%               & $-$0.34\% & --- \\
+BERT-Small (SST-2)     & 87.73\% & 88.53\%               & $+$0.80\% & --- \\
+BERT-Base (SST-2)      & 93.12\% & 91.40\%               & $-$1.72\% & 91.3\% \\
+BERT-Base (MRPC, F1)   & $\approx$88.9\% & 87.71\%  & $-$1.19\% & 82.1\% acc \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-These results compare favourably with existing frameworks that replace only GELU and Softmax: THE-X (1.5\% drop), Iron (1--2\%), MPCFormer (1.1--5.3\%), and BOLT (1--3\%). LPAN is the only framework that replaces all three non-linear operations while achieving sub-1\% accuracy degradation, and the only one enabling fully non-interactive encrypted inference.
+On SST-2, LPAN BERT-Base reaches 91.40\%---above MPCFormer's 91.3\%---while replacing all three non-linearities and requiring zero server--server communication. On MRPC, LPAN achieves 82.35\% accuracy / 87.71\% F1, again exceeding MPCFormer (82.1\%), confirming cross-task generality.
 
 \section{Limitations}
 
-Despite the promising results, several limitations should be noted:
+The current work has several limitations that should be acknowledged:
 
 \begin{enumerate}
-    \item \textbf{Single-task evaluation.} All experiments use SST-2 (binary sentiment classification). The effectiveness of LPAN on more complex tasks---question answering, natural language inference, named entity recognition---remains to be validated.
+    \item \textbf{Partial multi-task evaluation.} Full GLUE evaluation (QNLI, QQP, additional model--task pairs) is pending. The two completed tasks (SST-2, MRPC) demonstrate cross-task generality but do not yet cover natural language inference or question answering.
 
     \item \textbf{Encrypted inference scale.} CKKS encrypted inference was demonstrated only on BERT-Tiny. Encrypted BERT-Base inference would require significantly larger CKKS parameters (deeper modulus chains, larger polynomial degrees) and was not feasible within the hardware constraints of this work.
 
-    \item \textbf{Training cost.} The progressive layer-by-layer strategy for BERT-Base requires 34 epochs for Stage~3 alone (across all 12 layers). While each epoch is short (2--4 epochs per layer), the total training time is substantial compared to single-stage approaches.
+    \item \textbf{Training cost.} The progressive layer-by-layer strategy for BERT-Base requires substantial GPU time for Stage~3. BERT-Base SST-2 and MRPC Stage~3 required a dedicated RunPod H100 SXM pod to complete within a reasonable time budget.
 
     \item \textbf{Polynomial degree sensitivity.} The depth-adaptive polynomial degree selection is currently manual. An automated approach that jointly optimises degrees across all layers and stages would improve usability.
+
+    \item \textbf{Approximation interval sensitivity.} The profiled intervals are dataset-specific. Out-of-distribution inputs could produce activations outside the approximation interval, leading to large polynomial extrapolation errors.
 \end{enumerate}
 
 \section{Future Work}
@@ -58,109 +61,13 @@ Despite the promising results, several limitations should be noted:
 Several directions extend this work:
 
 \begin{enumerate}
-    \item \textbf{Multi-task and multi-benchmark evaluation.} Extend LPAN to the full GLUE benchmark, SQuAD, and other NLP tasks to establish broader applicability.
+    \item \textbf{Complete GLUE benchmark evaluation.} Extend LPAN to QNLI, QQP, and additional tasks to establish broader applicability and provide a full comparison table against MPCFormer, BOLT, and Iron.
 
-    \item \textbf{GPU-accelerated CKKS inference.} Leverage GPU-accelerated HE libraries (e.g., Intel HE-Toolkit, OpenFHE with GPU backends) to reduce encrypted BERT-Base inference latency from minutes to seconds.
+    \item \textbf{CPU-optimised FHE inference with OpenFHE + HEXL.} Port the encrypted inference pipeline to OpenFHE with Intel HEXL AVX-512 acceleration (4$\times$ NTT speedup, HYBRID key switching) on a dedicated 32-vCPU CPU pod to reduce single-sample latency from the TenSEAL baseline (hours) toward practical ranges ($\sim$2--5 seconds).
 
-    \item \textbf{Larger architectures.} Apply LPAN to GPT-2, LLaMA, or other decoder-only architectures to demonstrate generality beyond BERT.
+    \item \textbf{Larger architectures.} Apply LPAN to GPT-2, LLaMA, or other decoder-only architectures to demonstrate generality beyond encoder-only BERT.
 
     \item \textbf{Bootstrapping integration.} Combine LPAN's low-depth polynomial circuits with CKKS bootstrapping to enable encrypted inference on arbitrarily deep models without increasing the initial modulus size.
 
     \item \textbf{Automated degree and interval selection.} Develop a differentiable or search-based method to jointly optimise polynomial degrees, approximation intervals, and Chebyshev coefficients across all layers and stages.
-
-    \item \textbf{Formal FHE circuit analysis.} Provide exact multiplicative depth counts and ciphertext parameter requirements for the fully-polynomial BERT models, enabling precise CKKS parameter selection for deployment.
-\end{enumerate}
-\chapter{CONCLUSION}
-\label{ch:conclusion}
-
-This chapter summarises the contributions and key findings of the thesis, acknowledges the current limitations, and outlines directions for future research.
-
-
-\section{Summary of Contributions}
-
-This thesis addressed the challenge of privacy-preserving LLM inference under the CKKS homomorphic encryption scheme, where all non-linear activation functions must be replaced by polynomial approximations operating within a fixed multiplicative depth budget. Five novel contributions were developed and experimentally validated:
-
-\begin{enumerate}
-    \item \textbf{Distribution-Weighted Minimax Polynomial Approximation.} A new approximation method that incorporates the empirical activation distribution $\rho(x)$ into the minimax objective, minimising $\|f - p\|_{\rho,\infty} = \max_{x} \rho(x)|f(x) - p(x)|$. By concentrating approximation effort where activations are dense, the weighted minimax polynomial achieves $3.4\times$ lower weighted error than standard Chebyshev approximation on GELU at degree~8 (0.012 vs.\ 0.041), while maintaining the same multiplicative depth.
-
-    \item \textbf{Layer-Adaptive CKKS Depth Allocation.} A dynamic programming algorithm that optimally distributes a global CKKS multiplicative depth budget $D$ across layers and operations to minimise total weighted approximation error. At $D = 15$, the adaptive allocation achieves $25.7\times$ lower total error compared to uniform allocation (3.32 vs.\ 85.26).
-
-    \item \textbf{Evolutionary Optimisation of Polynomial Parameters.} A genetic algorithm that jointly optimises polynomial degree assignments and approximation interval widths across all layers, directly maximising output fidelity to the baseline model. Unlike the DP approach, the GA captures inter-layer error interactions by evaluating fitness via KL divergence of the end-to-end model output.
-
-    \item \textbf{Depth-Optimal Polynomial Evaluation Strategies.} A systematic comparison of Horner, balanced binary tree, and Paterson--Stockmeyer evaluation strategies under CKKS encryption. For degree-8 polynomials, balanced tree evaluation is $7.1\times$ faster than Horner while consuming only 3 multiplicative levels instead of 8.
-
-    \item \textbf{Error Propagation Bounds for Polynomial-Approximated Transformers.} Formal bounds on how polynomial approximation error compounds through sequential Transformer layers, showing geometric growth with amplification factor $\alpha = 1 + \max(\sigma(W_O), \sigma(W_2)) \approx 6.16$ per layer. These bounds provide theoretical guidance for minimum degree requirements in deeper models.
-\end{enumerate}
-
-These contributions were validated through a complete end-to-end pipeline on multiple BERT model variants (Tiny, Mini, Small, and Base) with SST-2 sentiment classification:
-
-\begin{itemize}
-    \item \textbf{Activation profiling} of 2.8M GELU inputs, 2.7M softmax scores, and 168K LayerNorm variances established per-layer distribution statistics and approximation intervals.
-    \item \textbf{Polynomial replacement and fine-tuning} recovered nearly all accuracy: the polynomial-replaced model achieved \textbf{82.45\%} accuracy, only \textbf{0.23 percentage points} below the 82.68\% exact-activation baseline, after 5 epochs of approximation-aware fine-tuning.
-    \item \textbf{CKKS encrypted inference} was demonstrated using TenSEAL with $N = 16384$ and 7 multiplicative levels. A single encrypted FFN block processes one token in 2.49~seconds, with linear layers accounting for 86.6\% of latency and polynomial activations only 12.7\%.
-\end{itemize}
-
-
-\section{Key Findings}
-
-Several findings emerged from the experimental evaluation that inform the design of future privacy-preserving Transformer systems:
-
-\begin{enumerate}
-    \item \textbf{Linear layers, not activations, are the encrypted inference bottleneck.} Despite the research focus on polynomial activation design, encrypted linear projections (matrix--vector products via ciphertext rotations) consume 79--87\% of total inference time. This suggests that future optimisation efforts should prioritise encrypted linear algebra (e.g., SIMD packing, GPU-accelerated CKKS, hybrid plaintext/ciphertext protocols).
-
-    \item \textbf{Distribution-aware approximation is essential for constrained depth.} The gap between weighted minimax and standard Chebyshev approximation grows as the depth budget decreases. At degree~4 (2 multiplicative levels), the weighted method provides substantially better accuracy on high-density regions while accepting larger errors only in the low-density tails where few activations occur.
-
-    \item \textbf{Adaptive depth allocation exhibits diminishing returns.} The improvement ratio peaks at $43.6\times$ for $D = 8$ and decreases to $1.0\times$ as $D \to \infty$. This implies that the allocation algorithm is most valuable precisely when depth is most scarce---the regime relevant to practical CKKS deployments without bootstrapping.
-
-    \item \textbf{Fine-tuning is critical; zero-shot replacement fails.} The 50.92\% zero-shot accuracy (near random for binary classification) confirms that the model's learned representations are tightly coupled to exact activation function shapes. Approximation-aware fine-tuning is not optional.
-
-    \item \textbf{Encryption noise is manageable for classification.} The CKKS noise (mean $|$error$| \approx 0.2$) accumulated through the encrypted pipeline does not prevent correct classification when the model has been fine-tuned with polynomial activations, because the fine-tuning phase implicitly learns to produce wider logit margins.
-\end{enumerate}
-
-
-\section{Limitations}
-
-The current work has several limitations that should be acknowledged:
-
-\begin{enumerate}
-    \item \textbf{Model scale.} While the core pipeline is validated on BERT-Tiny (4.4M parameters, 2 layers), the multi-model scaling analysis extends evaluation to BERT-Mini (4 layers), BERT-Small (4 layers), and BERT-Base (12 layers, 110M parameters). However, encrypted inference is only demonstrated on BERT-Tiny due to the exponential growth of CKKS depth requirements with model depth. Scaling encrypted inference to production-scale LLMs (e.g., GPT-2 with 12--48 layers) would require either (i)~multiple bootstrapping operations between layers or (ii)~extremely large polynomial modulus degrees ($N \geq 65536$), both of which incur significant additional latency.
-
-    \item \textbf{Single-task evaluation.} Results are reported only on SST-2 (binary sentiment classification). The polynomial approximation quality and fine-tuning recovery may differ on more complex tasks such as natural language inference (MNLI), question answering (SQuAD), or generation tasks.
-
-    \item \textbf{CPU-only encrypted inference.} The $\sim$25{,}000$\times$ overhead relative to GPU-accelerated plaintext inference is measured on a CPU-only TenSEAL backend. GPU-accelerated CKKS libraries (e.g., NVIDIA's HEaaN.GPU, the BOLT framework~\cite{pang2024bolt}) would substantially reduce this gap. Porting the pipeline to a GPU-accelerated backend is planned as a subsequent phase of this thesis (Section~\ref{sec:planned_extensions}).
-
-    \item \textbf{No bootstrapping.} The current 7-level CKKS chain is insufficient for the full 2-layer model without ciphertext bootstrapping between layers. Incorporating bootstrapping would add latency and noise but would enable arbitrary-depth circuits. Integrating bootstrapping to enable encrypted inference on larger models (BERT-Mini and beyond) is planned as a subsequent phase of this thesis (Section~\ref{sec:planned_extensions}).
-
-    \item \textbf{Approximation interval sensitivity.} The profiled intervals are dataset-specific (SST-2 training set). Out-of-distribution inputs could produce activations outside the approximation interval, leading to large polynomial extrapolation errors.
-\end{enumerate}
-
-
-\section{Planned Extensions}
-\label{sec:planned_extensions}
-
-The following extensions are planned as subsequent phases of this thesis, building directly on the polynomial approximation pipeline and depth allocation framework developed in the preceding chapters:
-
-\begin{enumerate}
-    \item \textbf{GPU-accelerated CKKS inference.} The encrypted inference pipeline will be ported to a GPU-accelerated CKKS backend (e.g., OpenFHE with CUDA support, or NVIDIA's HEaaN.GPU). Based on reported speedups in the literature---BOLT~\cite{pang2024bolt} achieves 5--30$\times$ improvement over CPU-based HE---this migration is expected to reduce the current $\sim$25{,}000$\times$ overhead to approximately $\sim$100--500$\times$, bringing the approach substantially closer to practical deployment latencies.
-
-    \item \textbf{Bootstrapping for larger models.} Ciphertext bootstrapping will be integrated into the pipeline to enable encrypted inference on models beyond BERT-Tiny. The bootstrapping procedure will refresh ciphertexts between Transformer layers, removing the constraint that the entire circuit must fit within a single CKKS modulus chain. The depth allocation algorithm (Contribution~2) will be extended to a \emph{bootstrapping-aware} variant that co-optimises polynomial degree assignments and bootstrapping placement, treating each bootstrapping operation as both a depth cost (it consumes levels for the modular reduction approximation) and a depth gain (it restores the ciphertext to the top level). This will enable encrypted inference on BERT-Mini (4 layers), BERT-Small (4 layers), and ultimately BERT-Base (12 layers), allowing direct comparison with existing frameworks such as Iron~\cite{hao2022iron}, THE-X~\cite{chen2022thex}, and BOLT~\cite{pang2024bolt} under identical model configurations.
-\end{enumerate}
-
-These two extensions, combined with the multi-model plaintext results from Chapter~\ref{ch:results}, will provide a complete picture of how polynomial approximation quality and encrypted inference performance scale from small to production-relevant model sizes.
-
-
-\section{Future Directions}
-
-Beyond the planned extensions above, several longer-term research directions merit investigation:
-
-\begin{enumerate}
-    \item \textbf{Composite polynomial design.} Rather than a single high-degree polynomial, functions like Softmax could be approximated using compositions of lower-degree polynomials (e.g., $p_2 \circ p_1$), which consume fewer multiplicative levels for the same approximation quality.
-
-    \item \textbf{Multi-task and larger-model evaluation.} Extending validation to diverse NLP tasks (NLI, QA, summarisation) and larger models (DistilBERT, GPT-2) would strengthen the generalisability claims. The error propagation analysis (Contribution~5) predicts geometric error growth with model depth, which requires empirical validation at scale.
-
-    \item \textbf{Hybrid MPC--HE protocols.} Combining FHE for linear operations with secure multi-party computation (MPC) for non-linear activations is an active research direction~\cite{chen2022thex} that could eliminate the need for polynomial approximation entirely, at the cost of requiring interactive protocols.
-
-    \item \textbf{Attention-specific optimisations.} The current approach applies polynomial Softmax independently to each attention score vector. Exploiting the structure of attention (e.g., approximate top-$k$ selection, sparse attention patterns) under encryption could significantly reduce the computational cost.
-
-    \item \textbf{Graph neural network modelling.} For deeper models with many operations, the depth allocation problem could be formulated as a graph neural network (GNN) that learns to predict optimal degree assignments from activation statistics, amortising the optimisation cost across model variants and tasks.
 \end{enumerate}

@@ -12,17 +12,34 @@ from dataclasses import dataclass, field
 from typing import Dict, List
 
 
-# ── per-op depth costs (degree-8 polys, Horner-evaluated) ──────────────
+# ── per-op depth costs (FHE-pure broadcast via plaintext matmul) ─────
+# Each cost reflects the number of CKKS multiplicative levels consumed
+# by the *deepest* output of the op. Standardisation maps `x → scale·x +
+# shift` are folded into polynomial coefficients (see `_absorb_affine`)
+# and consume zero levels.
 DEPTH_COST: Dict[str, int] = {
-    "linear": 1,  # plaintext-weight matmul + bias add
-    "polyval_deg8": 3,  # ⌈log2(8)⌉ levels
-    "ct_ct_mul": 1,  # ciphertext × ciphertext
-    "ln_poly": 4,  # Σx² (1) + invsqrt-poly deg-8 (3)
-    "softmax_poly": 3,  # deg-8 polyval
+    "linear": 1,            # plaintext-weight matmul + bias add
+    "polyval_deg6": 3,      # GELU degree-6: ⌈log2(6)⌉+1 = 3
+    "polyval_deg8": 4,      # ⌈log2(8)⌉+1 = 4
+    "polyval_deg12": 4,     # softmax degree-12 (BSGS): ⌈log2(12)⌉+1 ≈ 4
+    "polyval_deg4": 3,      # LN inv-sqrt degree-4: ⌈log2(4)⌉+1 = 3
+    "ct_ct_mul": 1,         # ciphertext × ciphertext
+    # ln_poly with mean centring (mirrors PolynomialLayerNorm exactly):
+    #   mean_bc = sum(ct)/h            (1)  ← matmul-broadcast costs 1 level
+    #   centred = ct − mean_bc         (0)  ← centred at level 1
+    #   centred² = ct·ct               (1)  → 2
+    #   var     = sum/h                (1)  → 3
+    #   inv_σ   = polyval_deg4         (3)  → 6   (absorbed affine, level 6)
+    #   y       = centred · inv_σ      (1)  → 7   (deeper operand wins)
+    #   y       = γ · y                (1)  → 8
+    #   y      += β                    (0)  → 8
+    "ln_poly": 8,
+    # softmax_poly: just polyval_deg12 with affine absorbed = 4
+    "softmax_poly": 4,
     "residual_add": 0,
-    "qk_scores": 2,  # ⟨Q[i], K[j]⟩ via dot (1) + mul_plain mask (1)
-    "attn_apply": 2,  # mul_plain mask (1) + ct·ct broadcast (1); sum_slots is rotation-only
-    "head_concat": 1,  # mul_plain by per-head mask
+    "qk_scores": 2,         # ⟨Q[i], K[j]⟩ via dot (1) + matmul-broadcast (1)
+    "attn_apply": 3,        # mul_plain mask (1) + matmul broadcast (1) + ct·ct (1)
+    "head_concat": 1,       # mul_plain by per-head mask
 }
 
 
@@ -62,23 +79,26 @@ def transformer_layer_depth() -> int:
     """Return the *critical-path* depth of one LPAN BERT layer.
 
     Q, K, V linears run in parallel on independent ciphertexts so they
-    contribute one level, not three. Same for the two LN-polys (one
-    pre-attn, one pre-FFN), which are sequential. Sequence (per
-    ``docs/ckks_protocol.md`` §5):
+    contribute one level, not three. The actual code path (post-LN BERT)
+    is::
 
-        LN-poly → Q-linear (∥ K, V) → Q·Kᵀ scores → softmax-poly →
-        attn·V → O-linear → residual → LN-poly → W₁ → GELU-poly → W₂
+        attention_block:  Q-linear (∥K,V) → QK scores → softmax-poly →
+                          attn·V → head_concat → O-linear → residual → LN-poly
+        ffn_block:        W₁ → GELU-poly → W₂ → residual → LN-poly
     """
-    return (
-        DEPTH_COST["ln_poly"]
-        + DEPTH_COST["linear"]  # Q (K, V parallel)
-        + DEPTH_COST["qk_scores"]  # ⟨Q[i], K[j]⟩ + slot mask
+    attn = (
+        DEPTH_COST["linear"]         # Q (K, V parallel)
+        + DEPTH_COST["qk_scores"]
         + DEPTH_COST["softmax_poly"]
-        + DEPTH_COST["attn_apply"]  # mul_plain mask + ct·ct broadcast
-        + DEPTH_COST["head_concat"]  # zero-pad mask + add
-        + DEPTH_COST["linear"]  # O
+        + DEPTH_COST["attn_apply"]
+        + DEPTH_COST["head_concat"]
+        + DEPTH_COST["linear"]       # O
         + DEPTH_COST["ln_poly"]
-        + DEPTH_COST["linear"]  # W₁
-        + DEPTH_COST["polyval_deg8"]  # GELU
-        + DEPTH_COST["linear"]  # W₂
     )
+    ffn = (
+        DEPTH_COST["linear"]         # W₁
+        + DEPTH_COST["polyval_deg6"]  # GELU (LPAN uses degree 6)
+        + DEPTH_COST["linear"]       # W₂
+        + DEPTH_COST["ln_poly"]
+    )
+    return attn + ffn

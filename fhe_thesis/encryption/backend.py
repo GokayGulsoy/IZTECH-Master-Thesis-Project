@@ -53,6 +53,9 @@ class CKKSBackend(ABC):
     def add(self, a: Ciphertext, b: Ciphertext) -> Ciphertext: ...
 
     @abstractmethod
+    def sub(self, a: Ciphertext, b: Ciphertext) -> Ciphertext: ...
+
+    @abstractmethod
     def add_plain(self, a: Ciphertext, plain: Sequence[float]) -> Ciphertext: ...
 
     @abstractmethod
@@ -84,6 +87,32 @@ class CKKSBackend(ABC):
     def dot(self, a: Ciphertext, b: Ciphertext) -> Ciphertext:
         """Inner product ⟨a, b⟩. Returned ct holds the scalar in slot 0
         (and may broadcast it across slots, depending on the backend)."""
+
+    def broadcast_first_slot(
+        self, ct: Ciphertext, n: int, scale: float = 1.0
+    ) -> Ciphertext:
+        """Return a ct whose first n slots all hold ``scale * slot0(ct)``.
+
+        Default implementation uses ``matmul_plain`` with an (n, 1) column
+        vector of ``scale`` — works on backends where size-1 cts are first-class
+        (e.g. TenSEAL after .sum()). Backends with full-width broadcast scalars
+        (e.g. OpenFHE EvalSum) can override with a single ``mul_plain``.
+        """
+        return self.matmul_plain(ct, [[scale]] * n)
+
+    def place_scaled_at_slot(
+        self, ct: Ciphertext, slot: int, n: int, scale: float = 1.0
+    ) -> Ciphertext:
+        """Return a length-n ct where slot[``slot``] = ``scale·slot0(ct)`` and others 0.
+
+        Used by attention to scatter scalar dot-products into per-row score
+        vectors. Default uses ``matmul_plain`` with a sparse (n, 1) column;
+        backends with full-width broadcast scalars override with a one-hot
+        ``mul_plain`` mask.
+        """
+        weight = [[0.0]] * n
+        weight[slot] = [scale]
+        return self.matmul_plain(ct, weight)
 
     @abstractmethod
     def sum_slots(self, ct: Ciphertext) -> Ciphertext:
@@ -141,6 +170,9 @@ class TenSEALBackend(CKKSBackend):
     # ── arithmetic ────────────────────────────────────────────────────
     def add(self, a, b):
         return a + b
+
+    def sub(self, a, b):
+        return a - b
 
     def add_plain(self, a, plain):
         return a + list(plain)

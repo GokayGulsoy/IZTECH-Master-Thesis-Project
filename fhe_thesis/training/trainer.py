@@ -290,19 +290,24 @@ class AttentionDistillationTrainer(NaNSafeTrainer):
         is_training = model.training
 
         # --- Student forward ---
-        # Only request attention/hidden outputs during training (for KD loss).
+        # Only request attention/hidden outputs during training when KD is active.
         # During eval, extra outputs cause inhomogeneous prediction arrays.
+        need_kd_outputs = is_training and (self.beta > 0.0 or self.gamma > 0.0)
         outputs = model(
             input_ids=inputs["input_ids"],
             attention_mask=inputs["attention_mask"],
             labels=inputs.get("labels"),
-            output_attentions=is_training,
-            output_hidden_states=is_training,
+            output_attentions=need_kd_outputs,
+            output_hidden_states=need_kd_outputs,
         )
         task_loss = outputs.loss
 
         # During eval, skip teacher
         if not is_training:
+            return (task_loss, outputs) if return_outputs else task_loss
+
+        # Pure CE — no distillation needed, skip teacher entirely
+        if self.beta == 0.0 and self.gamma == 0.0:
             return (task_loss, outputs) if return_outputs else task_loss
 
         student_attns = outputs.attentions  # tuple of [B, H, S, S]
@@ -576,6 +581,7 @@ def train_and_eval(
 
 
 def distill_and_eval(
+    student_model: nn.Module,
     teacher_model: nn.Module,
     train_dataset,
     eval_dataset,
@@ -642,7 +648,7 @@ def distill_and_eval(
         save_total_limit=3,
         logging_steps=100,
         load_best_model_at_end=True,
-        metric_for_best_model="eval_accuracy",
+        metric_for_best_model=metric_for_best_model,
         greater_is_better=True,
         report_to="none",
         disable_tqdm=True,
@@ -662,7 +668,7 @@ def distill_and_eval(
         args=args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-        compute_metrics=compute_metrics,
+        compute_metrics=metric_fn,
     )
 
     print(
@@ -673,8 +679,8 @@ def distill_and_eval(
         print(f"  Resuming from checkpoint: {resume_from_checkpoint}")
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)
     results = trainer.evaluate()
-    acc = results["eval_accuracy"]
-    print(f"  {label} accuracy: {acc:.4f} ({acc:.2%})")
+    acc = results.get(f"eval_{primary_key}", results.get("eval_accuracy"))
+    print(f"  {label} {primary_key}: {acc:.4f}")
 
     # Make tensors contiguous before saving
     for p in student_model.parameters():

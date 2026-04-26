@@ -50,14 +50,15 @@ This thesis proposes the \textbf{Learnable Polynomial Approximation Network (LPA
     \item \textbf{Complete Polynomial LayerNorm Replacement.} The first approach to replace LayerNorm's inverse square root $1/\sqrt{\sigma^2 + \epsilon}$ with a learnable polynomial approximation across all layers of a deep Transformer, maintaining competitive accuracy. Prior methods (THE-X, Iron, BOLT, MPCFormer) either skip LayerNorm replacement, delegate it to client-side computation, or replace it with a simple affine transformation.
 \end{enumerate}
 
-All contributions are validated through a complete end-to-end pipeline on four BERT model variants (Tiny, Mini, Small, and Base) on the SST-2 sentiment classification benchmark. The LPAN framework achieves:
+All contributions are validated through a complete end-to-end pipeline on four BERT model variants (Tiny, Mini, Small, and Base) across two GLUE tasks: SST-2 sentiment classification and MRPC paraphrase detection. Smaller models (Tiny, Mini, Small) were trained on a local NVIDIA RTX 5070~Ti laptop GPU (12~GB VRAM, CUDA~12.8); BERT-Base was trained on a RunPod NVIDIA H100 SXM pod (80~GB HBM3, 28-vCPU Intel Xeon Platinum 8480+, CUDA~13.0). The LPAN framework achieves:
 \begin{itemize}
-    \item \textbf{BERT-Tiny:} 83.26\% $\to$ 83.14\% (\textbf{0.11\% drop})
-    \item \textbf{BERT-Mini:} 87.16\% $\to$ 86.81\% (\textbf{0.34\% drop})
-    \item \textbf{BERT-Small:} 87.73\% $\to$ 88.53\% (\textbf{0.80\% gain})
-    \item \textbf{BERT-Base:} 92.20\% $\to$ 91.86\% (\textbf{0.34\% drop})
+    \item \textbf{BERT-Tiny (SST-2):} 83.26\% $\to$ 83.14\% (\textbf{0.11\% drop})
+    \item \textbf{BERT-Mini (SST-2):} 87.16\% $\to$ 86.81\% (\textbf{0.34\% drop})
+    \item \textbf{BERT-Small (SST-2):} 87.73\% $\to$ 88.53\% (\textbf{0.80\% gain})
+    \item \textbf{BERT-Base (SST-2):} 93.12\% $\to$ 91.40\% (\textbf{1.72\% drop}, beats MPCFormer 91.3\%)
+    \item \textbf{BERT-Base (MRPC):} 83.82\% acc $\to$ 82.35\% acc / 87.71\% F1 (\textbf{1.47\% drop}, beats MPCFormer 82.1\%)
 \end{itemize}
-These results surpass all existing methods that replace only two of three non-linear operations, while our approach replaces \emph{all three}---including the previously untouched LayerNorm.
+These results demonstrate that LPAN is the only framework to replace \emph{all three} non-linear operations---including the previously untouched LayerNorm---while achieving accuracy competitive with or exceeding MPCFormer, which replaces only GELU and Softmax via multi-party computation.
 
 
 \section{Thesis Organisation}
