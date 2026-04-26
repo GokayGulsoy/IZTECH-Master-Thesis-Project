@@ -68,12 +68,13 @@ class OpenFHEBackend(CKKSBackend):
         import openfhe as ofhe  # local import: heavy native dep
 
         # ── Threading (O5) ─────────────────────────────────────────
-        if num_threads > 0:
-            ofhe.SetNumThreads(num_threads)
-        elif hasattr(ofhe, "SetNumThreads"):
-            # Default: use all available physical cores
-            cpu_count = os.cpu_count() or 1
-            ofhe.SetNumThreads(cpu_count)
+        if hasattr(ofhe, "SetNumThreads"):
+            if num_threads > 0:
+                ofhe.SetNumThreads(num_threads)
+            else:
+                # Default: use all available physical cores
+                cpu_count = os.cpu_count() or 1
+                ofhe.SetNumThreads(cpu_count)
 
         if bootstrap_level_budget is None:
             bootstrap_level_budget = [3, 3]
