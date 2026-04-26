@@ -146,13 +146,41 @@ def _plaintext_accuracy(model_key: str, samples: list, checkpoint_path: str | No
 
 # ── Per-sample FHE inference ─────────────────────────────────────────────
 
-def _run_fhe_sample(backend, weights, coeffs, emb_np, max_seq_len, n_jobs):
+def _run_fhe_sample(
+    backend,
+    weights,
+    coeffs,
+    emb_np,
+    max_seq_len,
+    n_jobs,
+    phase,
+    model,
+    checkpoint,
+):
     """Encrypt, infer, decrypt one sample. Returns (logits, timings)."""
-    from fhe_thesis.encryption.protocol import encrypt_inference
-    logits, timings = encrypt_inference(
-        backend, emb_np, weights, coeffs,
-        max_seq_len=max_seq_len, n_jobs=n_jobs,
-    )
+    if phase == "model":
+        from fhe_thesis.encryption.protocol import encrypt_inference
+
+        logits, timings = encrypt_inference(
+            backend,
+            emb_np,
+            weights,
+            coeffs,
+            max_seq_len=max_seq_len,
+            n_jobs=n_jobs,
+        )
+    else:
+        from fhe_thesis.encryption.protocol import run_phase
+
+        logits, timings = run_phase(
+            phase,
+            model,
+            backend,
+            emb_np,
+            checkpoint_path=checkpoint,
+            max_seq_len=max_seq_len,
+            n_jobs=n_jobs,
+        )
     return logits, timings
 
 
@@ -180,6 +208,7 @@ def main():
     results: Dict = {
         "model": args.model,
         "task": args.task,
+        "phase": args.phase,
         "n_samples": len(samples),
         "max_seq_len": args.max_seq_len,
         "n_jobs": args.n_jobs,
@@ -228,7 +257,15 @@ def main():
     for idx, (emb, label) in enumerate(zip(embeddings, labels)):
         t_start = time.time()
         logits, timings = _run_fhe_sample(
-            backend, weights, coeffs, emb, args.max_seq_len, args.n_jobs
+            backend,
+            weights,
+            coeffs,
+            emb,
+            args.max_seq_len,
+            args.n_jobs,
+            args.phase,
+            args.model,
+            args.checkpoint,
         )
         wall = time.time() - t_start
 

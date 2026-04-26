@@ -118,15 +118,13 @@ class OpenFHEBackend(CKKSBackend):
         cc.EvalMultKeyGen(keys.secretKey)
         # Galois keys for rotations and EvalSum (needed by sum_slots/dot/matmul).
         cc.EvalSumKeyGen(keys.secretKey)
-        # Generate rotation keys for the indices used by diagonal-encoded matmul.
-        # We need rotations up to ``num_slots-1`` (positive) and the negative
-        # power-of-two shifts used for the replicate-and-add step.
-        # Generating only what we'll use saves O(GB) of rotation-key memory at
-        # high mult depth.
-        rot_indices = list(range(1, num_slots))
-        # Negative shifts for the replicate-by-rotate-add step (powers of two).
+        # Generate a compact rotation-key set: ± powers-of-two only.
+        # Any required rotation r is composed as a sum of binary shifts,
+        # reducing key memory from O(num_slots) to O(log num_slots).
+        rot_indices = []
         k = 1
         while k < num_slots:
+            rot_indices.append(k)
             rot_indices.append(-k)
             k <<= 1
         cc.EvalRotateKeyGen(keys.secretKey, rot_indices)
@@ -154,6 +152,30 @@ class OpenFHEBackend(CKKSBackend):
             n_slots=num_slots,
             initial_levels=multiplicative_depth,
         )
+
+    def _rotate(self, ct: Ciphertext, steps: int) -> Ciphertext:
+        """Rotate by composing power-of-two shifts.
+
+        OpenFHE rotation keys are generated only for ±2^k. This helper
+        decomposes any requested rotation into those basis shifts.
+        """
+        if steps == 0:
+            return ct
+        # Normalize to the shortest equivalent shift in (-num_slots/2, num_slots/2].
+        s = steps % self._num_slots
+        if s > self._num_slots // 2:
+            s -= self._num_slots
+
+        sign = 1 if s > 0 else -1
+        rem = abs(s)
+        out = ct
+        bit = 1
+        while rem:
+            if rem & 1:
+                out = self._cc.EvalRotate(out, sign * bit)
+            rem >>= 1
+            bit <<= 1
+        return out
 
     # ── encoding helpers ──────────────────────────────────────────────
     def _encode(self, values: Sequence[float], ct=None):
@@ -276,7 +298,7 @@ class OpenFHEBackend(CKKSBackend):
         x = ct
         cur = in_dim
         while cur < n:
-            x = self._cc.EvalAdd(x, self._cc.EvalRotate(x, -cur))
+            x = self._cc.EvalAdd(x, self._rotate(x, -cur))
             cur <<= 1
 
         # ── Diagonal multiply-accumulate ────────────────────────────
@@ -284,7 +306,7 @@ class OpenFHEBackend(CKKSBackend):
         for i, diag in enumerate(diagonals):
             if diag is None:
                 continue
-            rot_x = x if i == 0 else self._cc.EvalRotate(x, i)
+            rot_x = x if i == 0 else self._rotate(x, i)
             term = self._cc.EvalMult(rot_x, self._encode(diag, ct=rot_x))
             result = term if result is None else self._cc.EvalAdd(result, term)
 
