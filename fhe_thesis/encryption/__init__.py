@@ -3,7 +3,7 @@
 Public surface for the LPAN-FHE protocol (see ``docs/ckks_protocol.md``).
 
 Imports are deliberately lazy so that backend-agnostic modules
-(``depth``, ``packing``) can be loaded on machines without TenSEAL.
+(``depth``, ``packing``) can be imported without triggering openfhe.
 """
 
 from __future__ import annotations
@@ -15,13 +15,8 @@ __all__ = [
     "CKKSBackend",
     "DEPTH_COST",
     "DepthAudit",
-    "CheckpointSession",
-    "CheckpointStats",
     "PolyCoeffs",
-    "TenSEALBackend",
     "TokenPackedTensor",
-    "reencrypt_checkpoint",
-    "create_ckks_context",
     "enc_attention_apply",
     "enc_gelu_poly",
     "enc_linear",
@@ -35,18 +30,13 @@ __all__ = [
     "encrypt_layer",
     "load_coefficients",
     "load_model_weights",
-    "make_context",
     "run_phase",
     "transformer_layer_depth",
 ]
 
 
 def __getattr__(name):  # PEP 562 lazy import
-    if name in {"create_ckks_context", "make_context"}:
-        from . import context
-
-        return getattr(context, name)
-    if name in {"BackendCapabilities", "CKKSBackend", "TenSEALBackend"}:
+    if name in {"BackendCapabilities", "CKKSBackend"}:
         from . import backend
 
         return getattr(backend, name)
@@ -70,10 +60,6 @@ def __getattr__(name):  # PEP 562 lazy import
         from . import coefficients
 
         return getattr(coefficients, name)
-    if name in {"CheckpointSession", "CheckpointStats", "reencrypt_checkpoint"}:
-        from . import checkpoint
-
-        return getattr(checkpoint, name)
     if name in {
         "encrypt_attention_block",
         "encrypt_ffn_block",

@@ -97,21 +97,41 @@ cd "$BUILD_DIR"
 # ── 4. openfhe-python bindings ─────────────────────────────────────────
 echo
 echo "[4/6] Building openfhe-python bindings..."
-if [[ ! -d openfhe-python ]]; then
-    git clone --depth 1 --branch "$OPENFHE_TAG" \
-        https://github.com/openfheorg/openfhe-python.git 2>/dev/null \
-    || git clone --depth 1 https://github.com/openfheorg/openfhe-python.git
-fi
-cd openfhe-python
 
-# Ensure the venv exists first (we'll install the wheel into it in step 5).
+# Ensure the venv exists before building.
 python3 -m venv "$VENV" --system-site-packages
 source "$VENV/bin/activate"
+pip install --upgrade pip setuptools wheel pybind11 -q
 
-# Build the wheel into a local dist/ directory, then install.
-pip install --upgrade pip setuptools wheel pybind11
-pip install . --no-build-isolation
-echo "  openfhe-python installed ✓"
+# v0.8.10 is the last release that targets OpenFHE 1.2.x.
+# Later tags (v1.3+) require OpenFHE ≥1.3 and are not compatible.
+OPENFHE_PY_TAG="v0.8.10"
+if [[ ! -d "$BUILD_DIR/openfhe-python" ]]; then
+    git clone --depth 1 --branch "$OPENFHE_PY_TAG" \
+        https://github.com/openfheorg/openfhe-python.git \
+        "$BUILD_DIR/openfhe-python"
+fi
+cd "$BUILD_DIR/openfhe-python"
+
+# Always use direct CMake build (pip install does not forward OpenFHE_DIR).
+mkdir -p build && cd build
+cmake .. \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DPYTHON_EXECUTABLE="$(python3 -c 'import sys; print(sys.executable)')" \
+    -DOpenFHE_DIR=/usr/local/lib/OpenFHE \
+    -Dpybind11_DIR="$(python3 -c 'import pybind11; print(pybind11.get_cmake_dir())')"
+make -j"$NPROC"
+
+# Install .so directly into venv site-packages.
+SOFILE=$(find . -name "openfhe*.so" | head -1)
+if [[ -z "$SOFILE" ]]; then
+    echo "ERROR: openfhe .so not found after build"
+    exit 1
+fi
+SITE=$(python3 -c "import site; print(site.getsitepackages()[0])")
+cp "$SOFILE" "$SITE/"
+echo "  Installed $SOFILE → $SITE/"
+echo "  openfhe-python $OPENFHE_PY_TAG installed ✓"
 cd "$BUILD_DIR"
 
 # ── 5. Python dependencies ─────────────────────────────────────────────
