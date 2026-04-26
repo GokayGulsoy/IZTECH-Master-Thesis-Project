@@ -114,6 +114,13 @@ class CKKSBackend(ABC):
         weight[slot] = [scale]
         return self.matmul_plain(ct, weight)
 
+    def rotate(self, ct: Ciphertext, steps: int) -> Ciphertext:
+        """Rotate ciphertext slots left by *steps* (negative = right).
+
+        Override in backends that support Galois rotations.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not support rotate")
+
     @abstractmethod
     def sum_slots(self, ct: Ciphertext) -> Ciphertext:
         """Sum of all slots, broadcast back to slot 0 (scalar ct)."""

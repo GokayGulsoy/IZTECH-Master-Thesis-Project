@@ -232,6 +232,7 @@ def encrypt_attention_block(
         layer.bo,
         softmax_coeffs=sm,
         num_heads=num_heads,
+        n_jobs=n_jobs,
     )
     timings["MHA"] = time.time() - t
 

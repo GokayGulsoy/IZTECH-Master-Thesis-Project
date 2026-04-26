@@ -177,6 +177,10 @@ class OpenFHEBackend(CKKSBackend):
             bit <<= 1
         return out
 
+    def rotate(self, ct: Ciphertext, steps: int) -> Ciphertext:
+        """Public slot rotation (delegates to composed power-of-two shifts)."""
+        return self._rotate(ct, steps)
+
     # ── encoding helpers ──────────────────────────────────────────────
     def _encode(self, values: Sequence[float], ct=None):
         # Pad / truncate to num_slots and pack as a CKKS plaintext.

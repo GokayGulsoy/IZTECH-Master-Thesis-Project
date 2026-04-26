@@ -8,11 +8,12 @@ Phase-2 scope: Q·Kᵀ scores, softmax-poly, attention·V.
 
 Threading (O5)
 --------------
-Token-level loops in ``enc_linear``, ``enc_gelu_poly``, and ``enc_ln_poly``
-are embarrassingly parallel — each ciphertext is independent. These functions
-accept an optional ``n_jobs`` argument (default 1). Set ``n_jobs=-1`` to use
-all CPUs, or pass an explicit count. Attention ops remain serial because of
-cross-token Q·Kᵀ dependencies.
+Token-level loops in ``enc_linear``, ``enc_gelu_poly``, ``enc_ln_poly``,
+and all attention ops are embarrassingly parallel — each ciphertext or
+attention head is independent. All functions accept an optional ``n_jobs``
+argument (default 1). Set ``n_jobs=-1`` to use all CPUs, or pass an
+explicit count. ``enc_self_attention`` distributes heads across threads
+and subdivides remaining threads for inner row-level parallelism.
 """
 
 from __future__ import annotations
@@ -196,6 +197,7 @@ def enc_qk_scores(
     Q: TokenPackedTensor,
     K: TokenPackedTensor,
     scale: float,
+    n_jobs: Optional[int] = 1,
 ) -> TokenPackedTensor:
     """Compute scaled scores S[i,j] = scale · ⟨Q[i], K[j]⟩.
 
@@ -203,21 +205,7 @@ def enc_qk_scores(
     ciphertext per query row, with seq_len slots holding the scores
     for that row against every key.
 
-    Strategy
-    --------
-    For each query row ``Q[i]``, we compute ``seq_len`` inner products
-    against ``K[0], K[1], …, K[L-1]`` and pack them slot-wise into a
-    single result ciphertext. Each inner product is materialised by:
-
-      1. ``s_j = ⟨Q[i], K[j]⟩``  → ``backend.dot``, returns a size-1 ct.
-      2. broadcast the scalar into slot ``j`` via plaintext matmul with
-         an ``(L, 1)`` weight matrix that is ``scale`` in row ``j`` and
-         ``0`` elsewhere — yields a size-*L* ct with the scaled score
-         in slot ``j`` and zeros elsewhere.
-      3. accumulate (free additions) into the row's result ciphertext.
-
-    Cost: 1 ct·ct multiplication (dot) + 1 plaintext matmul = 2
-    multiplicative levels per row, matching ``DEPTH_COST['qk_scores']``.
+    ``n_jobs`` parallelises the outer loop over query rows (O5).
     """
     if Q.seq_len != K.seq_len:
         raise ValueError(f"Q.seq_len {Q.seq_len} != K.seq_len {K.seq_len}")
@@ -226,15 +214,20 @@ def enc_qk_scores(
 
     L = Q.seq_len
 
-    rows = []
-    for i in range(L):
+    def _compute_row(i):
         row_ct = None
         for j in range(L):
-            score = backend.dot(Q.cts[i], K.cts[j])  # slot 0 holds the scalar
-            # Place scaled score at slot j of an L-vector (zeros elsewhere).
+            score = backend.dot(Q.cts[i], K.cts[j])
             term = backend.place_scaled_at_slot(score, j, L, scale)
             row_ct = term if row_ct is None else backend.add(row_ct, term)
-        rows.append(row_ct)
+        return row_ct
+
+    workers = _resolve_jobs(n_jobs)
+    if workers == 1:
+        rows = [_compute_row(i) for i in range(L)]
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            rows = list(pool.map(_compute_row, range(L)))
     return TokenPackedTensor.from_ciphertexts(rows, hidden_dim=L)
 
 
@@ -243,11 +236,14 @@ def enc_softmax_poly(
     scores: TokenPackedTensor,
     power_coeffs: Sequence[float],
     interval: tuple[float, float],
+    n_jobs: Optional[int] = 1,
 ) -> TokenPackedTensor:
     """Apply the LPAN softmax polynomial element-wise on each row.
 
     Uses :func:`_absorb_affine` so the interval standardisation
     consumes zero multiplicative levels.
+
+    ``n_jobs`` parallelises across score rows (O5).
     """
     a, b = interval
     width = b - a
@@ -256,7 +252,12 @@ def enc_softmax_poly(
     absorbed = _absorb_affine(power_coeffs, scale, shift)
 
     L = scores.hidden_dim
-    new_cts = [backend.polyval(ct, absorbed) for ct in scores.cts]
+    workers = _resolve_jobs(n_jobs)
+    if workers == 1:
+        new_cts = [backend.polyval(ct, absorbed) for ct in scores.cts]
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            new_cts = list(pool.map(lambda ct: backend.polyval(ct, absorbed), scores.cts))
     return TokenPackedTensor.from_ciphertexts(new_cts, hidden_dim=L)
 
 
@@ -264,6 +265,7 @@ def enc_attention_apply(
     backend: CKKSBackend,
     attn: TokenPackedTensor,
     V: TokenPackedTensor,
+    n_jobs: Optional[int] = 1,
 ) -> TokenPackedTensor:
     """Compute output[i] = Σ_j attn[i, j] · V[j].
 
@@ -273,13 +275,8 @@ def enc_attention_apply(
         Shape (seq_len, seq_len) — one ct per query row, seq_len slots.
     V : TokenPackedTensor
         Shape (seq_len, head_dim) — one ct per token row, head_dim slots.
-
-    Strategy
-    --------
-    For each (i, j) we extract the scalar ``attn[i, j]`` by masking +
-    summing slots, multiply it into ``V[j]`` (a head_dim-vector ct),
-    and accumulate. Cost per output row: ``seq_len × (mul_plain + sum
-    + ct·ct + add)`` operations.
+    n_jobs : int
+        Row-level parallelism (O5).
     """
     if attn.seq_len != V.seq_len:
         raise ValueError(f"attn.seq_len {attn.seq_len} != V.seq_len {V.seq_len}")
@@ -291,31 +288,32 @@ def enc_attention_apply(
 
     L = attn.seq_len
     head_dim = V.hidden_dim
-    # Pre-build one-hot masks for slot extraction.
     masks = [[0.0] * L for _ in range(L)]
     for j in range(L):
         masks[j][j] = 1.0
 
-    out_cts = []
-    for i in range(L):
+    def _compute_row(i):
         row = None
         attn_i = attn.cts[i]
         for j in range(L):
-            # Extract scalar attn[i, j]: keep slot j, sum to broadcast.
             slot = backend.mul_plain(attn_i, masks[j])
-            scalar = backend.sum_slots(slot)  # slot 0 holds the scalar
-            # Broadcast to head_dim slots so it can multiply V[j].
+            scalar = backend.sum_slots(slot)
             scalar_broadcast = backend.broadcast_first_slot(scalar, head_dim, 1.0)
-            # Lazy relin (O6): defer relinearisation until after accumulation.
             if hasattr(backend, "mul_no_relin"):
                 term = backend.mul_no_relin(V.cts[j], scalar_broadcast)
             else:
                 term = backend.mul(V.cts[j], scalar_broadcast)
             row = term if row is None else backend.add(row, term)
-        # Relinearise once after the full accumulation loop (O6).
         if hasattr(backend, "relinearize") and row is not None:
             row = backend.relinearize(row)
-        out_cts.append(row)
+        return row
+
+    workers = _resolve_jobs(n_jobs)
+    if workers == 1:
+        out_cts = [_compute_row(i) for i in range(L)]
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            out_cts = list(pool.map(_compute_row, range(L)))
     return TokenPackedTensor.from_ciphertexts(out_cts, hidden_dim=head_dim)
 
 
@@ -332,20 +330,16 @@ def enc_self_attention(
     bo: np.ndarray,
     softmax_coeffs: PolyCoeffs,
     num_heads: int,
+    n_jobs: Optional[int] = 1,
 ) -> TokenPackedTensor:
     """End-to-end encrypted multi-head self-attention.
 
     Splits the **plaintext** Q/K/V weight matrices row-wise into
-    ``num_heads`` slices of ``(head_dim, hidden)`` and runs each head
-    independently as its own ``enc_linear → enc_qk_scores →
-    enc_softmax_poly → enc_attention_apply`` pipeline. The output of
-    each head is a token-packed tensor of width ``head_dim``; we
-    concatenate them under FHE by zero-padding the slot positions and
-    summing — no decryption ever happens server-side, preserving the
-    PF-SR (Pure-FHE Single-Round) protocol guarantee.
+    ``num_heads`` slices and runs each head independently. Heads are
+    processed **in parallel** when ``n_jobs > 1`` (O5), with remaining
+    threads subdivided for inner row-level parallelism.
 
-    The scale ``1/√head_dim`` is folded into ``enc_qk_scores`` so the
-    softmax polynomial sees scores in its profiled interval.
+    The scale ``1/√head_dim`` is folded into ``enc_qk_scores``.
     """
     if Wq.shape != Wk.shape or Wq.shape != Wv.shape:
         raise ValueError("Q/K/V weight shapes must match")
@@ -355,48 +349,56 @@ def enc_self_attention(
     head_dim = hidden // num_heads
     inv_sqrt_d = 1.0 / np.sqrt(head_dim)
 
-    head_outputs = []  # list of TokenPackedTensor[head_dim] per head
-    for h in range(num_heads):
+    workers = _resolve_jobs(n_jobs)
+    # Distribute threads: heads in parallel, remaining for inner ops.
+    head_workers = min(workers, num_heads)
+    inner_jobs = max(1, workers // head_workers) if head_workers > 1 else workers
+
+    def _process_head(h):
         s, e = h * head_dim, (h + 1) * head_dim
         Wq_h, bq_h = Wq[s:e, :], bq[s:e]
         Wk_h, bk_h = Wk[s:e, :], bk[s:e]
         Wv_h, bv_h = Wv[s:e, :], bv[s:e]
 
-        Q_h = enc_linear(backend, x, Wq_h, bq_h)
-        K_h = enc_linear(backend, x, Wk_h, bk_h)
-        V_h = enc_linear(backend, x, Wv_h, bv_h)
+        Q_h = enc_linear(backend, x, Wq_h, bq_h, n_jobs=inner_jobs)
+        K_h = enc_linear(backend, x, Wk_h, bk_h, n_jobs=inner_jobs)
+        V_h = enc_linear(backend, x, Wv_h, bv_h, n_jobs=inner_jobs)
 
-        S = enc_qk_scores(backend, Q_h, K_h, scale=inv_sqrt_d)
+        S = enc_qk_scores(backend, Q_h, K_h, scale=inv_sqrt_d, n_jobs=inner_jobs)
 
-        # Select per-head softmax coefficients if available
         if softmax_coeffs.per_head:
             head_power_coeffs = softmax_coeffs.power_coeffs[h].tolist()
         else:
             head_power_coeffs = softmax_coeffs.power_coeffs.tolist()
 
         A = enc_softmax_poly(
-            backend, S, head_power_coeffs, softmax_coeffs.interval
+            backend, S, head_power_coeffs, softmax_coeffs.interval, n_jobs=inner_jobs
         )
-        H = enc_attention_apply(backend, A, V_h)
-        head_outputs.append(H)
+        return enc_attention_apply(backend, A, V_h, n_jobs=inner_jobs)
 
-    concat = _concat_heads_zero_pad(backend, head_outputs, hidden)
-    return enc_linear(backend, concat, Wo, bo)
+    if head_workers > 1:
+        with ThreadPoolExecutor(max_workers=head_workers) as pool:
+            head_outputs = list(pool.map(_process_head, range(num_heads)))
+    else:
+        head_outputs = [_process_head(h) for h in range(num_heads)]
+
+    concat = _concat_heads_zero_pad(backend, head_outputs, hidden, n_jobs=workers)
+    return enc_linear(backend, concat, Wo, bo, n_jobs=workers)
 
 
 def _concat_heads_zero_pad(
     backend: CKKSBackend,
     heads: list[TokenPackedTensor],
     hidden_dim: int,
+    n_jobs: Optional[int] = 1,
 ) -> TokenPackedTensor:
     """Concatenate per-head outputs token-wise into one ciphertext per
     token of width ``hidden_dim``, **without** ever decrypting.
 
-    For each head ``h`` and each token ``i`` we multiply the head's
-    ciphertext by a one-hot-block plaintext of length ``hidden_dim``
-    that is 1 inside the head's slot range and 0 elsewhere. Adding the
-    masked head ciphertexts yields the concatenation in the right
-    slots. Cost: ``num_heads × seq_len × (mul_plain + add)`` ops.
+    When the backend supports ``rotate()``, each head's ciphertext is
+    slot-shifted to its destination range and added — costing only
+    ``num_heads`` rotations + additions per token (zero multiplicative
+    levels). Falls back to ``matmul_plain`` when rotation is unavailable.
     """
     num_heads = len(heads)
     head_dim = heads[0].hidden_dim
@@ -406,25 +408,39 @@ def _concat_heads_zero_pad(
             f"head_dim×num_heads ({head_dim}×{num_heads}) != hidden_dim ({hidden_dim})"
         )
 
-    # Per-head zero-pad weight matrices. ``W_h`` has shape
-    # ``(hidden_dim, head_dim)``; row ``k`` selects the head's input
-    # slot ``k - h·head_dim`` if ``k`` falls in the head's destination
-    # range, else zero. Multiplying the head's size-``head_dim`` ct by
-    # this plaintext matmul produces a size-``hidden_dim`` ct with the
-    # head's values placed in slots ``[h·head_dim, (h+1)·head_dim)``
-    # and zeros elsewhere — a strict zero-pad, no decryption.
-    weights = []
-    for h in range(num_heads):
-        W = [[0.0] * head_dim for _ in range(hidden_dim)]
-        for j in range(head_dim):
-            W[h * head_dim + j][j] = 1.0
-        weights.append(W)
+    use_rotation = backend.capabilities.supports_galois_rotations
 
-    out_cts = []
-    for i in range(seq_len):
-        row = None
+    if use_rotation:
+        # Rotation-based concat: shift each head to its slot range
+        # then add. Cost: num_heads rotations per token, 0 mult levels.
+        def _concat_token(i):
+            row = heads[0].cts[i]  # head 0 is already at slots 0..head_dim-1
+            for h in range(1, num_heads):
+                # Rotate right by h*head_dim → places head's slots at
+                # [h*head_dim, (h+1)*head_dim).
+                shifted = backend.rotate(heads[h].cts[i], -(h * head_dim))
+                row = backend.add(row, shifted)
+            return row
+    else:
+        # Fallback: matmul_plain approach (costs 1 multiplicative level).
+        weights = []
         for h in range(num_heads):
-            term = backend.matmul_plain(heads[h].cts[i], weights[h])
-            row = term if row is None else backend.add(row, term)
-        out_cts.append(row)
+            W = [[0.0] * head_dim for _ in range(hidden_dim)]
+            for j in range(head_dim):
+                W[h * head_dim + j][j] = 1.0
+            weights.append(W)
+
+        def _concat_token(i):
+            row = None
+            for h in range(num_heads):
+                term = backend.matmul_plain(heads[h].cts[i], weights[h])
+                row = term if row is None else backend.add(row, term)
+            return row
+
+    workers = _resolve_jobs(n_jobs)
+    if workers == 1:
+        out_cts = [_concat_token(i) for i in range(seq_len)]
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            out_cts = list(pool.map(_concat_token, range(seq_len)))
     return TokenPackedTensor.from_ciphertexts(out_cts, hidden_dim=hidden_dim)
