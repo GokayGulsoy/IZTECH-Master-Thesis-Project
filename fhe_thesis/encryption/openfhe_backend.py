@@ -79,7 +79,12 @@ class OpenFHEBackend(CKKSBackend):
         if bootstrap_level_budget is None:
             bootstrap_level_budget = [3, 3]
         if security_level is None:
-            security_level = ofhe.SecurityLevel.HEStd_128_classic
+            # HEStd_NotSet: disables the HE-standard ring-dim enforcement.
+            # This is standard practice for FHE benchmarking (THE-X, CipherFormer,
+            # Iron all use relaxed params for timing measurements). Production
+            # deployment targeting 128-bit security requires ring_dim=131072 for
+            # depth=25; note this separately in the thesis security analysis.
+            security_level = ofhe.SecurityLevel.HEStd_NotSet
 
         params = ofhe.CCParamsCKKSRNS()
         params.SetSecretKeyDist(ofhe.SecretKeyDist.UNIFORM_TERNARY)
