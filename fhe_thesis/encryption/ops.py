@@ -148,8 +148,6 @@ def enc_ln_poly(
     into the polynomial coefficients via :func:`_absorb_affine` so it
     consumes zero CKKS levels.
     """
-    `n_jobs` controls parallelism across token rows (O5).
-    """
     h = x.hidden_dim
     inv_h = 1.0 / h
     a, b = invsqrt_interval
