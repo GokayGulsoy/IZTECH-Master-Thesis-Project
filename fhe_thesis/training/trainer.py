@@ -329,7 +329,11 @@ class AttentionDistillationTrainer(NaNSafeTrainer):
         # --- Attention distribution matching (per-layer KL divergence) ---
         attn_loss = torch.tensor(0.0, device=device)
         num_layers = min(len(student_attns), len(teacher_attns))
+        attn_count = 0
         for l in range(num_layers):
+            # Skip layers that don't produce attention (e.g., LinearMixingAttention)
+            if student_attns[l] is None:
+                continue
             # student/teacher: [B, H, S, S] — already probability distributions
             s_attn = student_attns[l].float().clamp(min=1e-8)
             t_attn = teacher_attns[l].float().clamp(min=1e-8)
@@ -337,7 +341,8 @@ class AttentionDistillationTrainer(NaNSafeTrainer):
             attn_loss = attn_loss + F.kl_div(
                 s_attn.log(), t_attn, reduction="batchmean"
             )
-        attn_loss = attn_loss / max(num_layers, 1)
+            attn_count += 1
+        attn_loss = attn_loss / max(attn_count, 1)
 
         # --- Hidden state matching (per-layer MSE) ---
         hid_loss = torch.tensor(0.0, device=device)

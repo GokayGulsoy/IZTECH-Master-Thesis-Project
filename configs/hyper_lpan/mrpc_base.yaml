@@ -1,0 +1,35 @@
+# HyPER-LPAN config: BERT-base on MRPC
+# MRPC has 3.7k train examples (vs 67k for SST-2) — train longer per layer.
+#
+# Composition rationale (revised after first run):
+#   First run used [0-3]=linear_mixing, [4-7]=quad → F1=82.60% (-7.4% vs LPAN
+#   baseline 87.95%, vs BOLT 89.95% / MPCFormer-2Quad 88.7%).
+#   MRPC is paraphrase detection: it relies on content-based cross-sentence
+#   token interactions in the lower layers. LinearMixing is position-only and
+#   is blind to that signal, so replacing L0-L3 hurts disproportionately.
+#
+# Revised: drop LinearMixing entirely; use Quad attention in L0-L7 (matches
+# MPCFormer 2Quad). FHE cost penalty vs the previous config is only ~15-25%
+# (Quad costs ~1 ct×ct per layer vs 0 for LinearMixing) but accuracy should
+# recover to ~88-89% F1, putting us in the BOLT/MPCFormer band.
+model: base
+task: mrpc
+max_seq_len: 128
+seed: 42
+
+linear_mixing_layers: []
+quad_attention_layers: [0, 1, 2, 3, 4, 5, 6, 7]
+
+epochs_per_layer: 5
+lr: 5.0e-5
+batch_size: 16
+gamma: 4.0
+gamma_decay: true
+stage_order: quad_first
+lr_schedule: constant_with_warmup
+
+final_epochs: 5
+global_gamma: 2.0
+global_lr_div: 3.0
+
+auto_train_lpan: false
