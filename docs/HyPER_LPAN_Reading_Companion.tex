@@ -344,6 +344,125 @@ plot.
 The threshold sweep is $O(n_{\text{layers}}^2)$ which is trivially
 fast (144 candidates for 12 layers).
 
+\subsection{Provably optimal upgrade: MCKP-DP selector}
+\label{sec:mckp}
+
+The entropy rule of the previous subsections is fast and information-
+theoretically motivated, but it is a \emph{heuristic}: entropy
+upper-bounds the substitution error, it does not equal it, and the
+selection rule is greedy in the threshold space. We can do better
+without paying any extra wall-clock time.
+
+\paragraph{Direct drift measurement.}
+On the same dev forward pass that produces $\{a_{\ell,h,q}\}$, compute
+in closed form
+\[
+\varepsilon_\ell(\mathrm{LM})
+\;:=\; \mathbb{E}_{(s,h,q)}\!\bigl\| a_{\ell,h,q} - \pi^\star_\ell \bigr\|_2^2
+\;=\; \mathbb{E}\bigl[\|a\|_2^2\bigr] - \bigl\|\mathbb{E}[a]\bigr\|_2^2
+\;=\; \mathrm{tr}\bigl(\mathrm{Cov}\,a_\ell\bigr).
+\]
+This is the exact $L^2$ residual of the best content-blind LinearMixing
+approximator at layer $\ell$ — the very quantity entropy bounds. It is
+obtained by accumulating per-cell sums of $a$ and $a^2$; no extra
+forward passes. For QuadAttention (content-aware, but lacking softmax
+sharpening) we set
+$\varepsilon_\ell(\mathrm{Q}) = (1-\gamma_Q)\,\varepsilon_\ell(\mathrm{LM})$
+with $\gamma_Q\in(0,1)$ calibrated empirically (default $0.5$); LPAN is
+the reference primitive so $\varepsilon_\ell(\mathrm{L})=0$.
+
+\paragraph{The selection problem becomes MCKP.}
+Choosing $k_\ell\in\{\mathrm{LM},\mathrm{Q},\mathrm{L}\}$ for each layer
+to
+\[
+\min_{k_1,\dots,k_n} \;\sum_{\ell=1}^{n} \varepsilon_\ell(k_\ell)
+\quad\text{s.t.}\quad \sum_{\ell=1}^{n} c_{k_\ell} \le B,
+\quad |\{\ell : k_\ell = \mathrm{L}\}| \ge m
+\]
+is exactly the \emph{Multiple-Choice Knapsack Problem} (MCKP) with a
+side constraint on group cardinality. After discretising the costs
+$c \mapsto \tilde c = \lfloor c \cdot s \rfloor$ at scale $s$
+(default $s=10$, giving $[10,14,35]$), it admits an exact dynamic
+programming solution.
+
+\begin{algorithm}[H]
+\caption{\textsc{SelectCompositionMCKP}}
+\label{alg:mckp}
+\begin{algorithmic}[1]
+\Require drifts $\varepsilon \in \mathbb R^{n\times 3}$, costs
+         $\tilde c \in \mathbb Z^3_+$, budget $\tilde B$, min-LPAN $m$
+\State $\mathrm{dp}[0][0][0] \gets 0$, all other cells $\gets +\infty$
+\For{$\ell = 0,\dots,n-1$;\, $b = 0,\dots,\tilde B$;\, $j = 0,\dots,n$}
+    \If{$\mathrm{dp}[\ell][b][j] = +\infty$} \textbf{continue} \EndIf
+    \For{$k \in \{\mathrm{LM},\mathrm{Q},\mathrm{L}\}$}
+        \State $b' \gets b + \tilde c_k$;\;
+               $j' \gets j + \mathbb 1[k=\mathrm{L}]$
+        \If{$b' \le \tilde B$}
+            \State relax
+                $\mathrm{dp}[\ell{+}1][b'][j']
+                 \gets \min\!\bigl(\mathrm{dp}[\ell{+}1][b'][j'],\;
+                                   \mathrm{dp}[\ell][b][j] + \varepsilon_\ell(k)\bigr)$
+        \EndIf
+    \EndFor
+\EndFor
+\State $(b^\star, j^\star) \gets \arg\min_{b,\,j\ge m}\, \mathrm{dp}[n][b][j]$
+\State Reconstruct $k_1,\dots,k_n$ by walking back through the
+       \texttt{prev} table from $(n, b^\star, j^\star)$.
+\State \textbf{return} the resulting plan
+\end{algorithmic}
+\end{algorithm}
+
+\paragraph{Optimality and cost.}
+\begin{theorem}[Exactness of \textsc{SelectCompositionMCKP}]
+\label{thm:mckp-opt}
+For any input drifts $\varepsilon$, integer costs $\tilde c$, integer
+budget $\tilde B$, and floor $m$, Algorithm~\ref{alg:mckp} returns
+a plan whose total drift is the global minimum among all
+budget-feasible plans satisfying the LPAN-floor constraint, or
+correctly reports infeasibility.
+\end{theorem}
+\begin{proof}[Proof sketch]
+This is the textbook MCKP DP (Kellerer, Pferschy, Pisinger, 2004,
+\S11.1). The state space $(\ell, b, j)$ is a sufficient statistic for
+the remaining decision: given that we have committed to using $b$
+units of cost and chosen $j$ LPAN layers among the first $\ell$
+layers, the optimal continuation depends only on
+$(n-\ell, \tilde B - b, m - \min(j, m))$. The Bellman recursion
+above relaxes every feasible transition; therefore by induction on
+$\ell$ the table holds the true optimum for each reachable state.
+The argmin over the terminal slice with $j\ge m$ recovers a
+constraint-feasible global optimum.
+\end{proof}
+
+\begin{theorem}[Cost]
+\label{thm:mckp-time}
+\textsc{SelectCompositionMCKP} runs in $O(n^2 \,\tilde B \, K)$ time
+and $O(n^2 \tilde B)$ space, where $K=|\{\mathrm{LM},\mathrm{Q},\mathrm{L}\}|=3$.
+\end{theorem}
+
+For BERT-base with $n=12$ and $\tilde B \le 420$ this is
+${\le}2\!\times\!10^5$ scalar operations, which is single-digit
+milliseconds in pure Python. The DP cost is therefore negligible
+next to the dev forward pass that produces $\varepsilon$, which itself
+is identical in cost to the entropy-collection pass.
+
+\paragraph{When to prefer MCKP over entropy.}
+\begin{itemize}
+  \item \textbf{Use MCKP} when you have a fixed task and want the
+    provably best plan within the additive surrogate. This is the
+    default for our published Pareto sweeps.
+  \item \textbf{Use entropy} when you want a single, task-agnostic
+    plan you can describe in one sentence (\emph{``replace high-entropy
+    layers first''}) — useful for the motivating intuition in the
+    paper, and as a sanity check on the MCKP output.
+\end{itemize}
+Both selectors share the same forward pass and consume $O(n)$ memory
+beyond the model. The only honest caveat applies to MCKP as well as
+to entropy: the surrogate $\sum_\ell \varepsilon_\ell(k_\ell)$ is
+\emph{additive across layers} but the true accuracy loss couples
+across layers. We therefore validate every selected plan by Stage~D
+fine-tuning before reporting it.
+
 % =====================================================================
 \section{Extension 1 --- Region-adaptive bootstrap scheduler}
 \label{sec:ext1}

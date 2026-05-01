@@ -73,7 +73,9 @@ def main() -> int:
             lst[1] = max(lst[1], mx)
         return _hook
 
-    for li, blk in enumerate(model.bert.encoder.layer):
+    from fhe_thesis.models.backbone import get_encoder_layers
+    encoder_layers = get_encoder_layers(model)
+    for li, blk in enumerate(encoder_layers):
         blk.intermediate.intermediate_act_fn.register_forward_hook(
             make_hook(f"L{li}_GELU_in")
         )
@@ -103,7 +105,7 @@ def main() -> int:
     print("\n" + "=" * 78)
     print(f"{'op':<20s} {'observed [min, max]':>26s}    {'fitted [a, b]':>22s}   {'OK?':>4}")
     print("=" * 78)
-    for li in range(len(model.bert.encoder.layer)):
+    for li in range(len(encoder_layers)):
         # observed
         for tag in ("GELU", "Softmax", "AttnLN", "FFNLN"):
             key = f"L{li}_{tag}_in"

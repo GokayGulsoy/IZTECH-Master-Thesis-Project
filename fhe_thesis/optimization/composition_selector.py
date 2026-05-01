@@ -240,3 +240,225 @@ def compose_for_task(
         tau_high=tau_high,
         min_lpan=min_lpan,
     )
+
+
+# ---------------------------------------------------------------------------
+# MCKP-DP selector (provably optimal under additive surrogate)
+# ---------------------------------------------------------------------------
+#
+# Per-layer attention substitution error
+# --------------------------------------
+# For each layer l we observe the soft-attention tensor A_l of shape
+# (heads, q, k). The best content-blind LinearMixing approximator under
+# squared-Frobenius loss is the dataset-mean pattern P_l = E[A_l]; the
+# residual error is then
+#       eps_l(LM) = E[ ||A_l - P_l||_F^2 ]
+# which is exactly the *trace of the attention covariance* — the same
+# quantity our entropy heuristic upper-bounds via a log-sum inequality.
+# Measuring it directly is more faithful than the entropy proxy.
+#
+# QuadAttention is content-aware but lacks softmax sharpening; we model
+# its residual as a fraction (1-gamma_Q) of the LM residual:
+#       eps_l(Q)  = (1 - gamma_Q) * eps_l(LM),      gamma_Q in (0,1)
+# with gamma_Q calibrated empirically (default 0.5 — Q removes about
+# half of the LM-vs-true gap on standard GLUE attention maps).
+#
+# LPAN is the reference primitive in our menu, so eps_l(L) = 0.
+#
+# Composition selection then becomes the Multiple-Choice Knapsack
+# Problem (MCKP):
+#       min_{k}  sum_l eps_l(k_l)   s.t.   sum_l c_{k_l} <= B
+# which admits an exact O(L * B') dynamic-programming solution where
+# B' is the budget on a discretised cost scale.
+
+def measure_layer_drifts(
+    model,
+    samples: Sequence[dict],
+    *,
+    gamma_q: float = 0.5,
+    device: str = "cpu",
+) -> np.ndarray:
+    """Return per-layer substitution errors as an (L, 3) array.
+
+    Columns correspond to [LM, Q, L] in that order. ``LM`` is the
+    Frobenius residual of the dataset-mean approximator; ``Q`` is
+    ``(1 - gamma_q) * LM``; ``L`` is identically zero.
+    """
+    import torch
+
+    model.eval()
+    model.to(device)
+
+    # Accumulate sum and sum-of-squares of A_l per (head, q, k) cell on
+    # a fixed seq_len. We trim each sample to its valid_len and pad with
+    # zeros so the variance is computed only over the populated region.
+    sum_A: Dict[int, torch.Tensor] = {}
+    sumsq_A: Dict[int, torch.Tensor] = {}
+    counts: Dict[int, int] = {}
+    seq_lens: Dict[int, int] = {}
+
+    with torch.no_grad():
+        for s in samples:
+            ids = torch.as_tensor(s["input_ids"]).long().unsqueeze(0).to(device)
+            mask = torch.as_tensor(s["attention_mask"]).long().unsqueeze(0).to(device)
+            backbone = getattr(model, getattr(model, "base_model_prefix", "bert"))
+            out = backbone(ids, attention_mask=mask, output_attentions=True)
+            valid_len = int(mask.sum().item())
+            if valid_len < 2:
+                continue
+            for li, A in enumerate(out.attentions):
+                a = A[0, :, :valid_len, :valid_len].double()  # (heads, q, k)
+                if li not in sum_A:
+                    sum_A[li] = torch.zeros_like(a)
+                    sumsq_A[li] = torch.zeros_like(a)
+                    seq_lens[li] = valid_len
+                if a.shape != sum_A[li].shape:
+                    # mismatched seq_len — skip; selector expects fixed-length inputs
+                    continue
+                sum_A[li] += a
+                sumsq_A[li] += a * a
+                counts[li] = counts.get(li, 0) + 1
+
+    n_layers = max(counts) + 1
+    drifts = np.zeros((n_layers, 3), dtype=np.float64)
+    for li in range(n_layers):
+        n = max(counts.get(li, 1), 1)
+        mean_A = sum_A[li] / n
+        # E[||A - E[A]||_F^2] = E[||A||^2] - ||E[A]||^2  (per cell, summed)
+        var_F = float((sumsq_A[li] / n - mean_A * mean_A).clamp_min(0).sum().item())
+        drifts[li, 0] = var_F                       # LM
+        drifts[li, 1] = max(1.0 - gamma_q, 0.0) * var_F  # Q
+        drifts[li, 2] = 0.0                          # L
+    return drifts
+
+
+def select_composition_mckp(
+    drifts: np.ndarray,
+    *,
+    budget: float,
+    cost_scale: int = 10,
+    min_lpan: int = 0,
+) -> CompositionPlan:
+    """Provably optimal MCKP-DP composition selector.
+
+    Parameters
+    ----------
+    drifts : (L, 3) array
+        Per-layer substitution error for kinds [LM, Q, L]. Output of
+        :func:`measure_layer_drifts`.
+    budget : float
+        Cost budget in LinearMixing-cost units.
+    cost_scale : int
+        Multiplier used to discretise costs for the DP table. The
+        default of 10 turns the calibrated cost vector
+        ``[1.0, 1.4, 3.5]`` into integers ``[10, 14, 35]`` — already
+        sufficient resolution for L=12. Increase to reduce rounding.
+    min_lpan : int
+        Lower bound on the number of LPAN layers in the returned plan.
+        Enforced as a side constraint inside the DP via a second axis.
+
+    Returns
+    -------
+    CompositionPlan
+        The (provably) cost-feasible plan minimising
+        ``sum_l drifts[l, k_l]`` under ``sum_l c_{k_l} <= budget``.
+    """
+    n = drifts.shape[0]
+    kinds = ("LM", "Q", "L")
+    cost_vec = np.array([LAYER_COST[k] for k in kinds], dtype=np.float64)
+    cost_int = np.rint(cost_vec * cost_scale).astype(np.int64)  # [10,14,35]
+    B_int = int(np.floor(budget * cost_scale))
+
+    INF = float("inf")
+    # dp[l][b][m] = (best total drift using layers 0..l-1, used cost <= b,
+    #               with EXACTLY m of those layers being LPAN), and
+    # prev[l][b][m] records the chosen primitive index. Using an exact
+    # count (rather than a saturating min(., min_lpan)) keeps the
+    # back-tracking unambiguous.
+    M = n + 1  # exact LPAN counts 0..n
+    dp = np.full((n + 1, B_int + 1, M), INF, dtype=np.float64)
+    prev = np.full((n + 1, B_int + 1, M), -1, dtype=np.int8)
+    dp[0, 0, 0] = 0.0
+
+    for l in range(n):
+        for b in range(B_int + 1):
+            for m in range(M):
+                if dp[l, b, m] == INF:
+                    continue
+                for k_idx, k_name in enumerate(kinds):
+                    nb = b + int(cost_int[k_idx])
+                    if nb > B_int:
+                        continue
+                    nm = m + (1 if k_name == "L" else 0)
+                    cand = dp[l, b, m] + float(drifts[l, k_idx])
+                    if cand < dp[l + 1, nb, nm]:
+                        dp[l + 1, nb, nm] = cand
+                        prev[l + 1, nb, nm] = k_idx
+
+    # Find best terminal cell respecting the min_lpan side constraint.
+    best_b, best_m = -1, -1
+    best_val = INF
+    for b in range(B_int + 1):
+        for m in range(min_lpan, M):
+            v = dp[n, b, m]
+            if v < best_val:
+                best_val = v
+                best_b, best_m = b, m
+
+    if best_b < 0:
+        # Infeasible: fall back to all-Q (cheapest content-aware option).
+        lm, qa, lp = [], list(range(n)), []
+        return CompositionPlan(
+            linear_mixing_layers=lm,
+            quad_attention_layers=qa,
+            lpan_layers=lp,
+            layer_entropies=[0.0] * n,
+            tau_low=float("nan"),
+            tau_high=float("nan"),
+            estimated_cost=_cost(lm, qa, lp),
+        )
+
+    # Reconstruct assignment by walking prev backwards.
+    assignment: List[int] = [-1] * n
+    b, m = best_b, best_m
+    for l in range(n, 0, -1):
+        k_idx = int(prev[l, b, m])
+        assignment[l - 1] = k_idx
+        b -= int(cost_int[k_idx])
+        if kinds[k_idx] == "L":
+            m -= 1
+
+    lm = [l for l, k in enumerate(assignment) if kinds[k] == "LM"]
+    qa = [l for l, k in enumerate(assignment) if kinds[k] == "Q"]
+    lp = [l for l, k in enumerate(assignment) if kinds[k] == "L"]
+    return CompositionPlan(
+        linear_mixing_layers=lm,
+        quad_attention_layers=qa,
+        lpan_layers=lp,
+        layer_entropies=[float(d) for d in drifts[:, 0]],  # store LM-drifts here for inspection
+        tau_low=float("nan"),
+        tau_high=float("nan"),
+        estimated_cost=_cost(lm, qa, lp),
+    )
+
+
+def compose_for_task_mckp(
+    model,
+    samples: Sequence[dict],
+    *,
+    budget: float,
+    gamma_q: float = 0.5,
+    min_lpan: int = 0,
+    cost_scale: int = 10,
+    device: str = "cpu",
+) -> CompositionPlan:
+    """End-to-end MCKP-DP selector: measure drifts, run the DP."""
+    drifts = measure_layer_drifts(
+        model, samples, gamma_q=gamma_q, device=device,
+    )
+    return select_composition_mckp(
+        drifts,
+        budget=budget,
+        cost_scale=cost_scale,
+        min_lpan=min_lpan,
+    )

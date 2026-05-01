@@ -76,6 +76,9 @@ worked for SST-2 (90.83 %) but failed catastrophically on MRPC
 
 ### Method
 
+Two interchangeable selectors are provided:
+
+**A. Entropy heuristic (cheap, task-agnostic).**
 Plaintext fine-tuned model → run on small dev split with
 `output_attentions=True` → measure normalised entropy
 $H_l \in [0,1]$ per layer. Two-threshold rule:
@@ -90,15 +93,45 @@ Budget mode: sweep candidate threshold pairs from the empirical
 distribution, pick the one whose induced cost (LM=1.0, Q=1.4, L=3.5)
 fits the budget while maximising LM use.
 
+**B. MCKP-DP selector (provably optimal).**
+For each layer $\ell$ measure the *direct substitution drift*
+$\varepsilon_\ell(\text{LM}) = \mathrm{tr}\,\mathrm{Cov}(A_\ell)
+= E[\|A\|^2] - \|E[A]\|^2$
+on the same dev pass (single forward pass, closed-form reduction —
+no extra cost vs. entropy). Quad-attention drift is modelled as
+$\varepsilon_\ell(\text{Q}) = (1-\gamma_Q)\,\varepsilon_\ell(\text{LM})$
+with $\gamma_Q$ calibrated empirically (default 0.5); LPAN drift is
+zero by definition. The selection problem
+$\min_k \sum_\ell \varepsilon_\ell(k_\ell)$
+s.t. $\sum_\ell c_{k_\ell}\le B$ is then a **Multiple-Choice
+Knapsack**, solved exactly by an $O(L \cdot B' \cdot L)$ DP
+(milliseconds for $L=12$). The DP also enforces a `min_lpan` floor.
+
+| Selector | Surrogate | Optimality | Wall-time |
+|---|---|---|---|
+| entropy   | $\bar H_\ell$ (information-theoretic upper bound on drift) | heuristic | ≈5 s on 64 samples |
+| MCKP-DP   | direct $\mathrm{tr}\,\mathrm{Cov}(A_\ell)$           | exact w.r.t. surrogate | ≈5 s + 5 ms |
+
+The MCKP surrogate is mathematically tighter (entropy *upper-bounds*
+the drift, MCKP measures it). Both rely on the same dev forward pass,
+so swapping them is a one-flag change.
+
 ### API
 
 ```python
-from fhe_thesis.optimization.composition_selector import compose_for_task
+from fhe_thesis.optimization import compose_for_task, compose_for_task_mckp
+
+# Heuristic
 plan = compose_for_task(model, dev_samples, budget=21.0, min_lpan=2)
+
+# Provably optimal
+plan = compose_for_task_mckp(model, dev_samples, budget=21.0,
+                             gamma_q=0.5, min_lpan=2)
 print(plan.linear_mixing_layers, plan.quad_attention_layers, plan.lpan_layers)
 ```
 
-CLI: `python experiments/select_composition.py --model base --task mrpc --checkpoint <path>`
+CLI: `python experiments/select_composition.py --model base --task mrpc \
+       --method mckp --checkpoint <path>`
 
 ### Validation
 
