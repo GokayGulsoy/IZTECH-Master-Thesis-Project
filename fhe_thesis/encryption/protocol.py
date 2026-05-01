@@ -412,6 +412,7 @@ def encrypt_linear_mixing_block(
     layer: LinearMixingLayerWeights,
     coeffs: Dict[str, PolyCoeffs],
     n_jobs: int = 1,
+    kept_token_indices: Optional[np.ndarray] = None,
 ) -> Tuple[TokenPackedTensor, Dict[str, float]]:
     """Run multi-head linear mixing + post-LN under FHE (replaces MHA block).
 
@@ -421,6 +422,17 @@ def encrypt_linear_mixing_block(
       → residual → LN-poly
 
     ALL operations are plaintext × ciphertext.  Zero ct×ct multiplications.
+
+    Parameters
+    ----------
+    kept_token_indices : np.ndarray or None
+        When word elimination has dropped padding/low-importance tokens,
+        this 1-D int array gives the *original* positions of the
+        surviving tokens (length must equal ``x.seq_len``).  ``P_weights``
+        and ``P_biases`` are sub-matrix-selected on these axes so the
+        learned position-mixing pattern follows the kept positions.
+        ``None`` (default) keeps the contiguous prefix ``[:L, :L]``
+        — backward compatible with pre-elimination calls.
     """
     timings: Dict[str, float] = {}
     L = x.seq_len  # number of tokens
@@ -434,9 +446,20 @@ def encrypt_linear_mixing_block(
     # where x_h[i] is the h-th head slice of token i
     t = time.time()
 
-    # P_weights: (H, max_seq_len, max_seq_len) — slice to actual seq len
-    P_w = layer.P_weights[:, :L, :L]  # (H, L, L)
-    P_b = layer.P_biases[:, :L]       # (H, L)
+    # P_weights: (H, max_seq_len, max_seq_len) — select either the
+    # contiguous prefix (default) or arbitrary kept positions (when
+    # word elimination is active).
+    if kept_token_indices is not None:
+        idx = np.asarray(kept_token_indices, dtype=np.int64)
+        if idx.shape[0] != L:
+            raise ValueError(
+                f"kept_token_indices length {idx.shape[0]} != x.seq_len {L}"
+            )
+        P_w = layer.P_weights[:, idx, :][:, :, idx]  # (H, L, L)
+        P_b = layer.P_biases[:, idx]                 # (H, L)
+    else:
+        P_w = layer.P_weights[:, :L, :L]  # (H, L, L)
+        P_b = layer.P_biases[:, :L]       # (H, L)
 
     # For each output token j, we need to combine per-head position mixing
     # Each ciphertext x.cts[i] packs D values: [head0_d0..head0_d63, head1_d0..head1_d63, ...]
@@ -546,9 +569,13 @@ def encrypt_layer_linear_mix(
     layer: LinearMixingLayerWeights,
     coeffs: Dict[str, PolyCoeffs],
     n_jobs: int = 1,
+    kept_token_indices: Optional[np.ndarray] = None,
 ) -> Tuple[TokenPackedTensor, Dict[str, float]]:
     """One full encoder layer with linear mixing (no attention)."""
-    h, t_mix = encrypt_linear_mixing_block(backend, x, layer, coeffs, n_jobs=n_jobs)
+    h, t_mix = encrypt_linear_mixing_block(
+        backend, x, layer, coeffs, n_jobs=n_jobs,
+        kept_token_indices=kept_token_indices,
+    )
     h, t_ffn = encrypt_ffn_block_mixing(backend, h, layer, coeffs, n_jobs=n_jobs)
     timings = {f"mix.{k}": v for k, v in t_mix.items()}
     timings.update({f"ffn.{k}": v for k, v in t_ffn.items()})
@@ -562,17 +589,23 @@ def encrypt_inference_linear_mixing(
     coeffs: Dict[int, Dict[str, PolyCoeffs]],
     max_seq_len: Optional[int] = None,
     n_jobs: int = 1,
+    kept_token_indices: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, Dict[str, float]]:
     """Full linear-mixing encoder + classifier under FHE.
 
     Same interface as ``encrypt_inference`` but uses
     ``LinearMixingModelWeights`` and ``encrypt_layer_linear_mix``.
     Expected latency: ~3-10s per sample (vs. minutes with attention).
+
+    ``kept_token_indices`` enables word elimination (see
+    ``encrypt_inference_hybrid`` docstring for semantics).
     """
     timings: Dict[str, float] = {}
 
     if max_seq_len is not None and x_plain.shape[0] > max_seq_len:
         x_plain = x_plain[:max_seq_len]
+        if kept_token_indices is not None:
+            kept_token_indices = kept_token_indices[: x_plain.shape[0]]
 
     t = time.time()
     ct_x = TokenPackedTensor.encrypt(backend, x_plain)
@@ -581,7 +614,8 @@ def encrypt_inference_linear_mixing(
     h = ct_x
     for i, layer in enumerate(weights.layers):
         h, layer_t = encrypt_layer_linear_mix(
-            backend, h, layer, coeffs[i], n_jobs=n_jobs
+            backend, h, layer, coeffs[i], n_jobs=n_jobs,
+            kept_token_indices=kept_token_indices,
         )
         for k, v in layer_t.items():
             timings[f"L{i}.{k}"] = v
@@ -912,14 +946,22 @@ def encrypt_layer_dispatch(
     coeffs: Dict[str, PolyCoeffs],
     num_heads: int,
     n_jobs: int = 1,
+    kept_token_indices: Optional[np.ndarray] = None,
 ) -> Tuple[TokenPackedTensor, Dict[str, float]]:
     """Run one encoder layer, dispatching by bundle type.
 
     Hot path of the hybrid pipeline: avoids ``isinstance`` cascading
     by deferring to the existing per-variant block functions.
+
+    ``kept_token_indices`` is forwarded to LinearMixing layers only —
+    Quad and LPAN attention are token-position-agnostic and don't need
+    to know which original positions survived word elimination.
     """
     if isinstance(layer, LinearMixingLayerWeights):
-        return encrypt_layer_linear_mix(backend, x, layer, coeffs, n_jobs=n_jobs)
+        return encrypt_layer_linear_mix(
+            backend, x, layer, coeffs, n_jobs=n_jobs,
+            kept_token_indices=kept_token_indices,
+        )
     if isinstance(layer, QuadLayerWeights):
         return encrypt_layer_quad(backend, x, layer, coeffs, n_jobs=n_jobs)
     if isinstance(layer, LayerWeights):
@@ -934,6 +976,7 @@ def encrypt_inference_hybrid(
     coeffs: Dict[int, Dict[str, PolyCoeffs]],
     max_seq_len: Optional[int] = None,
     n_jobs: int = 1,
+    kept_token_indices: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, Dict[str, float]]:
     """End-to-end HyPER-LPAN encrypted forward pass.
 
@@ -947,11 +990,23 @@ def encrypt_inference_hybrid(
     key for layers that are LinearMixing or Quad — neither uses the LPAN
     softmax polynomial.  Only ``"GELU"`` and ``"LN"`` are required for
     every layer.
+
+    Word elimination
+    ----------------
+    When ``kept_token_indices`` is provided, ``x_plain`` is assumed to
+    already contain only the surviving tokens (length = ``len(kept_token_indices)``).
+    The indices give the original positions of those tokens in the
+    pre-eliminated sequence and are forwarded to LinearMixing layers so
+    they can sub-matrix-select their position-mixing weights correctly.
+    Caller is responsible for filtering ``x_plain`` upstream (use
+    ``fhe_thesis.encryption.elimination.apply_elimination``).
     """
     timings: Dict[str, float] = {}
 
     if max_seq_len is not None and x_plain.shape[0] > max_seq_len:
         x_plain = x_plain[:max_seq_len]
+        if kept_token_indices is not None:
+            kept_token_indices = kept_token_indices[: x_plain.shape[0]]
 
     t = time.time()
     ct_x = TokenPackedTensor.encrypt(backend, x_plain)
@@ -962,6 +1017,7 @@ def encrypt_inference_hybrid(
         h, layer_t = encrypt_layer_dispatch(
             backend, h, layer, coeffs[i],
             num_heads=weights.num_heads, n_jobs=n_jobs,
+            kept_token_indices=kept_token_indices,
         )
         for k, v in layer_t.items():
             timings[f"L{i}.{k}"] = v

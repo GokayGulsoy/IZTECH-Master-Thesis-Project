@@ -73,6 +73,14 @@ def _parse_args():
                    help="Comma-separated layer indices for QuadAttention (--hybrid only)")
     p.add_argument("--reduced-degrees", action="store_true",
                    help="Use Phase 2b reduced polynomial degrees per region (--hybrid only)")
+    p.add_argument("--word-elimination", default="none",
+                   choices=["none", "padding", "content_teacher"],
+                   help="FHE-pure word elimination strategy (Ext W). "
+                        "'padding' drops [PAD] tokens client-side (lossless, free). "
+                        "'content_teacher' uses plaintext layer-0 attention to keep top-k tokens. "
+                        "Only applied when --hybrid or --linear-mixing.")
+    p.add_argument("--keep-ratio", type=float, default=0.5,
+                   help="Fraction of tokens to keep for content_teacher elimination (default: 0.5)")
     return p.parse_args()
 
 
@@ -110,8 +118,14 @@ def _load_dataset(task: str, n_samples: int, max_seq_len: int):
     return samples
 
 
-def _get_embeddings(model_key: str, samples: list, checkpoint_path: str | None):
-    """Run the embedding layer (plaintext) and return numpy activations."""
+def _get_embeddings(model_key: str, samples: list, checkpoint_path: str | None,
+                    need_teacher_scores: bool = False):
+    """Run the embedding layer (plaintext) and return numpy activations.
+
+    Returns (embeddings, labels, masks, teacher_scores). teacher_scores is
+    None unless need_teacher_scores=True, in which case it contains per-sample
+    layer-0 attention CLS-row averaged over heads (used by Ext W content_teacher).
+    """
     import torch
     from transformers import AutoModelForSequenceClassification
 
@@ -121,7 +135,7 @@ def _get_embeddings(model_key: str, samples: list, checkpoint_path: str | None):
     model = AutoModelForSequenceClassification.from_pretrained(src, num_labels=2)
     model.eval()
 
-    embeddings, labels = [], []
+    embeddings, labels, masks, scores = [], [], [], []
     with torch.no_grad():
         for s in samples:
             ids = torch.tensor(s["input_ids"]).unsqueeze(0)
@@ -129,7 +143,13 @@ def _get_embeddings(model_key: str, samples: list, checkpoint_path: str | None):
             emb = model.bert.embeddings(ids)  # (1, seq_len, hidden)
             embeddings.append(emb.squeeze(0).numpy())
             labels.append(s["label"])
-    return embeddings, labels
+            masks.append(s["attention_mask"].astype(np.int64))
+            if need_teacher_scores:
+                out = model.bert(ids, attention_mask=mask, output_attentions=True)
+                # Layer 0 attentions: (1, heads, seq, seq); use CLS row averaged over heads
+                attn0 = out.attentions[0][0].mean(dim=0)[0].cpu().numpy()  # (seq,)
+                scores.append(attn0.astype(np.float32))
+    return embeddings, labels, masks, (scores if need_teacher_scores else None)
 
 
 # ── Plaintext accuracy baseline ─────────────────────────────────────────
@@ -171,6 +191,7 @@ def _run_fhe_sample(
     checkpoint,
     linear_mixing=False,
     hybrid=False,
+    kept_token_indices=None,
 ):
     """Encrypt, infer, decrypt one sample. Returns (logits, timings)."""
     if hybrid:
@@ -183,6 +204,7 @@ def _run_fhe_sample(
             coeffs,
             max_seq_len=max_seq_len,
             n_jobs=n_jobs,
+            kept_token_indices=kept_token_indices,
         )
     elif linear_mixing:
         from fhe_thesis.encryption.protocol import encrypt_inference_linear_mixing
@@ -194,6 +216,7 @@ def _run_fhe_sample(
             coeffs,
             max_seq_len=max_seq_len,
             n_jobs=n_jobs,
+            kept_token_indices=kept_token_indices,
         )
     elif phase == "model":
         from fhe_thesis.encryption.protocol import encrypt_inference
@@ -332,7 +355,18 @@ def main():
 
     # Get embeddings (plaintext embedding layer runs outside FHE)
     print("Computing plaintext embeddings for all samples...")
-    embeddings, labels = _get_embeddings(args.model, samples, args.checkpoint)
+    elim_active = args.word_elimination != "none" and (args.hybrid or args.linear_mixing)
+    need_scores = args.word_elimination == "content_teacher" and elim_active
+    embeddings, labels, masks, teacher_scores = _get_embeddings(
+        args.model, samples, args.checkpoint, need_teacher_scores=need_scores,
+    )
+    if elim_active:
+        print(f"  Word elimination: strategy={args.word_elimination} "
+              f"keep_ratio={args.keep_ratio}")
+        results["word_elimination"] = args.word_elimination
+        results["keep_ratio"] = args.keep_ratio if args.word_elimination == "content_teacher" else None
+    else:
+        results["word_elimination"] = "none"
 
     # ── FHE inference loop ────────────────────────────────────────────
     print(f"\nRunning FHE inference on {len(samples)} samples...")
@@ -341,12 +375,33 @@ def main():
     all_timings: List[Dict] = []
 
     for idx, (emb, label) in enumerate(zip(embeddings, labels)):
+        # Ext W: word elimination (FHE-pure, applied client-side before encryption)
+        kept_indices = None
+        emb_in = emb
+        if elim_active:
+            from fhe_thesis.encryption.elimination import (
+                apply_elimination, elimination_savings,
+            )
+            t_scores = teacher_scores[idx] if teacher_scores is not None else None
+            emb_in, kept_indices = apply_elimination(
+                emb, masks[idx],
+                strategy=args.word_elimination,
+                teacher_scores=t_scores,
+                keep_ratio=args.keep_ratio,
+            )
+            sav = elimination_savings(emb.shape[0], len(kept_indices))
+            if idx == 0:
+                print(f"  [elim] kept={sav['kept_tokens']}/{sav['orig_tokens']} "
+                      f"(ratio={sav['keep_ratio']:.3f}, "
+                      f"linear_x={sav['linear_speedup']:.2f}, "
+                      f"quad_x={sav['quadratic_speedup']:.2f})")
+
         t_start = time.time()
         logits, timings = _run_fhe_sample(
             backend,
             weights,
             coeffs,
-            emb,
+            emb_in,
             args.max_seq_len,
             args.n_jobs,
             args.phase,
@@ -354,6 +409,7 @@ def main():
             args.checkpoint,
             linear_mixing=args.linear_mixing,
             hybrid=args.hybrid,
+            kept_token_indices=kept_indices,
         )
         wall = time.time() - t_start
 

@@ -107,6 +107,8 @@ def profile_latency(
     linear_mixing_layers: Sequence[int] = (0, 1, 2, 3),
     quad_attention_layers: Sequence[int] = (4, 5, 6, 7),
     reduced_degrees: bool = False,
+    kept_token_indices_per_sample: Sequence[np.ndarray] | None = None,
+    word_elimination: str = "none",
 ) -> LatencyResult:
     """Run encrypted inference on ``embeddings`` and return latency stats.
 
@@ -148,21 +150,23 @@ def profile_latency(
             for li in list(linear_mixing_layers) + list(quad_attention_layers):
                 if li in coeffs:
                     coeffs[li] = {k: v for k, v in coeffs[li].items() if k != "Softmax"}
-        run = lambda emb: encrypt_inference_hybrid(
+        run = lambda emb, ki=None: encrypt_inference_hybrid(
             backend, emb, weights, coeffs,
             max_seq_len=max_seq_len, n_jobs=n_jobs,
+            kept_token_indices=ki,
         )
     elif variant == "linear_mixing":
         weights = load_linear_mixing_weights(model_key, checkpoint_path=str(checkpoint_path))
         coeffs = load_coefficients(model_key, task=task)
-        run = lambda emb: encrypt_inference_linear_mixing(
+        run = lambda emb, ki=None: encrypt_inference_linear_mixing(
             backend, emb, weights, coeffs,
             max_seq_len=max_seq_len, n_jobs=n_jobs,
+            kept_token_indices=ki,
         )
     elif variant == "lpan":
         weights = load_model_weights(model_key, checkpoint_path=str(checkpoint_path))
         coeffs = load_coefficients(model_key, task=task)
-        run = lambda emb: encrypt_inference(
+        run = lambda emb, ki=None: encrypt_inference(
             backend, emb, weights, coeffs,
             max_seq_len=max_seq_len, n_jobs=n_jobs,
         )
@@ -171,9 +175,11 @@ def profile_latency(
 
     per_sample_wall: List[float] = []
     per_sample_timings: List[Dict[str, float]] = []
-    for emb in embeddings:
+    for i, emb in enumerate(embeddings):
+        ki = (kept_token_indices_per_sample[i]
+              if kept_token_indices_per_sample is not None else None)
         t = time.time()
-        _logits, timings = run(emb)
+        _logits, timings = run(emb, ki) if variant in ("hybrid", "linear_mixing") else run(emb)
         per_sample_wall.append(time.time() - t)
         per_sample_timings.append(dict(timings))
 
@@ -200,5 +206,6 @@ def profile_latency(
             "linear_mixing_layers": list(linear_mixing_layers) if variant == "hybrid" else None,
             "quad_attention_layers": list(quad_attention_layers) if variant == "hybrid" else None,
             "checkpoint_path": str(checkpoint_path),
+            "word_elimination": word_elimination,
         },
     )
