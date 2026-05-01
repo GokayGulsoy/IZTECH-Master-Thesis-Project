@@ -317,6 +317,103 @@ def enc_attention_apply(
     return TokenPackedTensor.from_ciphertexts(out_cts, hidden_dim=head_dim)
 
 
+def enc_quad_scores(
+    backend: CKKSBackend,
+    scores: TokenPackedTensor,
+    inv_seq_len: float,
+    n_jobs: Optional[int] = 1,
+) -> TokenPackedTensor:
+    """Apply MPCFormer's 2Quad map: ``A[i,j] = scores[i,j]^2 / L``.
+
+    Replaces the softmax polynomial chain (4-5 ct×ct, depth ~5) with a
+    single ct×ct (squaring) + 1 pt×ct (scalar scale), depth = 2.
+
+    Parameters
+    ----------
+    scores : TokenPackedTensor
+        Output of :func:`enc_qk_scores` — shape (L, L), one ct per query row.
+    inv_seq_len : float
+        ``1.0 / L`` — folded into the scalar so we save a separate
+        ``mul_plain`` level for tasks that already pad to fixed L.
+    n_jobs : int
+        Row-level parallelism (O5).
+    """
+    L = scores.hidden_dim
+    scale_vec = [inv_seq_len] * L
+
+    def _process_row(ct):
+        sq = backend.mul(ct, ct)
+        # mul_plain by a constant vector folds the /L scaling without
+        # consuming an extra multiplicative level beyond squaring.
+        return backend.mul_plain(sq, scale_vec)
+
+    workers = _resolve_jobs(n_jobs)
+    if workers == 1:
+        new_cts = [_process_row(ct) for ct in scores.cts]
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            new_cts = list(pool.map(_process_row, scores.cts))
+    return TokenPackedTensor.from_ciphertexts(new_cts, hidden_dim=L)
+
+
+def enc_self_quad_attention(
+    backend: CKKSBackend,
+    x: TokenPackedTensor,
+    Wq: np.ndarray,
+    bq: np.ndarray,
+    Wk: np.ndarray,
+    bk: np.ndarray,
+    Wv: np.ndarray,
+    bv: np.ndarray,
+    Wo: np.ndarray,
+    bo: np.ndarray,
+    num_heads: int,
+    n_jobs: Optional[int] = 1,
+) -> TokenPackedTensor:
+    """Encrypted multi-head 2Quad attention (no softmax).
+
+    Pipeline per head:
+      Q,K,V projections (pt×ct) → S = Q·Kᵀ/√d (ct×ct + rotations)
+                               → A = S²/L  (1 ct×ct + 1 pt×ct)
+                               → out = A·V (ct×ct)
+      Concat heads → out_proj (pt×ct).
+
+    Multiplicative depth per head: ≈ 3 (vs ≈ 5 for LPAN softmax-poly attn).
+    Removes the entire polynomial-softmax depth chain.
+    """
+    if Wq.shape != Wk.shape or Wq.shape != Wv.shape:
+        raise ValueError("Q/K/V weight shapes must match")
+    hidden = Wq.shape[0]
+    if hidden % num_heads != 0:
+        raise ValueError(f"hidden {hidden} not divisible by num_heads {num_heads}")
+    head_dim = hidden // num_heads
+    inv_sqrt_d = 1.0 / np.sqrt(head_dim)
+    inv_seq_len = 1.0 / float(x.seq_len)
+
+    workers = _resolve_jobs(n_jobs)
+    head_workers = min(workers, num_heads)
+    inner_jobs = max(1, workers // head_workers) if head_workers > 1 else workers
+
+    def _process_head(h):
+        s, e = h * head_dim, (h + 1) * head_dim
+        Q_h = enc_linear(backend, x, Wq[s:e, :], bq[s:e], n_jobs=inner_jobs)
+        K_h = enc_linear(backend, x, Wk[s:e, :], bk[s:e], n_jobs=inner_jobs)
+        V_h = enc_linear(backend, x, Wv[s:e, :], bv[s:e], n_jobs=inner_jobs)
+
+        S = enc_qk_scores(backend, Q_h, K_h, scale=inv_sqrt_d, n_jobs=inner_jobs)
+        A = enc_quad_scores(backend, S, inv_seq_len=inv_seq_len, n_jobs=inner_jobs)
+        return enc_attention_apply(backend, A, V_h, n_jobs=inner_jobs)
+
+    if head_workers > 1:
+        with ThreadPoolExecutor(max_workers=head_workers) as pool:
+            head_outputs = list(pool.map(_process_head, range(num_heads)))
+    else:
+        head_outputs = [_process_head(h) for h in range(num_heads)]
+
+    concat = _concat_heads_zero_pad(backend, head_outputs, hidden, n_jobs=workers)
+    return enc_linear(backend, concat, Wo, bo, n_jobs=workers)
+
+
 def enc_self_attention(
     backend: CKKSBackend,
     x: TokenPackedTensor,

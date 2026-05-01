@@ -40,6 +40,13 @@ DEPTH_COST: Dict[str, int] = {
     "qk_scores": 2,         # ⟨Q[i], K[j]⟩ via dot (1) + matmul-broadcast (1)
     "attn_apply": 3,        # mul_plain mask (1) + matmul broadcast (1) + ct·ct (1)
     "head_concat": 1,       # mul_plain by per-head mask
+    # 2Quad attention path: replaces softmax_poly with squaring + scalar /L.
+    #   sq      = ct·ct                (1)
+    #   scaled  = mul_plain (1/L)      (1)
+    "quad_scores": 2,
+    # Linear-mixing path: per-token weighted accumulation across positions.
+    #   pos_mix = mul_plain × L + add  (1)  ← weights are plaintext
+    "pos_mix": 1,
 }
 
 
@@ -102,3 +109,73 @@ def transformer_layer_depth() -> int:
         + DEPTH_COST["ln_poly"]
     )
     return attn + ffn
+
+
+def quad_layer_depth() -> int:
+    """Return the critical-path depth of one 2Quad encoder layer.
+
+    Replaces ``softmax_poly`` (depth 4) with ``quad_scores`` (depth 2),
+    saving 2 levels per quad attention block vs LPAN.  FFN is unchanged.
+    """
+    attn = (
+        DEPTH_COST["linear"]
+        + DEPTH_COST["qk_scores"]
+        + DEPTH_COST["quad_scores"]    # ← replaces softmax_poly
+        + DEPTH_COST["attn_apply"]
+        + DEPTH_COST["head_concat"]
+        + DEPTH_COST["linear"]
+        + DEPTH_COST["ln_poly"]
+    )
+    ffn = (
+        DEPTH_COST["linear"]
+        + DEPTH_COST["polyval_deg6"]
+        + DEPTH_COST["linear"]
+        + DEPTH_COST["ln_poly"]
+    )
+    return attn + ffn
+
+
+def linear_mixing_layer_depth() -> int:
+    """Return the critical-path depth of one linear-mixing encoder layer.
+
+    The attention block reduces to ``pos_mix → out_proj → LN``; no
+    ct×ct multiplications, no polynomial-softmax chain.
+    """
+    attn = (
+        DEPTH_COST["pos_mix"]
+        + DEPTH_COST["linear"]         # output projection
+        + DEPTH_COST["ln_poly"]
+    )
+    ffn = (
+        DEPTH_COST["linear"]
+        + DEPTH_COST["polyval_deg6"]
+        + DEPTH_COST["linear"]
+        + DEPTH_COST["ln_poly"]
+    )
+    return attn + ffn
+
+
+def hybrid_model_depth(
+    num_linear_mixing: int,
+    num_quad: int,
+    num_lpan: int,
+) -> Dict[str, int]:
+    """Return critical-path depths for a HyPER-LPAN composition.
+
+    Returns a dict with per-region totals plus ``"total"``.  Note this
+    is the *summed* per-layer cost — bootstrapping resets the budget
+    so the per-bootstrap-window cost is what actually constrains
+    backend parameters.  Use this to pick bootstrap insertion points.
+    """
+    lm = linear_mixing_layer_depth()
+    qd = quad_layer_depth()
+    lp = transformer_layer_depth()
+    return {
+        "per_linear_mixing_layer": lm,
+        "per_quad_layer": qd,
+        "per_lpan_layer": lp,
+        "total_linear_mixing": lm * num_linear_mixing,
+        "total_quad": qd * num_quad,
+        "total_lpan": lp * num_lpan,
+        "total": lm * num_linear_mixing + qd * num_quad + lp * num_lpan,
+    }

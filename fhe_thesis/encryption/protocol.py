@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -44,6 +44,7 @@ from .ops import (
     enc_linear,
     enc_ln_poly,
     enc_self_attention,
+    enc_self_quad_attention,
 )
 from .packing import TokenPackedTensor
 
@@ -73,6 +74,57 @@ class LayerWeights:
     ln1_beta: np.ndarray  # post-attn LN
     ln2_gamma: np.ndarray
     ln2_beta: np.ndarray  # post-FFN LN
+
+
+@dataclass
+class LinearMixingLayerWeights:
+    """Plaintext weights for one multi-head linear-mixing BERT encoder layer.
+
+    Replaces the Q/K/V/O attention weights with per-head position mixing
+    matrices plus an output projection.
+    """
+
+    P_weights: np.ndarray   # (num_heads, max_seq_len, max_seq_len) per-head position mixing
+    P_biases: np.ndarray    # (num_heads, max_seq_len)
+    Wo: np.ndarray          # (hidden, hidden) output projection
+    bo: np.ndarray          # (hidden,)
+    W1: np.ndarray
+    b1: np.ndarray
+    W2: np.ndarray
+    b2: np.ndarray
+    ln1_gamma: np.ndarray
+    ln1_beta: np.ndarray    # post-mixing LN
+    ln2_gamma: np.ndarray
+    ln2_beta: np.ndarray    # post-FFN LN
+    num_heads: int = 12
+
+
+@dataclass
+class QuadLayerWeights:
+    """Plaintext weights for one 2Quad attention BERT encoder layer.
+
+    Same Q/K/V/O projection shapes as standard attention; only the
+    softmax-poly is replaced (eliminated) by the squaring + scalar /L
+    transform inside the encrypted protocol.
+    """
+
+    Wq: np.ndarray
+    bq: np.ndarray
+    Wk: np.ndarray
+    bk: np.ndarray
+    Wv: np.ndarray
+    bv: np.ndarray
+    Wo: np.ndarray
+    bo: np.ndarray
+    W1: np.ndarray
+    b1: np.ndarray
+    W2: np.ndarray
+    b2: np.ndarray
+    ln1_gamma: np.ndarray
+    ln1_beta: np.ndarray  # post-attn LN
+    ln2_gamma: np.ndarray
+    ln2_beta: np.ndarray  # post-FFN LN
+    num_heads: int = 12
 
 
 @dataclass
@@ -140,6 +192,81 @@ def load_model_weights(
         num_layers=cfg["layers"],
         hidden=cfg["hidden"],
         num_heads=cfg["heads"],
+        layers=layers,
+        pooler_W=sd.get("bert.pooler.dense.weight"),
+        pooler_b=sd.get("bert.pooler.dense.bias"),
+        cls_W=sd.get("classifier.weight"),
+        cls_b=sd.get("classifier.bias"),
+    )
+
+
+@dataclass
+class LinearMixingModelWeights:
+    """Weights for a linear-mixing BERT variant (no attention)."""
+
+    model_key: str
+    num_layers: int
+    hidden: int
+    layers: List[LinearMixingLayerWeights] = field(default_factory=list)
+    pooler_W: np.ndarray | None = None
+    pooler_b: np.ndarray | None = None
+    cls_W: np.ndarray | None = None
+    cls_b: np.ndarray | None = None
+
+
+def load_linear_mixing_weights(
+    model_key: str,
+    *,
+    checkpoint_path: str,
+    num_labels: int = 2,
+) -> LinearMixingModelWeights:
+    """Load weights from a multi-head linear-mixing fine-tuned checkpoint.
+
+    The checkpoint was produced by ``finetune_linear_mixing_progressive.py``
+    and contains ``pos_mix_weight`` / ``pos_mix_bias`` / ``out_proj``
+    parameters instead of Q/K/V/O.
+    """
+    from safetensors.torch import load_file as _load_safetensors
+    from pathlib import Path
+
+    cfg = MODEL_REGISTRY[model_key]
+    ckpt = Path(checkpoint_path)
+
+    sf = ckpt / "model.safetensors"
+    bin_path = ckpt / "pytorch_model.bin"
+    if sf.exists():
+        sd = {k: v.numpy() for k, v in _load_safetensors(str(sf)).items()}
+    else:
+        import torch
+        raw = torch.load(str(bin_path), map_location="cpu", weights_only=False)
+        sd = {k: v.numpy() for k, v in raw.items()}
+
+    num_heads = cfg.get("heads", 12)
+    layers: List[LinearMixingLayerWeights] = []
+    for i in range(cfg["layers"]):
+        p = f"bert.encoder.layer.{i}"
+        layers.append(
+            LinearMixingLayerWeights(
+                P_weights=sd[f"{p}.attention.pos_mix_weight"],
+                P_biases=sd[f"{p}.attention.pos_mix_bias"],
+                Wo=sd[f"{p}.attention.out_proj.weight"],
+                bo=sd[f"{p}.attention.out_proj.bias"],
+                W1=sd[f"{p}.intermediate.dense.weight"],
+                b1=sd[f"{p}.intermediate.dense.bias"],
+                W2=sd[f"{p}.output.dense.weight"],
+                b2=sd[f"{p}.output.dense.bias"],
+                ln1_gamma=sd[f"{p}.attention.LayerNorm.weight"],
+                ln1_beta=sd[f"{p}.attention.LayerNorm.bias"],
+                ln2_gamma=sd[f"{p}.output.LayerNorm.weight"],
+                ln2_beta=sd[f"{p}.output.LayerNorm.bias"],
+                num_heads=num_heads,
+            )
+        )
+
+    return LinearMixingModelWeights(
+        model_key=model_key,
+        num_layers=cfg["layers"],
+        hidden=cfg["hidden"],
         layers=layers,
         pooler_W=sd.get("bert.pooler.dense.weight"),
         pooler_b=sd.get("bert.pooler.dense.bias"),
@@ -274,6 +401,209 @@ def encrypt_layer(
     return h, timings
 
 
+# ──────────────────────────────────────────────────────────────────────
+# Linear mixing: FHE-friendly attention replacement
+# ──────────────────────────────────────────────────────────────────────
+
+
+def encrypt_linear_mixing_block(
+    backend: CKKSBackend,
+    x: TokenPackedTensor,
+    layer: LinearMixingLayerWeights,
+    coeffs: Dict[str, PolyCoeffs],
+    n_jobs: int = 1,
+) -> Tuple[TokenPackedTensor, Dict[str, float]]:
+    """Run multi-head linear mixing + post-LN under FHE (replaces MHA block).
+
+    Pipeline:
+      For each head h: z_h = P_h @ x_h  (position mixing on head_dim slice)
+      Concat heads → W_out @ z + b  (output projection)
+      → residual → LN-poly
+
+    ALL operations are plaintext × ciphertext.  Zero ct×ct multiplications.
+    """
+    timings: Dict[str, float] = {}
+    L = x.seq_len  # number of tokens
+    D = x.hidden_dim
+    H = layer.num_heads
+    d = D // H  # head dimension
+
+    # 1. Multi-head position mixing
+    # For each output token j, for each head h:
+    #   z_h[j] = sum_i P_h[j,i] * x_h[i] + P_bias_h[j]
+    # where x_h[i] is the h-th head slice of token i
+    t = time.time()
+
+    # P_weights: (H, max_seq_len, max_seq_len) — slice to actual seq len
+    P_w = layer.P_weights[:, :L, :L]  # (H, L, L)
+    P_b = layer.P_biases[:, :L]       # (H, L)
+
+    # For each output token j, we need to combine per-head position mixing
+    # Each ciphertext x.cts[i] packs D values: [head0_d0..head0_d63, head1_d0..head1_d63, ...]
+    # We need to do per-head weighted sums across input tokens
+    mixed_cts = []
+    for j in range(L):
+        # Build a per-head scaling vector: for each dim d in [0, D),
+        # the scaling factor is P_h[j, i] where h = d // head_dim
+        # We accumulate across input tokens i
+        acc = None
+        for i in range(L):
+            # Create scale vector: repeat P_h[j,i] across each head's dims
+            scale_vec = np.zeros(D, dtype=np.float64)
+            for h in range(H):
+                scale_vec[h * d:(h + 1) * d] = float(P_w[h, j, i])
+            term = backend.mul_plain(x.cts[i], scale_vec)
+            if acc is None:
+                acc = term
+            else:
+                acc = backend.add(acc, term)
+        # Add bias: repeat P_bias_h[j] across each head's dims
+        bias_vec = np.zeros(D, dtype=np.float64)
+        for h in range(H):
+            bias_vec[h * d:(h + 1) * d] = float(P_b[h, j])
+        acc = backend.add_plain(acc, bias_vec)
+        mixed_cts.append(acc)
+    pos_mixed = TokenPackedTensor.from_ciphertexts(mixed_cts, hidden_dim=D)
+    timings["pos_mix"] = time.time() - t
+
+    # 2. Output projection: W_out @ z (per-token plaintext matmul)
+    t = time.time()
+    feat_mixed = enc_linear(backend, pos_mixed, layer.Wo, layer.bo, n_jobs=n_jobs)
+    timings["out_proj"] = time.time() - t
+
+    # 3. Residual connection
+    t = time.time()
+    res = TokenPackedTensor.from_ciphertexts(
+        [backend.add(feat_mixed.cts[i], x.cts[i]) for i in range(L)],
+        hidden_dim=D,
+    )
+    timings["residual"] = time.time() - t
+
+    # 4. Post-mixing LayerNorm (polynomial)
+    t = time.time()
+    ln = coeffs["LN"]
+    out = enc_ln_poly(
+        backend,
+        res,
+        ln.power_coeffs,
+        ln.interval,
+        gamma=layer.ln1_gamma,
+        beta=layer.ln1_beta,
+        n_jobs=n_jobs,
+    )
+    timings["LN"] = time.time() - t
+    return out, timings
+
+
+def encrypt_ffn_block_mixing(
+    backend: CKKSBackend,
+    x: TokenPackedTensor,
+    layer: LinearMixingLayerWeights,
+    coeffs: Dict[str, PolyCoeffs],
+    n_jobs: int = 1,
+) -> Tuple[TokenPackedTensor, Dict[str, float]]:
+    """FFN block using LinearMixingLayerWeights (same logic, different type)."""
+    timings: Dict[str, float] = {}
+
+    t = time.time()
+    h = enc_linear(backend, x, layer.W1, layer.b1, n_jobs=n_jobs)
+    timings["W1"] = time.time() - t
+
+    t = time.time()
+    g = coeffs["GELU"]
+    h = enc_gelu_poly(backend, h, g.power_coeffs, g.interval, n_jobs=n_jobs)
+    timings["GELU"] = time.time() - t
+
+    t = time.time()
+    h = enc_linear(backend, h, layer.W2, layer.b2, n_jobs=n_jobs)
+    timings["W2"] = time.time() - t
+
+    t = time.time()
+    res = TokenPackedTensor.from_ciphertexts(
+        [backend.add(h.cts[i], x.cts[i]) for i in range(x.seq_len)],
+        hidden_dim=x.hidden_dim,
+    )
+    timings["residual"] = time.time() - t
+
+    t = time.time()
+    ln = coeffs["LN"]
+    out = enc_ln_poly(
+        backend,
+        res,
+        ln.power_coeffs,
+        ln.interval,
+        gamma=layer.ln2_gamma,
+        beta=layer.ln2_beta,
+        n_jobs=n_jobs,
+    )
+    timings["LN"] = time.time() - t
+    return out, timings
+
+
+def encrypt_layer_linear_mix(
+    backend: CKKSBackend,
+    x: TokenPackedTensor,
+    layer: LinearMixingLayerWeights,
+    coeffs: Dict[str, PolyCoeffs],
+    n_jobs: int = 1,
+) -> Tuple[TokenPackedTensor, Dict[str, float]]:
+    """One full encoder layer with linear mixing (no attention)."""
+    h, t_mix = encrypt_linear_mixing_block(backend, x, layer, coeffs, n_jobs=n_jobs)
+    h, t_ffn = encrypt_ffn_block_mixing(backend, h, layer, coeffs, n_jobs=n_jobs)
+    timings = {f"mix.{k}": v for k, v in t_mix.items()}
+    timings.update({f"ffn.{k}": v for k, v in t_ffn.items()})
+    return h, timings
+
+
+def encrypt_inference_linear_mixing(
+    backend: CKKSBackend,
+    x_plain: np.ndarray,
+    weights: LinearMixingModelWeights,
+    coeffs: Dict[int, Dict[str, PolyCoeffs]],
+    max_seq_len: Optional[int] = None,
+    n_jobs: int = 1,
+) -> Tuple[np.ndarray, Dict[str, float]]:
+    """Full linear-mixing encoder + classifier under FHE.
+
+    Same interface as ``encrypt_inference`` but uses
+    ``LinearMixingModelWeights`` and ``encrypt_layer_linear_mix``.
+    Expected latency: ~3-10s per sample (vs. minutes with attention).
+    """
+    timings: Dict[str, float] = {}
+
+    if max_seq_len is not None and x_plain.shape[0] > max_seq_len:
+        x_plain = x_plain[:max_seq_len]
+
+    t = time.time()
+    ct_x = TokenPackedTensor.encrypt(backend, x_plain)
+    timings["encrypt"] = time.time() - t
+
+    h = ct_x
+    for i, layer in enumerate(weights.layers):
+        h, layer_t = encrypt_layer_linear_mix(
+            backend, h, layer, coeffs[i], n_jobs=n_jobs
+        )
+        for k, v in layer_t.items():
+            timings[f"L{i}.{k}"] = v
+
+    if weights.cls_W is not None:
+        t = time.time()
+        cls = TokenPackedTensor.from_ciphertexts([h.cts[0]], hidden_dim=h.hidden_dim)
+        if weights.pooler_W is not None:
+            cls = enc_linear(backend, cls, weights.pooler_W, weights.pooler_b)
+        out_ct = enc_linear(backend, cls, weights.cls_W, weights.cls_b)
+        timings["classifier"] = time.time() - t
+    else:
+        out_ct = h
+
+    t = time.time()
+    out = out_ct.decrypt(backend)
+    timings["decrypt"] = time.time() - t
+
+    timings["total"] = sum(timings.values())
+    return out, timings
+
+
 def encrypt_inference(
     backend: CKKSBackend,
     x_plain: np.ndarray,
@@ -323,6 +653,324 @@ def encrypt_inference(
             # frozen so we approximate it as identity here. (See thesis
             # §3 — the [CLS] head is folded into the classifier in
             # downstream LPAN runs.)
+        out_ct = enc_linear(backend, cls, weights.cls_W, weights.cls_b)
+        timings["classifier"] = time.time() - t
+    else:
+        out_ct = h
+
+    t = time.time()
+    out = out_ct.decrypt(backend)
+    timings["decrypt"] = time.time() - t
+
+    timings["total"] = sum(timings.values())
+    return out, timings
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 2Quad attention: shallow polynomial attention (no softmax)
+# ──────────────────────────────────────────────────────────────────────
+
+
+def encrypt_quad_attention_block(
+    backend: CKKSBackend,
+    x: TokenPackedTensor,
+    layer: "QuadLayerWeights",
+    coeffs: Dict[str, PolyCoeffs],
+    n_jobs: int = 1,
+) -> Tuple[TokenPackedTensor, Dict[str, float]]:
+    """Run 2Quad MHA + post-LN under FHE (no polynomial-softmax chain).
+
+    Pipeline: ``2Quad-MHA → residual → LN-poly``.  Compared to LPAN's
+    ``encrypt_attention_block``, the inner softmax (depth ~3-5,
+    4-5 ct×ct) is replaced with a single squaring + scalar /L
+    (depth 2, 1 ct×ct).
+    """
+    timings: Dict[str, float] = {}
+
+    t = time.time()
+    h = enc_self_quad_attention(
+        backend, x,
+        layer.Wq, layer.bq, layer.Wk, layer.bk,
+        layer.Wv, layer.bv, layer.Wo, layer.bo,
+        num_heads=layer.num_heads, n_jobs=n_jobs,
+    )
+    timings["MHA"] = time.time() - t
+
+    t = time.time()
+    res = TokenPackedTensor.from_ciphertexts(
+        [backend.add(h.cts[i], x.cts[i]) for i in range(x.seq_len)],
+        hidden_dim=x.hidden_dim,
+    )
+    timings["residual"] = time.time() - t
+
+    t = time.time()
+    ln = coeffs["LN"]
+    out = enc_ln_poly(
+        backend, res, ln.power_coeffs, ln.interval,
+        gamma=layer.ln1_gamma, beta=layer.ln1_beta, n_jobs=n_jobs,
+    )
+    timings["LN"] = time.time() - t
+    return out, timings
+
+
+def encrypt_ffn_block_quad(
+    backend: CKKSBackend,
+    x: TokenPackedTensor,
+    layer: "QuadLayerWeights",
+    coeffs: Dict[str, PolyCoeffs],
+    n_jobs: int = 1,
+) -> Tuple[TokenPackedTensor, Dict[str, float]]:
+    """FFN block using QuadLayerWeights (identical FFN to LPAN, different bundle type)."""
+    timings: Dict[str, float] = {}
+
+    t = time.time()
+    h = enc_linear(backend, x, layer.W1, layer.b1, n_jobs=n_jobs)
+    timings["W1"] = time.time() - t
+
+    t = time.time()
+    g = coeffs["GELU"]
+    h = enc_gelu_poly(backend, h, g.power_coeffs, g.interval, n_jobs=n_jobs)
+    timings["GELU"] = time.time() - t
+
+    t = time.time()
+    h = enc_linear(backend, h, layer.W2, layer.b2, n_jobs=n_jobs)
+    timings["W2"] = time.time() - t
+
+    t = time.time()
+    res = TokenPackedTensor.from_ciphertexts(
+        [backend.add(h.cts[i], x.cts[i]) for i in range(x.seq_len)],
+        hidden_dim=x.hidden_dim,
+    )
+    timings["residual"] = time.time() - t
+
+    t = time.time()
+    ln = coeffs["LN"]
+    out = enc_ln_poly(
+        backend, res, ln.power_coeffs, ln.interval,
+        gamma=layer.ln2_gamma, beta=layer.ln2_beta, n_jobs=n_jobs,
+    )
+    timings["LN"] = time.time() - t
+    return out, timings
+
+
+def encrypt_layer_quad(
+    backend: CKKSBackend,
+    x: TokenPackedTensor,
+    layer: "QuadLayerWeights",
+    coeffs: Dict[str, PolyCoeffs],
+    n_jobs: int = 1,
+) -> Tuple[TokenPackedTensor, Dict[str, float]]:
+    """One full encoder layer with 2Quad attention."""
+    h, t_attn = encrypt_quad_attention_block(backend, x, layer, coeffs, n_jobs=n_jobs)
+    h, t_ffn = encrypt_ffn_block_quad(backend, h, layer, coeffs, n_jobs=n_jobs)
+    timings = {f"quad.{k}": v for k, v in t_attn.items()}
+    timings.update({f"ffn.{k}": v for k, v in t_ffn.items()})
+    return h, timings
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Hybrid model: LPAN (deep) + 2Quad (mid) + LinearMixing (early)
+# ──────────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class HybridModelWeights:
+    """Weights for a HyPER-LPAN model.
+
+    A list of per-layer weight bundles (one of LinearMixingLayerWeights /
+    QuadLayerWeights / LayerWeights), in encoder order.  The pipeline
+    dispatches to the right block function based on the bundle's runtime
+    type, so adding a fourth attention variant later is purely additive.
+    """
+
+    model_key: str
+    num_layers: int
+    hidden: int
+    num_heads: int
+    layers: List[object] = field(default_factory=list)  # per-layer bundles
+    pooler_W: Optional[np.ndarray] = None
+    pooler_b: Optional[np.ndarray] = None
+    cls_W: Optional[np.ndarray] = None
+    cls_b: Optional[np.ndarray] = None
+
+
+def load_hybrid_weights(
+    model_key: str,
+    *,
+    checkpoint_path: str,
+    linear_mixing_layers: Sequence[int],
+    quad_attention_layers: Sequence[int],
+    num_labels: int = 2,
+) -> HybridModelWeights:
+    """Load a HyPER-LPAN checkpoint, dispatching per-layer to the right bundle.
+
+    Parameters
+    ----------
+    linear_mixing_layers, quad_attention_layers : sequences of int
+        Same lists passed to ``apply_hybrid_attention`` at training time.
+        Layers not in either list are loaded as standard LPAN
+        ``LayerWeights``.
+
+    The checkpoint is the safetensors file produced by
+    ``HyperLPANPipeline`` (``best_model/model.safetensors``).
+    """
+    from pathlib import Path
+
+    from safetensors.torch import load_file as _load_safetensors
+
+    cfg = MODEL_REGISTRY[model_key]
+    ckpt = Path(checkpoint_path)
+    sf = ckpt / "model.safetensors"
+    bin_path = ckpt / "pytorch_model.bin"
+    if sf.exists():
+        sd = {k: v.numpy() for k, v in _load_safetensors(str(sf)).items()}
+    else:
+        import torch as _torch
+        raw = _torch.load(str(bin_path), map_location="cpu", weights_only=False)
+        sd = {k: v.numpy() for k, v in raw.items()}
+
+    num_heads = cfg.get("heads", 12)
+    lm_set = set(linear_mixing_layers)
+    quad_set = set(quad_attention_layers)
+    overlap = lm_set & quad_set
+    if overlap:
+        raise ValueError(
+            f"Layers {sorted(overlap)} cannot be both linear-mixing and quad"
+        )
+
+    layers: List[object] = []
+    for i in range(cfg["layers"]):
+        p = f"bert.encoder.layer.{i}"
+        # FFN + final LN are identical across all variants
+        ffn_args = dict(
+            W1=sd[f"{p}.intermediate.dense.weight"],
+            b1=sd[f"{p}.intermediate.dense.bias"],
+            W2=sd[f"{p}.output.dense.weight"],
+            b2=sd[f"{p}.output.dense.bias"],
+            ln2_gamma=sd[f"{p}.output.LayerNorm.weight"],
+            ln2_beta=sd[f"{p}.output.LayerNorm.bias"],
+        )
+        if i in lm_set:
+            layers.append(LinearMixingLayerWeights(
+                P_weights=sd[f"{p}.attention.pos_mix_weight"],
+                P_biases=sd[f"{p}.attention.pos_mix_bias"],
+                Wo=sd[f"{p}.attention.out_proj.weight"],
+                bo=sd[f"{p}.attention.out_proj.bias"],
+                ln1_gamma=sd[f"{p}.attention.LayerNorm.weight"],
+                ln1_beta=sd[f"{p}.attention.LayerNorm.bias"],
+                num_heads=num_heads,
+                **ffn_args,
+            ))
+        elif i in quad_set:
+            layers.append(QuadLayerWeights(
+                Wq=sd[f"{p}.attention.query.weight"],
+                bq=sd[f"{p}.attention.query.bias"],
+                Wk=sd[f"{p}.attention.key.weight"],
+                bk=sd[f"{p}.attention.key.bias"],
+                Wv=sd[f"{p}.attention.value.weight"],
+                bv=sd[f"{p}.attention.value.bias"],
+                Wo=sd[f"{p}.attention.out_proj.weight"],
+                bo=sd[f"{p}.attention.out_proj.bias"],
+                ln1_gamma=sd[f"{p}.attention.LayerNorm.weight"],
+                ln1_beta=sd[f"{p}.attention.LayerNorm.bias"],
+                num_heads=num_heads,
+                **ffn_args,
+            ))
+        else:
+            # LPAN: standard BertSelfAttention + BertSelfOutput.LayerNorm path
+            layers.append(LayerWeights(
+                Wq=sd[f"{p}.attention.self.query.weight"],
+                bq=sd[f"{p}.attention.self.query.bias"],
+                Wk=sd[f"{p}.attention.self.key.weight"],
+                bk=sd[f"{p}.attention.self.key.bias"],
+                Wv=sd[f"{p}.attention.self.value.weight"],
+                bv=sd[f"{p}.attention.self.value.bias"],
+                Wo=sd[f"{p}.attention.output.dense.weight"],
+                bo=sd[f"{p}.attention.output.dense.bias"],
+                ln1_gamma=sd[f"{p}.attention.output.LayerNorm.weight"],
+                ln1_beta=sd[f"{p}.attention.output.LayerNorm.bias"],
+                **ffn_args,
+            ))
+
+    return HybridModelWeights(
+        model_key=model_key,
+        num_layers=cfg["layers"],
+        hidden=cfg["hidden"],
+        num_heads=num_heads,
+        layers=layers,
+        pooler_W=sd.get("bert.pooler.dense.weight"),
+        pooler_b=sd.get("bert.pooler.dense.bias"),
+        cls_W=sd.get("classifier.weight"),
+        cls_b=sd.get("classifier.bias"),
+    )
+
+
+def encrypt_layer_dispatch(
+    backend: CKKSBackend,
+    x: TokenPackedTensor,
+    layer: object,
+    coeffs: Dict[str, PolyCoeffs],
+    num_heads: int,
+    n_jobs: int = 1,
+) -> Tuple[TokenPackedTensor, Dict[str, float]]:
+    """Run one encoder layer, dispatching by bundle type.
+
+    Hot path of the hybrid pipeline: avoids ``isinstance`` cascading
+    by deferring to the existing per-variant block functions.
+    """
+    if isinstance(layer, LinearMixingLayerWeights):
+        return encrypt_layer_linear_mix(backend, x, layer, coeffs, n_jobs=n_jobs)
+    if isinstance(layer, QuadLayerWeights):
+        return encrypt_layer_quad(backend, x, layer, coeffs, n_jobs=n_jobs)
+    if isinstance(layer, LayerWeights):
+        return encrypt_layer(backend, x, layer, coeffs, num_heads, n_jobs=n_jobs)
+    raise TypeError(f"Unknown layer bundle type: {type(layer).__name__}")
+
+
+def encrypt_inference_hybrid(
+    backend: CKKSBackend,
+    x_plain: np.ndarray,
+    weights: HybridModelWeights,
+    coeffs: Dict[int, Dict[str, PolyCoeffs]],
+    max_seq_len: Optional[int] = None,
+    n_jobs: int = 1,
+) -> Tuple[np.ndarray, Dict[str, float]]:
+    """End-to-end HyPER-LPAN encrypted forward pass.
+
+    Per-layer dispatch on bundle type (LinearMixing / Quad / LPAN) keeps
+    the full ``encrypt_inference`` interface while letting each layer use
+    its cheapest available primitives.
+
+    Notes
+    -----
+    The polynomial coefficients ``coeffs[i]`` may omit the ``"Softmax"``
+    key for layers that are LinearMixing or Quad — neither uses the LPAN
+    softmax polynomial.  Only ``"GELU"`` and ``"LN"`` are required for
+    every layer.
+    """
+    timings: Dict[str, float] = {}
+
+    if max_seq_len is not None and x_plain.shape[0] > max_seq_len:
+        x_plain = x_plain[:max_seq_len]
+
+    t = time.time()
+    ct_x = TokenPackedTensor.encrypt(backend, x_plain)
+    timings["encrypt"] = time.time() - t
+
+    h = ct_x
+    for i, layer in enumerate(weights.layers):
+        h, layer_t = encrypt_layer_dispatch(
+            backend, h, layer, coeffs[i],
+            num_heads=weights.num_heads, n_jobs=n_jobs,
+        )
+        for k, v in layer_t.items():
+            timings[f"L{i}.{k}"] = v
+
+    if weights.cls_W is not None:
+        t = time.time()
+        cls = TokenPackedTensor.from_ciphertexts([h.cts[0]], hidden_dim=h.hidden_dim)
+        if weights.pooler_W is not None:
+            cls = enc_linear(backend, cls, weights.pooler_W, weights.pooler_b)
         out_ct = enc_linear(backend, cls, weights.cls_W, weights.cls_b)
         timings["classifier"] = time.time() - t
     else:

@@ -80,12 +80,21 @@ GLUE_TASKS: dict[str, TaskConfig] = {
         epochs=3,
         description="Question Natural Language Inference (QNLI)",
     ),
+    "rte": TaskConfig(
+        name="rte",
+        text_fields=("sentence1", "sentence2"),
+        num_labels=2,
+        metric="accuracy",
+        eval_metrics=("accuracy",),
+        epochs=5,
+        description="Recognizing Textual Entailment (RTE)",
+    ),
 }
 
 # Tasks chosen to align with prior FHE/MPC transformer literature
-# (MPCFormer, THE-X, BOLT) that all report SST-2 / MRPC / QNLI / QQP.
-# MNLI / RTE / STS-B are intentionally omitted to keep the comparison
-# table apples-to-apples and to avoid the regression-KD code path.
+# (MPCFormer, THE-X, BOLT, NEXUS) that report SST-2 / MRPC / QNLI / RTE.
+# QQP is also commonly reported but training is ~10x more expensive.
+# MNLI / STS-B remain omitted (regression-KD code path not implemented).
 
 
 def get_task(name: str) -> TaskConfig:

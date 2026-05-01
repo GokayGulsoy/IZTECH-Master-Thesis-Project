@@ -37,7 +37,7 @@ def _parse_args():
     p.add_argument("--model", default="tiny",
                    choices=["tiny", "mini", "small", "base"],
                    help="BERT variant (default: tiny)")
-    p.add_argument("--task", default="sst2", choices=["sst2", "mrpc", "qnli"],
+    p.add_argument("--task", default="sst2", choices=["sst2", "mrpc", "qnli", "rte"],
                    help="GLUE task (default: sst2)")
     p.add_argument("--n-samples", type=int, default=20,
                    help="Number of validation samples to benchmark (default: 20)")
@@ -60,6 +60,19 @@ def _parse_args():
     p.add_argument("--phase", default="model",
                    choices=["ffn", "attention", "layer", "model"],
                    help="Which protocol phase to benchmark (default: model)")
+    p.add_argument("--linear-mixing", action="store_true",
+                   help="Use linear mixing model (no attention) instead of standard BERT")
+    p.add_argument("--linear-mixing-checkpoint", type=str, default=None,
+                   help="Path to linear mixing fine-tuned checkpoint "
+                        "(default: results/multi_model/<task>/<model>/linear_mixing_final/best_model)")
+    p.add_argument("--hybrid", action="store_true",
+                   help="Run HyPER-LPAN hybrid model (LinearMixing + Quad + LPAN composition)")
+    p.add_argument("--linear-mixing-layers", type=str, default="0,1,2,3",
+                   help="Comma-separated layer indices for LinearMixing (--hybrid only)")
+    p.add_argument("--quad-attention-layers", type=str, default="4,5,6,7",
+                   help="Comma-separated layer indices for QuadAttention (--hybrid only)")
+    p.add_argument("--reduced-degrees", action="store_true",
+                   help="Use Phase 2b reduced polynomial degrees per region (--hybrid only)")
     return p.parse_args()
 
 
@@ -70,8 +83,8 @@ def _load_dataset(task: str, n_samples: int, max_seq_len: int):
     from datasets import load_dataset
     from transformers import AutoTokenizer
 
-    hf_name = {"sst2": "glue/sst2", "mrpc": "glue/mrpc", "qnli": "glue/qnli"}[task]
-    text_col = {"sst2": "sentence", "mrpc": "sentence1", "qnli": "question"}[task]
+    hf_name = {"sst2": "glue/sst2", "mrpc": "glue/mrpc", "qnli": "glue/qnli", "rte": "glue/rte"}[task]
+    text_col = {"sst2": "sentence", "mrpc": "sentence1", "qnli": "question", "rte": "sentence1"}[task]
     label_col = "label"
 
     ds = load_dataset("glue", task, split="validation")
@@ -156,9 +169,33 @@ def _run_fhe_sample(
     phase,
     model,
     checkpoint,
+    linear_mixing=False,
+    hybrid=False,
 ):
     """Encrypt, infer, decrypt one sample. Returns (logits, timings)."""
-    if phase == "model":
+    if hybrid:
+        from fhe_thesis.encryption.protocol import encrypt_inference_hybrid
+
+        logits, timings = encrypt_inference_hybrid(
+            backend,
+            emb_np,
+            weights,
+            coeffs,
+            max_seq_len=max_seq_len,
+            n_jobs=n_jobs,
+        )
+    elif linear_mixing:
+        from fhe_thesis.encryption.protocol import encrypt_inference_linear_mixing
+
+        logits, timings = encrypt_inference_linear_mixing(
+            backend,
+            emb_np,
+            weights,
+            coeffs,
+            max_seq_len=max_seq_len,
+            n_jobs=n_jobs,
+        )
+    elif phase == "model":
         from fhe_thesis.encryption.protocol import encrypt_inference
 
         logits, timings = encrypt_inference(
@@ -194,6 +231,7 @@ def main():
     print(f"\n=== LPAN-FHE Benchmark ===")
     print(f"  model={args.model}  task={args.task}  n_samples={args.n_samples}")
     print(f"  max_seq_len={args.max_seq_len}  n_jobs={args.n_jobs}")
+    print(f"  linear_mixing={args.linear_mixing}  hybrid={args.hybrid}")
     print(f"  dry_run={args.dry_run}  no_bootstrap={args.no_bootstrap}\n")
 
     # ── Load data ──────────────────────────────────────────────────────
@@ -209,6 +247,8 @@ def main():
         "model": args.model,
         "task": args.task,
         "phase": args.phase,
+        "linear_mixing": args.linear_mixing,
+        "hybrid": args.hybrid,
         "n_samples": len(samples),
         "max_seq_len": args.max_seq_len,
         "n_jobs": args.n_jobs,
@@ -239,10 +279,56 @@ def main():
 
     # ── Load weights + coefficients ───────────────────────────────────
     print("Loading model weights and polynomial coefficients...")
-    from fhe_thesis.encryption.protocol import load_model_weights
     from fhe_thesis.encryption.coefficients import load_coefficients
-    weights = load_model_weights(args.model, checkpoint_path=args.checkpoint)
-    coeffs = load_coefficients(args.model, task=args.task)
+
+    if args.hybrid:
+        from fhe_thesis.encryption.protocol import load_hybrid_weights
+        from fhe_thesis.encryption.hybrid_coefficients import load_coefficients_for_hybrid
+        if args.checkpoint is None:
+            from fhe_thesis.config import MULTI_MODEL_DIR
+            args.checkpoint = str(
+                MULTI_MODEL_DIR / args.task / args.model
+                / "hybrid_progressive" / "best_model"
+            )
+        lm_layers = [int(x) for x in args.linear_mixing_layers.split(",") if x.strip()]
+        qa_layers = [int(x) for x in args.quad_attention_layers.split(",") if x.strip()]
+        print(f"  Hybrid checkpoint: {args.checkpoint}")
+        print(f"  LinearMixing layers: {lm_layers}  Quad layers: {qa_layers}")
+        weights = load_hybrid_weights(
+            args.model,
+            checkpoint_path=args.checkpoint,
+            linear_mixing_layers=lm_layers,
+            quad_attention_layers=qa_layers,
+        )
+        if args.reduced_degrees:
+            coeffs = load_coefficients_for_hybrid(
+                args.model, task=args.task,
+                linear_mixing_layers=lm_layers,
+                quad_attention_layers=qa_layers,
+            )
+        else:
+            coeffs = load_coefficients(args.model, task=args.task)
+            # Strip Softmax keys for non-LPAN layers (Quad/LM don't need them)
+            for li in list(lm_layers) + list(qa_layers):
+                if li in coeffs:
+                    coeffs[li] = {k: v for k, v in coeffs[li].items() if k != "Softmax"}
+    elif args.linear_mixing:
+        from fhe_thesis.encryption.protocol import load_linear_mixing_weights
+        lm_ckpt = args.linear_mixing_checkpoint
+        if lm_ckpt is None:
+            from fhe_thesis.config import MULTI_MODEL_DIR
+            lm_ckpt = str(
+                MULTI_MODEL_DIR / args.task / args.model
+                / "linear_mixing_final" / "best_model"
+            )
+        print(f"  Linear mixing checkpoint: {lm_ckpt}")
+        weights = load_linear_mixing_weights(
+            args.model, checkpoint_path=lm_ckpt
+        )
+    else:
+        from fhe_thesis.encryption.protocol import load_model_weights
+        weights = load_model_weights(args.model, checkpoint_path=args.checkpoint)
+        coeffs = load_coefficients(args.model, task=args.task)
 
     # Get embeddings (plaintext embedding layer runs outside FHE)
     print("Computing plaintext embeddings for all samples...")
@@ -266,6 +352,8 @@ def main():
             args.phase,
             args.model,
             args.checkpoint,
+            linear_mixing=args.linear_mixing,
+            hybrid=args.hybrid,
         )
         wall = time.time() - t_start
 
