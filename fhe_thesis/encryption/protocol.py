@@ -977,6 +977,7 @@ def encrypt_inference_hybrid(
     max_seq_len: Optional[int] = None,
     n_jobs: int = 1,
     kept_token_indices: Optional[np.ndarray] = None,
+    bootstrap_plan: Optional[object] = None,
 ) -> Tuple[np.ndarray, Dict[str, float]]:
     """End-to-end HyPER-LPAN encrypted forward pass.
 
@@ -1014,6 +1015,13 @@ def encrypt_inference_hybrid(
 
     h = ct_x
     for i, layer in enumerate(weights.layers):
+        if bootstrap_plan is not None:
+            from .bootstrap_scheduler import maybe_bootstrap
+            t_bs = time.time()
+            h = maybe_bootstrap(backend, h, bootstrap_plan, i)
+            bs_dt = time.time() - t_bs
+            if bs_dt > 0:
+                timings[f"L{i}.bootstrap"] = bs_dt
         h, layer_t = encrypt_layer_dispatch(
             backend, h, layer, coeffs[i],
             num_heads=weights.num_heads, n_jobs=n_jobs,
