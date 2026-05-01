@@ -151,8 +151,9 @@ def freeze_for_global_finetune(model: nn.Module) -> int:
 
 def summarize_attention_types(model: nn.Module) -> dict[str, list[int]]:
     """Return dict: {'linear_mixing': [...], 'quad': [...], 'lpan': [...]}."""
+    from fhe_thesis.models.backbone import get_encoder_layers
     summary = {"linear_mixing": [], "quad": [], "lpan": []}
-    for li, layer in enumerate(model.bert.encoder.layer):
+    for li, layer in enumerate(get_encoder_layers(model)):
         kind = get_layer_attention_type(layer.attention)
         summary[kind].append(li)
     return summary

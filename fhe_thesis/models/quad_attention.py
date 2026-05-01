@@ -203,7 +203,8 @@ def replace_attention_with_quad(
         num_heads = model.config.num_attention_heads
     allowed = set(layer_indices) if layer_indices is not None else None
 
-    for layer_idx, layer in enumerate(model.bert.encoder.layer):
+    from fhe_thesis.models.backbone import get_encoder_layers
+    for layer_idx, layer in enumerate(get_encoder_layers(model)):
         if allowed is not None and layer_idx not in allowed:
             continue
 

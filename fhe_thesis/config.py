@@ -53,6 +53,18 @@ MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
         "layers": 12, "hidden": 768, "heads": 12, "params_m": 110.0,
         "batch_size": 16, "lr": 2e-5,
     },
+    "roberta-base": {
+        "name": "roberta-base",
+        "short": "RoBERTa-Base",
+        "layers": 12, "hidden": 768, "heads": 12, "params_m": 125.0,
+        "batch_size": 16, "lr": 2e-5,
+    },
+    "distilbert": {
+        "name": "distilbert-base-uncased",
+        "short": "DistilBERT",
+        "layers": 6, "hidden": 768, "heads": 12, "params_m": 66.0,
+        "batch_size": 16, "lr": 2e-5,
+    },
 }
 
 # Default model for single-model experiments

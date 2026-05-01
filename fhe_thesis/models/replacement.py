@@ -53,7 +53,8 @@ def replace_activations(
     types: Set[str] = set(replace_types) if replace_types else {"GELU", "Softmax", "LN"}
     allowed_layers: Optional[Set[int]] = set(layer_indices) if layer_indices is not None else None
 
-    for layer_idx, layer in enumerate(model.bert.encoder.layer):
+    from fhe_thesis.models.backbone import get_encoder_layers
+    for layer_idx, layer in enumerate(get_encoder_layers(model)):
         if allowed_layers is not None and layer_idx not in allowed_layers:
             continue
         # 1. Replace GELU
