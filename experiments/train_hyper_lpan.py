@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """HyPER-LPAN unified training entry point.
 
-Replaces the legacy trio of fine-tune scripts
-(``finetune_lpan_staged`` + ``finetune_linear_mixing_progressive``
-+ ``finetune_hybrid_progressive``) with a single resumable, YAML-driven
-pipeline.
+Single resumable, YAML-driven pipeline that takes ``bert-base-uncased``
+through every stage (LPAN baseline → mid-layer Quad replacement →
+early-layer LinearMixing replacement → global fine-tuning) in one
+invocation.
 
 Usage
 -----

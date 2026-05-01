@@ -1,1 +1,1 @@
-"""Optimization utilities (archived — GA and DP solvers moved to legacy/)."""
+"""Optimization utilities for HyPER-LPAN composition planning."""

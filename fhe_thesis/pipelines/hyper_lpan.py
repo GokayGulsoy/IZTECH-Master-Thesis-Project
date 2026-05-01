@@ -1,8 +1,7 @@
 """HyPER-LPAN unified training pipeline.
 
-Replaces the previous tangle of three scripts
-(``finetune_lpan_staged.py`` / ``finetune_linear_mixing_progressive.py`` /
-``finetune_hybrid_progressive.py``) with one resumable, YAML-driven pipeline.
+Single resumable, YAML-driven pipeline that orchestrates the full
+stage sequence in one invocation.
 
 Stages
 ------

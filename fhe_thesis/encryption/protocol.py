@@ -222,9 +222,9 @@ def load_linear_mixing_weights(
 ) -> LinearMixingModelWeights:
     """Load weights from a multi-head linear-mixing fine-tuned checkpoint.
 
-    The checkpoint was produced by ``finetune_linear_mixing_progressive.py``
-    and contains ``pos_mix_weight`` / ``pos_mix_bias`` / ``out_proj``
-    parameters instead of Q/K/V/O.
+    The checkpoint contains ``pos_mix_weight`` / ``pos_mix_bias`` /
+    ``out_proj`` parameters instead of Q/K/V/O (produced by the
+    LinearMixing stage of the unified ``train_hyper_lpan`` pipeline).
     """
     from safetensors.torch import load_file as _load_safetensors
     from pathlib import Path

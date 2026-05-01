@@ -1,7 +1,7 @@
 """Checkpoint discovery, loading, and resume helpers.
 
-Centralises the boilerplate previously duplicated across
-``finetune_*_progressive.py`` and ``finetune_linear_mixing.py``.
+Centralises the boilerplate used by the unified ``train_hyper_lpan``
+pipeline and its stage modules.
 
 Public API
 ----------
