@@ -1,24 +1,25 @@
-# HyPER-LPAN config: BERT-base on MRPC
-# MRPC has 3.7k train examples (vs 67k for SST-2) — train longer per layer.
+# HyPER-LPAN config: BERT-base on MRPC (v4: budget 0.80 + AttnKL, May 2026)
 #
-# Composition rationale (revised after first run):
-#   First run used [0-3]=linear_mixing, [4-7]=quad → F1=82.60% (-7.4% vs LPAN
-#   baseline 87.95%, vs BOLT 89.95% / MPCFormer-2Quad 88.7%).
-#   MRPC is paraphrase detection: it relies on content-based cross-sentence
-#   token interactions in the lower layers. LinearMixing is position-only and
-#   is blind to that signal, so replacing L0-L3 hurts disproportionately.
+# Composition: budget=0.80, min_lpan=4, gamma_q=0.5
+#   LPAN at [3, 4, 5, 6, 7, 9, 10, 11] — 8 layers, cost 33.6/42 (20% saving)
+#   Quad at [0, 1, 2, 8] — only 4 layers
 #
-# Revised: drop LinearMixing entirely; use Quad attention in L0-L7 (matches
-# MPCFormer 2Quad). FHE cost penalty vs the previous config is only ~15-25%
-# (Quad costs ~1 ct×ct per layer vs 0 for LinearMixing) but accuracy should
-# recover to ~88-89% F1, putting us in the BOLT/MPCFormer band.
+# Training recipe v4:
+#   - γ=4 HidMSE (with clamp=10 in trainer)
+#   - β=2 AttnKL (TinyBERT-style — direct gradient on attention distributions)
+#   - epochs_per_layer=5, final_epochs=8
+#   - lr_div=3, warmup=0.2
+#
+# Goal: reach ≥86 F1 (LPAN-baseline-close) with 20% FHE cost saving
 model: base
 task: mrpc
 max_seq_len: 128
 seed: 42
 
+# From results/composition/plan_mckp_base_mrpc_v4_b80.json (cost 33.6/42, 1.25x)
 linear_mixing_layers: []
-quad_attention_layers: [0, 1, 2, 3, 4, 5, 6, 7]
+quad_attention_layers: [0, 1, 2, 8]
+# LPAN implicit at remaining: [3, 4, 5, 6, 7, 9, 10, 11]
 
 epochs_per_layer: 5
 lr: 5.0e-5
@@ -28,8 +29,18 @@ gamma_decay: true
 stage_order: quad_first
 lr_schedule: constant_with_warmup
 
-final_epochs: 5
+final_epochs: 8
 global_gamma: 2.0
 global_lr_div: 3.0
 
-auto_train_lpan: false
+precision: auto
+llrd: true
+llrd_decay: 0.95
+warmup_ratio: 0.2
+# AttnKL is now properly normalized in trainer (per-row mean) + clamped at 5.
+# With correct scale, TinyBERT-style β≈1 is appropriate.
+attn_beta: 1.0          # AttnKL distillation Stage B (per-layer)
+global_attn_beta: 0.5   # AttnKL during Stage D (gentler global FT)
+
+auto_train_lpan: true
+

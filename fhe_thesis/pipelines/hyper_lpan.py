@@ -112,6 +112,14 @@ class HyperLPANConfig:
     global_gamma: float = 2.0
     global_lr_div: float = 3.0  # global_lr = lr / global_lr_div
 
+    # Modern training recipe (Ext + commit e3b4bb9)
+    precision: str = "auto"        # fp32 | fp16 | bf16 | auto
+    llrd: bool = False             # layer-wise learning-rate decay
+    llrd_decay: float = 0.95
+    warmup_ratio: float = 0.1      # LR warmup fraction (raise to suppress Stage-D loss spikes)
+    attn_beta: float = 0.0         # AttnKL distillation weight (TinyBERT/MiniLM-style); 0=off
+    global_attn_beta: float = 0.0  # AttnKL weight for Stage D global FT (default off)
+
     # Control flags
     skip_stage_b: bool = False
     skip_stage_c: bool = False
@@ -327,6 +335,24 @@ class HyperLPANPipeline:
 
         self.results["lpan_baseline"] = self.lpan_acc
 
+        # Also record FP32 vanilla baseline (original BERT fine-tuned on task)
+        # for full comparison. This is the reference point for LPAN's design
+        # claim: "minimal accuracy drop while replacing GELU+Softmax+LayerNorm".
+        # Populated by scripts/eval_fp32_baselines.py (one-time per task).
+        try:
+            import json as _json
+            from pathlib import Path as _Path
+            cache = _Path("results/baselines/fp32_finetuned.json")
+            if cache.exists():
+                table = _json.loads(cache.read_text())
+                key = f"{self.cfg.model}/{self.cfg.task}"
+                if key in table:
+                    self.results["fp32_baseline"] = table[key]
+                    print(f"  FP32 baseline ({key}): "
+                          f"{table[key].get('metric_value', 'n/a')}")
+        except Exception as _e:
+            print(f"  [warn] could not load FP32 baseline: {_e}")
+
         # Track replaced layers across all stages so freeze_for_progressive
         # sees the cumulative set
         self._replaced_so_far: List[int] = []
@@ -466,9 +492,12 @@ class HyperLPANPipeline:
                 batch_size=self.cfg.batch_size,
                 lr=layer_lr,
                 label=f"L{li} {layer_type}",
-                use_fp16=torch.cuda.is_available(),
+                precision=self.cfg.precision,
+                llrd=self.cfg.llrd,
+                llrd_decay=self.cfg.llrd_decay,
+                warmup_ratio=self.cfg.warmup_ratio,
                 max_grad_norm=1.0,
-                alpha=1.0, beta=0.0, gamma=layer_gamma,
+                alpha=1.0, beta=self.cfg.attn_beta, gamma=layer_gamma,
                 seed=self.cfg.seed,
                 lr_scheduler_type=self.cfg.lr_schedule,
             )
@@ -537,9 +566,12 @@ class HyperLPANPipeline:
             batch_size=self.cfg.batch_size,
             lr=global_lr,
             label="Global fine-tune",
-            use_fp16=torch.cuda.is_available(),
+            precision=self.cfg.precision,
+            llrd=self.cfg.llrd,
+            llrd_decay=self.cfg.llrd_decay,
+            warmup_ratio=self.cfg.warmup_ratio,
             max_grad_norm=1.0,
-            alpha=1.0, beta=0.0, gamma=self.cfg.global_gamma,
+            alpha=1.0, beta=self.cfg.global_attn_beta, gamma=self.cfg.global_gamma,
             seed=self.cfg.seed,
             lr_scheduler_type=self.cfg.lr_schedule,
         )

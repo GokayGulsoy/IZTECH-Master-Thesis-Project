@@ -36,7 +36,9 @@ def _parse_args():
                    choices=["sst2", "mrpc", "qnli", "rte"])
     p.add_argument("--checkpoint", type=str, default=None,
                    help="Plaintext fine-tuned checkpoint (default: HF pretrained)")
-    p.add_argument("--n-samples", type=int, default=64)
+    p.add_argument("--n-samples", type=int, default=256,
+                   help="Calibration samples for drift/entropy (default: 256, "
+                        "matches PoWER-BERT/AutoFHE calibration size)")
     p.add_argument("--max-seq-len", type=int, default=64)
     p.add_argument("--method", default="entropy", choices=["entropy", "mckp"],
                    help="Selector: 'entropy' (heuristic) or 'mckp' (provably optimal DP)")
@@ -87,7 +89,13 @@ def main():
     )
 
     args = _parse_args()
-    out_dir = Path(args.out)
+    out_arg = Path(args.out)
+    if out_arg.suffix == ".json":
+        out_path_override: Path | None = out_arg
+        out_dir = out_arg.parent
+    else:
+        out_path_override = None
+        out_dir = out_arg
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"=== HyPER-LPAN Composition Selector ({args.method}) ===")
@@ -150,7 +158,8 @@ def main():
           f"(vs full-LPAN {full_lpan_cost:.1f}, "
           f"speedup {full_lpan_cost / max(plan.estimated_cost, 1e-9):.2f}x)")
 
-    out_path = out_dir / f"plan_{args.method}_{args.model}_{args.task}.json"
+    out_path = (out_path_override if out_path_override is not None
+                else out_dir / f"plan_{args.method}_{args.model}_{args.task}.json")
     with open(out_path, "w") as f:
         json.dump({
             **plan.to_dict(),

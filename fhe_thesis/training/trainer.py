@@ -337,12 +337,18 @@ class AttentionDistillationTrainer(NaNSafeTrainer):
             # student/teacher: [B, H, S, S] — already probability distributions
             s_attn = student_attns[l].float().clamp(min=1e-8)
             t_attn = teacher_attns[l].float().clamp(min=1e-8)
-            # KL(teacher || student) per position, averaged over batch/heads/rows
+            # KL(teacher || student): use 'sum' then divide by B*H*S so the
+            # value is per-row mean KL (same scale as a normal KD term).
+            # 'batchmean' divides by B only, which over-counts by H*S (~1500x).
+            B, H, S, _ = s_attn.shape
             attn_loss = attn_loss + F.kl_div(
-                s_attn.log(), t_attn, reduction="batchmean"
-            )
+                s_attn.log(), t_attn, reduction="sum"
+            ) / (B * H * S)
             attn_count += 1
         attn_loss = attn_loss / max(attn_count, 1)
+        # Clamp AttnKL: between fundamentally different attention families
+        # (LPAN softmax-poly vs Quad x^2), KL can spike on pathological batches.
+        attn_loss = torch.clamp(attn_loss, max=5.0)
 
         # --- Hidden state matching (per-layer MSE) ---
         hid_loss = torch.tensor(0.0, device=device)
@@ -353,6 +359,12 @@ class AttentionDistillationTrainer(NaNSafeTrainer):
                 student_hiddens[l].float(), teacher_hiddens[l].float()
             )
         hid_loss = hid_loss / max(num_h, 1)
+
+        # Clamp HidMSE to prevent gradient explosion on pathological batches.
+        # After 3+ cumulative quad replacements, rare batches produce huge
+        # hidden activations → HidMSE spikes to 56k+ → positive feedback loop.
+        # Clamping preserves gradient direction but bounds magnitude.
+        hid_loss = torch.clamp(hid_loss, max=10.0)
 
         # --- Combined loss ---
         loss = self.alpha * task_loss + self.beta * attn_loss + self.gamma * hid_loss
@@ -879,6 +891,7 @@ def attn_distill_and_eval(
     precision: Optional[str] = None,
     llrd: bool = False,
     llrd_decay: float = 0.95,
+    warmup_ratio: float = 0.1,
     max_grad_norm: Optional[float] = None,
     alpha: float = 1.0,
     beta: float = 1.0,
@@ -927,7 +940,7 @@ def attn_distill_and_eval(
         per_device_eval_batch_size=batch_size * 2,
         learning_rate=lr,
         weight_decay=0.01,
-        warmup_ratio=0.1,
+        warmup_ratio=warmup_ratio,
         lr_scheduler_type=lr_scheduler_type,
         eval_strategy="epoch",
         save_strategy="epoch",
