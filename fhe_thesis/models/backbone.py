@@ -66,3 +66,26 @@ def get_embeddings(model: nn.Module) -> nn.Module:
 
 def num_layers(model: nn.Module) -> int:
     return len(get_encoder_layers(model))
+
+
+def get_layer_param_prefix(model: nn.Module) -> str:
+    """Return the dotted prefix for encoder-layer parameters.
+
+    Example: ``"bert.encoder.layer."`` for BERT,
+    ``"roberta.encoder.layer."`` for RoBERTa,
+    ``"distilbert.transformer.layer."`` for DistilBERT.
+    """
+    name, _ = get_backbone(model)
+    for nm, chain in _BACKBONE_PATHS:
+        if nm == name:
+            return name + "." + ".".join(chain) + "."
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
+def get_pooler_param_prefix(model: nn.Module) -> str | None:
+    """Return the pooler parameter prefix or ``None`` for backbones
+    without a pooler (DistilBERT)."""
+    name, bb = get_backbone(model)
+    if hasattr(bb, "pooler") and bb.pooler is not None:
+        return f"{name}.pooler."
+    return None

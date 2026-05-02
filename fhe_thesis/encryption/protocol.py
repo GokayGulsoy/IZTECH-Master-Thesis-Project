@@ -142,6 +142,41 @@ class ModelWeights:
     cls_b: np.ndarray | None = None
 
 
+# Backbone-prefix table used to generalise state-dict access across
+# BERT, RoBERTa and DistilBERT. Each entry is
+# ``(backbone_attr, encoder_layer_path, pooler_path_or_None)`` where
+# the layer path is the dotted string between the backbone prefix and
+# the per-layer index.
+_PROTOCOL_BACKBONES: Tuple[Tuple[str, str, str | None], ...] = (
+    ("bert",       "encoder.layer",       "pooler.dense"),
+    ("roberta",    "encoder.layer",       "pooler.dense"),  # roberta also has a pooler
+    ("distilbert", "transformer.layer",   None),
+)
+
+
+def _infer_backbone_prefix(state_dict_keys) -> Tuple[str, str, str | None]:
+    """Detect which backbone a state-dict belongs to.
+
+    Returns ``(backbone, layer_prefix_template, pooler_prefix_or_None)``
+    where ``layer_prefix_template`` is a format string with one ``{i}``
+    placeholder, e.g. ``"bert.encoder.layer.{i}"``. Used by the protocol
+    weight loaders so they work uniformly on BERT/RoBERTa/DistilBERT
+    fine-tuned checkpoints.
+    """
+    keys = list(state_dict_keys)
+    for backbone, layer_path, pooler_path in _PROTOCOL_BACKBONES:
+        sentinel = f"{backbone}."
+        if any(k.startswith(sentinel) for k in keys):
+            layer_template = f"{backbone}.{layer_path}.{{i}}"
+            pooler_full = f"{backbone}.{pooler_path}" if pooler_path else None
+            return backbone, layer_template, pooler_full
+    raise ValueError(
+        f"State dict matches none of the known backbones "
+        f"{[b for b,_,_ in _PROTOCOL_BACKBONES]}; "
+        f"sample keys: {keys[:5]}"
+    )
+
+
 def load_model_weights(
     model_key: str,
     *,
@@ -162,10 +197,11 @@ def load_model_weights(
         src, num_labels=num_labels
     )
     sd = {k: v.detach().cpu().numpy() for k, v in model.named_parameters()}
+    backbone, layer_template, pooler_prefix = _infer_backbone_prefix(sd.keys())
 
     layers: List[LayerWeights] = []
     for i in range(cfg["layers"]):
-        p = f"bert.encoder.layer.{i}"
+        p = layer_template.format(i=i)
         layers.append(
             LayerWeights(
                 Wq=sd[f"{p}.attention.self.query.weight"],
@@ -193,8 +229,8 @@ def load_model_weights(
         hidden=cfg["hidden"],
         num_heads=cfg["heads"],
         layers=layers,
-        pooler_W=sd.get("bert.pooler.dense.weight"),
-        pooler_b=sd.get("bert.pooler.dense.bias"),
+        pooler_W=sd.get(f"{pooler_prefix}.weight") if pooler_prefix else None,
+        pooler_b=sd.get(f"{pooler_prefix}.bias") if pooler_prefix else None,
         cls_W=sd.get("classifier.weight"),
         cls_b=sd.get("classifier.bias"),
     )
@@ -242,9 +278,10 @@ def load_linear_mixing_weights(
         sd = {k: v.numpy() for k, v in raw.items()}
 
     num_heads = cfg.get("heads", 12)
+    backbone, layer_template, pooler_prefix = _infer_backbone_prefix(sd.keys())
     layers: List[LinearMixingLayerWeights] = []
     for i in range(cfg["layers"]):
-        p = f"bert.encoder.layer.{i}"
+        p = layer_template.format(i=i)
         layers.append(
             LinearMixingLayerWeights(
                 P_weights=sd[f"{p}.attention.pos_mix_weight"],
@@ -268,8 +305,8 @@ def load_linear_mixing_weights(
         num_layers=cfg["layers"],
         hidden=cfg["hidden"],
         layers=layers,
-        pooler_W=sd.get("bert.pooler.dense.weight"),
-        pooler_b=sd.get("bert.pooler.dense.bias"),
+        pooler_W=sd.get(f"{pooler_prefix}.weight") if pooler_prefix else None,
+        pooler_b=sd.get(f"{pooler_prefix}.bias") if pooler_prefix else None,
         cls_W=sd.get("classifier.weight"),
         cls_b=sd.get("classifier.bias"),
     )
@@ -864,6 +901,7 @@ def load_hybrid_weights(
         sd = {k: v.numpy() for k, v in raw.items()}
 
     num_heads = cfg.get("heads", 12)
+    backbone, layer_template, pooler_prefix = _infer_backbone_prefix(sd.keys())
     lm_set = set(linear_mixing_layers)
     quad_set = set(quad_attention_layers)
     overlap = lm_set & quad_set
@@ -874,7 +912,7 @@ def load_hybrid_weights(
 
     layers: List[object] = []
     for i in range(cfg["layers"]):
-        p = f"bert.encoder.layer.{i}"
+        p = layer_template.format(i=i)
         # FFN + final LN are identical across all variants
         ffn_args = dict(
             W1=sd[f"{p}.intermediate.dense.weight"],
@@ -932,8 +970,8 @@ def load_hybrid_weights(
         hidden=cfg["hidden"],
         num_heads=num_heads,
         layers=layers,
-        pooler_W=sd.get("bert.pooler.dense.weight"),
-        pooler_b=sd.get("bert.pooler.dense.bias"),
+        pooler_W=sd.get(f"{pooler_prefix}.weight") if pooler_prefix else None,
+        pooler_b=sd.get(f"{pooler_prefix}.bias") if pooler_prefix else None,
         cls_W=sd.get("classifier.weight"),
         cls_b=sd.get("classifier.bias"),
     )

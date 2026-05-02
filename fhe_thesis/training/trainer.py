@@ -384,6 +384,142 @@ def detect_device() -> torch.device:
     return torch.device("cpu")
 
 
+def resolve_precision(
+    precision: Optional[str] = None,
+    use_fp16: Optional[bool] = None,
+) -> Dict[str, bool]:
+    """Resolve a precision spec into HuggingFace TrainingArguments kwargs.
+
+    ``precision`` accepts ``"fp32"``, ``"fp16"``, ``"bf16"`` (case-
+    insensitive) and ``"auto"`` (BF16 if the GPU advertises it, else
+    FP16, else FP32). The legacy ``use_fp16`` boolean is honoured when
+    ``precision`` is ``None`` for backward compatibility.
+
+    Returns a dict suitable for ``**`` unpacking into TrainingArguments,
+    typically ``{"fp16": False, "bf16": True}``.
+    """
+    if not torch.cuda.is_available():
+        return {"fp16": False, "bf16": False}
+
+    spec = (precision or "").lower().strip() or None
+    if spec is None:
+        spec = "fp16" if use_fp16 else "fp32"
+    if spec == "auto":
+        # H100/A100/RTX 30xx+ all support BF16 in hardware.
+        bf16_ok = torch.cuda.is_bf16_supported()
+        spec = "bf16" if bf16_ok else "fp16"
+
+    if spec == "bf16":
+        if not torch.cuda.is_bf16_supported():
+            print("  [precision] BF16 requested but GPU does not advertise "
+                  "support; falling back to FP16.")
+            return {"fp16": True, "bf16": False}
+        return {"fp16": False, "bf16": True}
+    if spec == "fp16":
+        return {"fp16": True, "bf16": False}
+    if spec == "fp32":
+        return {"fp16": False, "bf16": False}
+    raise ValueError(
+        f"Unknown precision={precision!r}; expected one of "
+        "'fp32', 'fp16', 'bf16', 'auto'."
+    )
+
+
+def build_llrd_param_groups(
+    model: nn.Module,
+    base_lr: float,
+    decay: float = 0.95,
+    head_lr_mult: float = 1.0,
+    weight_decay: float = 0.01,
+    no_decay_substrings: Tuple[str, ...] = ("bias", "LayerNorm.weight"),
+) -> List[Dict[str, Any]]:
+    """Layer-wise learning rate decay (LLRD) parameter groups.
+
+    Layer ``l`` receives ``base_lr * decay ** (n_layers - 1 - l)`` so
+    layers closer to the classification head get a larger step. The
+    classification head and pooler always get ``base_lr * head_lr_mult``
+    (default = 1x base, i.e. the same learning rate the optimiser
+    would use without LLRD).
+
+    LLRD is the canonical recipe for fine-tuning large pre-trained
+    transformers on small downstream datasets (Howard & Ruder 2018;
+    Sun et al. 2019, ELECTRA paper, RoBERTa paper) — it adds 1-2
+    points of GLUE on small tasks like MRPC and RTE, exactly where
+    HyPER-LPAN's earlier numbers were weak.
+
+    Backbone-agnostic: works for BERT, RoBERTa and DistilBERT via the
+    ``num_layers`` helper.
+    """
+    from fhe_thesis.models.backbone import num_layers as _num_layers
+
+    n_layers = _num_layers(model)
+
+    def _is_no_decay(name: str) -> bool:
+        return any(s in name for s in no_decay_substrings)
+
+    # group lookup: (layer_idx_or_special) -> list of (param, no_decay)
+    groups: Dict[str, List[Tuple[str, nn.Parameter]]] = {}
+
+    for name, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        layer_idx: Optional[int] = None
+        # Identify encoder-layer parameters across BERT/RoBERTa/DistilBERT.
+        for backbone in ("bert.encoder.layer.", "roberta.encoder.layer.",
+                         "distilbert.transformer.layer."):
+            if name.startswith(backbone):
+                try:
+                    layer_idx = int(name[len(backbone):].split(".", 1)[0])
+                except ValueError:
+                    layer_idx = None
+                break
+        # Embeddings: treat as layer -1 (bottom of stack).
+        is_embed = (".embeddings." in name) or name.endswith("embeddings.weight")
+        if layer_idx is None and is_embed:
+            layer_idx = -1
+        bucket = ("embed" if layer_idx == -1
+                  else f"L{layer_idx}" if layer_idx is not None
+                  else "head")
+        groups.setdefault(bucket, []).append((name, p))
+
+    out: List[Dict[str, Any]] = []
+    for bucket, items in groups.items():
+        if bucket == "head":
+            lr = base_lr * head_lr_mult
+        elif bucket == "embed":
+            lr = base_lr * (decay ** n_layers)  # one notch below layer 0
+        else:
+            li = int(bucket[1:])
+            lr = base_lr * (decay ** (n_layers - 1 - li))
+        decay_params = [p for n, p in items if not _is_no_decay(n)]
+        no_decay_params = [p for n, p in items if _is_no_decay(n)]
+        if decay_params:
+            out.append({"params": decay_params, "lr": lr,
+                        "weight_decay": weight_decay, "name": f"{bucket}/wd"})
+        if no_decay_params:
+            out.append({"params": no_decay_params, "lr": lr,
+                        "weight_decay": 0.0, "name": f"{bucket}/no_wd"})
+    return out
+
+
+def make_llrd_optimizer(
+    model: nn.Module,
+    base_lr: float,
+    *,
+    decay: float = 0.95,
+    weight_decay: float = 0.01,
+    head_lr_mult: float = 1.0,
+    betas: Tuple[float, float] = (0.9, 0.999),
+    eps: float = 1e-8,
+) -> torch.optim.Optimizer:
+    """AdamW with layer-wise learning-rate decay parameter groups."""
+    groups = build_llrd_param_groups(
+        model, base_lr=base_lr, decay=decay,
+        head_lr_mult=head_lr_mult, weight_decay=weight_decay,
+    )
+    return torch.optim.AdamW(groups, lr=base_lr, betas=betas, eps=eps)
+
+
 def compute_metrics(eval_pred: EvalPrediction) -> Dict[str, float]:
     """Compute accuracy for classification evaluation (legacy SST-2 default)."""
     preds = np.argmax(eval_pred.predictions, axis=-1)
@@ -515,11 +651,19 @@ def train_and_eval(
     lr: float,
     label: str,
     use_fp16: bool = True,
+    precision: Optional[str] = None,
+    llrd: bool = False,
+    llrd_decay: float = 0.95,
     max_grad_norm: Optional[float] = None,
     compute_metrics_fn: Optional[Callable[[EvalPrediction], Dict[str, float]]] = None,
     metric_for_best_model: str = "eval_accuracy",
 ) -> Dict[str, Any]:
-    """Train and evaluate a model, return results dict."""
+    """Train and evaluate a model, return results dict.
+
+    ``precision`` ("fp32"|"fp16"|"bf16"|"auto") supersedes the legacy
+    ``use_fp16`` flag when set; ``llrd`` enables layer-wise learning
+    rate decay via :func:`make_llrd_optimizer`.
+    """
     device = detect_device()
 
     extra_kwargs = {}
@@ -549,11 +693,17 @@ def train_and_eval(
         load_best_model_at_end=False,
         report_to="none",
         disable_tqdm=True,
-        fp16=use_fp16 and torch.cuda.is_available(),
         no_cuda=device.type == "cpu",
         dataloader_num_workers=4,
+        **resolve_precision(precision, use_fp16),
         **extra_kwargs,
     )
+
+    optim_tuple = None
+    if llrd:
+        opt = make_llrd_optimizer(model, base_lr=lr, decay=llrd_decay,
+                                  weight_decay=0.01)
+        optim_tuple = (opt, None)  # let HF build the LR scheduler
 
     trainer = Trainer(
         model=model,
@@ -561,9 +711,11 @@ def train_and_eval(
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         compute_metrics=metric_fn,
+        optimizers=optim_tuple if optim_tuple is not None else (None, None),
     )
 
-    print(f"  Training '{label}' for {epochs} epochs (bs={batch_size}, lr={lr})...")
+    print(f"  Training '{label}' for {epochs} epochs (bs={batch_size}, lr={lr}, "
+          f"prec={precision or ('fp16' if use_fp16 else 'fp32')}, llrd={llrd})...")
     trainer.train()
     results = trainer.evaluate()
     acc = results.get(f"eval_{primary_key}", float("nan"))
@@ -596,6 +748,9 @@ def distill_and_eval(
     lr: float,
     label: str,
     use_fp16: bool = False,
+    precision: Optional[str] = None,
+    llrd: bool = False,
+    llrd_decay: float = 0.95,
     max_grad_norm: Optional[float] = None,
     initial_max_grad_norm: Optional[float] = None,
     final_max_grad_norm: Optional[float] = None,
@@ -657,11 +812,17 @@ def distill_and_eval(
         greater_is_better=True,
         report_to="none",
         disable_tqdm=True,
-        fp16=use_fp16 and torch.cuda.is_available(),
         no_cuda=device.type == "cpu",
         dataloader_num_workers=4,
+        **resolve_precision(precision, use_fp16),
         **extra_kwargs,
     )
+
+    optim_tuple = (None, None)
+    if llrd:
+        opt = make_llrd_optimizer(student_model, base_lr=lr,
+                                  decay=llrd_decay, weight_decay=0.01)
+        optim_tuple = (opt, None)
 
     trainer = DistillationTrainer(
         teacher_model=teacher_model,
@@ -674,6 +835,7 @@ def distill_and_eval(
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         compute_metrics=metric_fn,
+        optimizers=optim_tuple,
     )
 
     print(
@@ -714,6 +876,9 @@ def attn_distill_and_eval(
     lr: float,
     label: str,
     use_fp16: bool = False,
+    precision: Optional[str] = None,
+    llrd: bool = False,
+    llrd_decay: float = 0.95,
     max_grad_norm: Optional[float] = None,
     alpha: float = 1.0,
     beta: float = 1.0,
@@ -773,11 +938,17 @@ def attn_distill_and_eval(
         greater_is_better=True,
         report_to="none",
         disable_tqdm=True,
-        fp16=use_fp16 and torch.cuda.is_available(),
         no_cuda=device.type == "cpu",
         dataloader_num_workers=4,
+        **resolve_precision(precision, use_fp16),
         **extra_kwargs,
     )
+
+    optim_tuple = (None, None)
+    if llrd:
+        opt = make_llrd_optimizer(student_model, base_lr=lr,
+                                  decay=llrd_decay, weight_decay=0.01)
+        optim_tuple = (opt, None)
 
     trainer = AttentionDistillationTrainer(
         teacher_model=teacher_model,
@@ -789,6 +960,7 @@ def attn_distill_and_eval(
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         compute_metrics=compute_metrics,
+        optimizers=optim_tuple,
     )
 
     print(

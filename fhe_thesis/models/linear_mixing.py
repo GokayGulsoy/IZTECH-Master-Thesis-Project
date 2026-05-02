@@ -186,6 +186,8 @@ def freeze_for_mixing_finetune(model: nn.Module) -> int:
 
     Returns the number of trainable parameters.
     """
+    from fhe_thesis.models.backbone import get_pooler_param_prefix
+    pooler_prefix = get_pooler_param_prefix(model)
     trainable = 0
     for name, param in model.named_parameters():
         should_train = (
@@ -193,7 +195,7 @@ def freeze_for_mixing_finetune(model: nn.Module) -> int:
             or "out_proj" in name
             or "feat_mix" in name  # backward compat with old single-head
             or name.startswith("classifier.")
-            or name.startswith("bert.pooler.")
+            or (pooler_prefix is not None and name.startswith(pooler_prefix))
         )
         param.requires_grad = should_train
         if should_train:
@@ -219,6 +221,13 @@ def freeze_for_progressive_mixing(
 
     Returns the number of trainable parameters.
     """
+    from fhe_thesis.models.backbone import (
+        get_layer_param_prefix, get_pooler_param_prefix,
+    )
+    layer_prefix = get_layer_param_prefix(model)  # e.g. "bert.encoder.layer."
+    pooler_prefix = get_pooler_param_prefix(model)
+    li_offset = layer_prefix.count(".")  # parts[li_offset] is the layer index
+
     replaced_set = set(replaced_layers)
     trainable = 0
 
@@ -226,12 +235,14 @@ def freeze_for_progressive_mixing(
         should_train = False
 
         # Classifier + pooler
-        if name.startswith("classifier.") or name.startswith("bert.pooler."):
+        if name.startswith("classifier.") or (
+            pooler_prefix is not None and name.startswith(pooler_prefix)
+        ):
             should_train = True
-        elif name.startswith("bert.encoder.layer."):
+        elif name.startswith(layer_prefix):
             parts = name.split(".")
-            li = int(parts[3])
-            rest = ".".join(parts[4:])
+            li = int(parts[li_offset])
+            rest = ".".join(parts[li_offset + 1:])
 
             # All params in replaced layers' attention module (= mixing module)
             if li in replaced_set and rest.startswith("attention."):

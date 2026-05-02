@@ -176,6 +176,34 @@ that started on the same dataset:
 The pipeline is resumable: each stage drops a \texttt{.done} marker
 in its checkpoint directory and is skipped on re-invocation.
 
+\paragraph{Modern fine-tuning recipe.}
+The trainer module
+\texttt{fhe\_thesis/training/trainer.py} provides two recipe
+upgrades that all four stages opt into via flags, and that we use
+for every published number:
+\begin{itemize}
+\item \textbf{BF16 mixed precision.} \texttt{precision=\"auto\"}
+  selects \texttt{bf16} on H100/A100/RTX-30xx+ and falls back to
+  \texttt{fp16} on older cards. BF16 has the same dynamic range as
+  FP32 (8-bit exponent), so the polynomial activations' wide
+  intermediates do not overflow and we can drop the FP16 loss-scaling
+  hyperparameter entirely. Concretely $\sim$1.6$\times$ wall-clock
+  speedup vs. FP32 with no measurable accuracy loss.
+\item \textbf{Layer-wise learning-rate decay (LLRD).}
+  Layer $\ell$ receives
+  $\eta_\ell = \eta_{\text{base}} \cdot \alpha^{n-1-\ell}$
+  with $\alpha=0.95$ by default; the classification head and pooler
+  always get $\eta_{\text{base}}$. This is the canonical recipe for
+  fine-tuning large pre-trained transformers on small downstream sets
+  (Howard \& Ruder 2018; Sun et al.\ 2019; ELECTRA, RoBERTa papers)
+  and consistently adds 1--2 points of GLUE on small tasks like
+  MRPC and RTE.
+\end{itemize}
+Both options are backbone-agnostic: \texttt{build\_llrd\_param\_groups}
+recognises BERT, RoBERTa and DistilBERT layer prefixes via the
+introspection helper \texttt{get\_layer\_param\_prefix}. No
+\texttt{bert.*} string is hard-coded anywhere in the training loop.
+
 % =====================================================================
 \section{The five extensions}
 

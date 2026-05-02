@@ -104,18 +104,27 @@ def freeze_for_progressive_hybrid(
 
     Returns the number of trainable parameters.
     """
+    from fhe_thesis.models.backbone import (
+        get_layer_param_prefix, get_pooler_param_prefix,
+    )
+    layer_prefix = get_layer_param_prefix(model)
+    pooler_prefix = get_pooler_param_prefix(model)
+    li_offset = layer_prefix.count(".")
+
     replaced_set = set(replaced_layers)
     trainable = 0
 
     for name, param in model.named_parameters():
         should_train = False
 
-        if name.startswith("classifier.") or name.startswith("bert.pooler."):
+        if name.startswith("classifier.") or (
+            pooler_prefix is not None and name.startswith(pooler_prefix)
+        ):
             should_train = True
-        elif name.startswith("bert.encoder.layer."):
+        elif name.startswith(layer_prefix):
             parts = name.split(".")
-            li = int(parts[3])
-            rest = ".".join(parts[4:])
+            li = int(parts[li_offset])
+            rest = ".".join(parts[li_offset + 1:])
 
             if li in replaced_set:
                 # Replaced layers: unfreeze attention (mixing/quad)
@@ -136,12 +145,20 @@ def freeze_for_progressive_hybrid(
 
 def freeze_for_global_finetune(model: nn.Module) -> int:
     """Unfreeze entire encoder + classifier for final global fine-tune."""
+    from fhe_thesis.models.backbone import (
+        get_backbone, get_pooler_param_prefix,
+    )
+    backbone_name, _ = get_backbone(model)
+    encoder_prefix = f"{backbone_name}.encoder." if backbone_name != "distilbert" \
+        else "distilbert.transformer."
+    pooler_prefix = get_pooler_param_prefix(model)
+
     trainable = 0
     for name, param in model.named_parameters():
         should_train = (
-            name.startswith("bert.encoder.")
+            name.startswith(encoder_prefix)
             or name.startswith("classifier.")
-            or name.startswith("bert.pooler.")
+            or (pooler_prefix is not None and name.startswith(pooler_prefix))
         )
         param.requires_grad = should_train
         if should_train:

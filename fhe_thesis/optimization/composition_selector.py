@@ -99,7 +99,8 @@ def measure_layer_entropies(
         for s in samples:
             ids = torch.as_tensor(s["input_ids"]).long().unsqueeze(0).to(device)
             mask = torch.as_tensor(s["attention_mask"]).long().unsqueeze(0).to(device)
-            out = model.bert(ids, attention_mask=mask, output_attentions=True)
+            backbone = getattr(model, getattr(model, "base_model_prefix", "bert"))
+            out = backbone(ids, attention_mask=mask, output_attentions=True)
             valid_len = int(mask.sum().item())
             if valid_len < 2:
                 continue
