@@ -174,6 +174,27 @@ def main():
         else:
             print(f"  WARNING: StoC produces depth {actual} > ctx_B.ctos_level={expected}; need different ctx_B")
 
+    # ─── Sanity check: does ctx_B CtoS work as identity on the StoC output? ───
+    # The StoC output has a1 at coeff[bitrev(j,15)]. CtoS(ctx_B) should map
+    # coeff[bitrev(j,15)] → slot[j] = a1[j], same as ctx_A would at depth 0.
+    print(f"\n  --- ctx_B identity sanity ---")
+    ct_clone = be._ops.clone_ct(ct)
+    print(f"    pre-CtoS: depth={be._ops.depth(ct_clone)} scale=2^{np.log2(ct_clone.scale()):.2f} encoding={ct_clone.encoding_type()}")
+    cts_id = be._ops.coeff_to_slot_ctx(ct_clone, be._gk, ctx_B)
+    for i, c in enumerate(cts_id):
+        print(f"    post-CtoS[{i}]: depth={be._ops.depth(c)} scale=2^{np.log2(c.scale()):.2f}")
+        be._ops.set_rescale_required(c)
+        be._ops.rescale_inplace(c)
+    dec_id = be.decrypt(cts_id[0])
+    err_id = float(np.max(np.abs(np.array(dec_id[:h]) - a1)))
+    print(f"    a1 read from slot[0..h)? err={err_id:.3e}")
+    print(f"    got[:4]={dec_id[:4]}")
+    print(f"    expected a1[:4]={a1[:4]}")
+    if err_id > 1e-3:
+        print(f"  ❌ ctx_B CtoS does NOT correctly invert. Cannot proceed to L2.")
+        return
+    print(f"  ✓ ctx_B CtoS works as identity. Continuing to L2 test...")
+
     # L2 — input bit-rev (since coeffs are at bitrev positions), output bit-rev
     w_poly2 = encode_w_bitrev_out(W2, h, log_n_half, be._N, input_bitrev=True)
     pt_w2 = be._encode_coeff_pad(w_poly2)
