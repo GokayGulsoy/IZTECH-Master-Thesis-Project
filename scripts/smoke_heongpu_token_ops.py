@@ -12,7 +12,7 @@ from fhe_thesis.encryption.heongpu_backend import HEonGPUBackend
 
 def main() -> None:
     rng = np.random.default_rng(0)
-    backend = HEonGPUBackend(poly_modulus_degree=2**14, num_slots=2**13)
+    backend = HEonGPUBackend(poly_modulus_degree=2**14)
     n = backend.num_slots()
 
     # ── polyval (deg 4): p(x) = 1 - 0.5 x + 0.25 x^2 - 0.1 x^3 + 0.01 x^4 ──
