@@ -79,7 +79,7 @@ def main():
         while be._ops.depth(zero_ct) < target_depth:
             be._ops.mod_drop_inplace_ct(zero_ct)
         print(f"    pre-StoC depths: ct_t={be._ops.depth(ct_t)}, zero={be._ops.depth(zero_ct)}, "
-              f"scales: ct_t={be._ops.scale(ct_t):.2e}, zero={be._ops.scale(zero_ct):.2e}")
+              f"scales: ct_t={ct_t.scale():.2e}, zero={zero_ct.scale():.2e}")
         ct_t_coeff = be._ops.slot_to_coeff(ct_t, zero_ct, be._gk)
         print(f"    after StoC: depth={be._ops.depth(ct_t_coeff)}, scale={be._ops.scale(ct_t_coeff):.2e}")
 
