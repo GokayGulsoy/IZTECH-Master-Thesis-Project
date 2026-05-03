@@ -126,20 +126,19 @@ def main():
     # Init FHE backend
     t0 = time.time()
     if args.backend == "heongpu":
-        print("\nInitialising HEonGPU backend (H100)...")
+        print("\nInitialising HEonGPU backend (H100, bootstrap-capable)...")
         from fhe_thesis.encryption.heongpu_backend import HEonGPUBackend
-        # Match the OpenFHE chain depth (`--mult-depth`, default 25) so the
-        # token-packed pipeline runs without mid-layer bootstrapping. With
-        # N=2^16 and a (60, 40*depth, 60) chain we comfortably hold the
-        # entire BERT-tiny inference on a single GPU.
+        # Bootstrap-capable chain matches the HEonGPU example:
+        # 31 Q primes (60 + 50*30), 3 P primes (60*3), scale=2^50,
+        # secret hamming weight 16. sec_none=True is required for this
+        # ring/chain combo at N=2^16; the secure baseline (sec_none=False)
+        # would require shorter chain + more frequent bootstraps.
         backend = HEonGPUBackend(
             poly_modulus_degree=1 << 16,
-            q_prime_bits=(60,) + (40,) * args.mult_depth + (60,),
-            p_prime_bits=(60,),
-            # NOTE: For tiny BERT we use a deeper chain than the default
-            # 128-bit ring supports; sec_none disables the lattice-estimator
-            # check. The full secure pipeline runs with bootstrapping
-            # (mult_depth ~25), trading wall-clock for ~128-bit security.
+            q_prime_bits=(60,) + (50,) * 30,
+            p_prime_bits=(60, 60, 60),
+            scale_bits=50,
+            bootstrap_hamming_weight=16,
             sec_none=True,
         )
         if not args.no_bootstrap:

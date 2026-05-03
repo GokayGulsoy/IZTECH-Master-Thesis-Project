@@ -116,6 +116,9 @@ class HEonGPUBackend(CKKSBackend):
         # Cache for Halevi-Shoup diagonals — keyed by sha1(weight.bytes()).
         self._diag_cache: Dict[str, Tuple[List[Optional[List[float]]], int]] = {}
         self._diag_cache_lock = Lock()
+        # Becomes True after configure_bootstrapping() succeeds; gates
+        # auto-refresh inside mul/mul_plain.
+        self._bootstrap_ready = False
 
     # ── helpers ───────────────────────────────────────────────────────
     def _pad(self, values: Sequence[float]) -> List[float]:
@@ -179,6 +182,9 @@ class HEonGPUBackend(CKKSBackend):
         return out
 
     def mul_plain(self, a: Ciphertext, plain: Sequence[float]) -> Ciphertext:
+        # Auto-refresh if the next rescale would push us off the chain.
+        if self._bootstrap_ready and self._ops.depth(a) >= self._max_depth:
+            a = self.bootstrap(a)
         out = self._clone(a)
         pt = self._encode(plain)
         # Plaintext must live at the same modulus level as the ciphertext;
@@ -195,6 +201,13 @@ class HEonGPUBackend(CKKSBackend):
         return out
 
     def mul(self, a: Ciphertext, b: Ciphertext) -> Ciphertext:
+        # Auto-refresh either operand if a single mul+rescale would
+        # exhaust the chain.
+        if self._bootstrap_ready:
+            if self._ops.depth(a) >= self._max_depth:
+                a = self.bootstrap(a)
+            if self._ops.depth(b) >= self._max_depth:
+                b = self.bootstrap(b)
         out = self._clone(a)
         da = self._ops.depth(out)
         db = self._ops.depth(b)
@@ -430,6 +443,7 @@ class HEonGPUBackend(CKKSBackend):
         all_shifts = sorted(set(boot_shifts + pow2 + [-s for s in pow2]))
         kg = self._hg.KeyGenerator(self._ctx)
         self._gk = kg.generate_galois_key(self._ctx, self._sk, all_shifts)
+        self._bootstrap_ready = True
 
     def bootstrap(self, ct: Ciphertext) -> Ciphertext:
         """Refresh a CKKS ciphertext to a low-depth state.
