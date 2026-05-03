@@ -158,6 +158,7 @@ struct Operator {
         // depth() grows as the chain shrinks; equalise to the larger value.
         if (da < db) {
             while (a.ct->depth() < db) ops.mod_drop_inplace(*a.ct);
+            ops.add_inplace(*a.ct, *b.ct);
         } else {
             // Need to drop b without aliasing — shallow-copy via shared_ptr is fine
             // since add_inplace consumes b read-only on the GPU side.
