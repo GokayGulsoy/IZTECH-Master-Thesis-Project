@@ -44,7 +44,21 @@ def main() -> int:
     W = rng.standard_normal((out_dim, in_dim)).astype(np.float64) * 0.05
     expected = W @ x
 
-    print("\n[1] coeff_matvec...")
+    print("\n[1] CtoS isolation test (no multiply, depth 0)...")
+    # Encode a known coefficient vector directly so we can check that
+    # CtoS itself works before stacking it on top of coeff_matvec.
+    raw = rng.standard_normal(be._N).astype(np.float64) * 0.1
+    ct_raw_coeff = be.encrypt_coeff(raw.tolist())
+    t = time.time()
+    cts = be.coeff_to_slot(ct_raw_coeff)
+    print(f"  wall: {time.time() - t:.3f}s   returned {len(cts)} cts")
+    s0 = np.asarray(be.decrypt(cts[0]))[: be._num_slots]
+    s1 = np.asarray(be.decrypt(cts[1]))[: be._num_slots]
+    err_lo = np.max(np.abs(s0 - raw[: be._num_slots]))
+    err_hi = np.max(np.abs(s1 - raw[be._num_slots :]))
+    print(f"  err half-low={err_lo:.3e}   half-high={err_hi:.3e}")
+
+    print("\n[2] coeff_matvec...")
     t = time.time()
     ct_x_coeff = be.encrypt_coeff(x.tolist())
     ct_y_coeff = be.coeff_matvec(ct_x_coeff, W, in_dim=in_dim)
@@ -56,7 +70,7 @@ def main() -> int:
     err = np.max(np.abs(extracted - expected))
     print(f"  coeff-domain extract max-err: {err:.3e}")
 
-    print("\n[2] solo_coeff_to_slot (homomorphic CtoS)...")
+    print("\n[3] coeff_matvec → CtoS (depth 1 input)...")
     t = time.time()
     ct_y_slots = be.coeff_to_slot(ct_y_coeff)
     print(f"  wall: {time.time() - t:.3f}s   returned {len(ct_y_slots)} cts")
@@ -64,7 +78,7 @@ def main() -> int:
     # Decode in slot domain.  out[0] holds coeffs [0..N/2), out[1] holds [N/2..N).
     slots0 = np.asarray(be.decrypt(ct_y_slots[0]))
     slots1 = np.asarray(be.decrypt(ct_y_slots[1]))
-    full = np.concatenate([slots0[:be._num_slots], slots1[:be._num_slots]])
+    full = np.concatenate([slots0[: be._num_slots], slots1[: be._num_slots]])
     print(f"  reconstructed coeff vec len: {len(full)}  (expected N={be._N})")
 
     extracted_slots = np.array([full[(i + 1) * in_dim - 1] for i in range(out_dim)])
