@@ -28,9 +28,9 @@ def bitrev(i: int, bits: int) -> int:
 def main():
     rng = np.random.default_rng(0)
 
-    # BERT-tiny W1 shape: (out=512, in=128). m·n = 65536 = N. Half fits in N/2.
-    # Pick (256, 128) so m·n = N/2 fits one CtoS half.
-    in_dim, out_dim = 128, 256
+    import sys
+    in_dim = int(sys.argv[1]) if len(sys.argv) > 1 else 128
+    out_dim = int(sys.argv[2]) if len(sys.argv) > 2 else 256
     print(f"shape: in={in_dim}  out={out_dim}  (m·n = {in_dim*out_dim})")
 
     print("\nInit HEonGPU N=2^16 with bootstrap-ready chain...")
