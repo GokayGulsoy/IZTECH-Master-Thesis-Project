@@ -8,11 +8,11 @@ from fhe_thesis.encryption.heongpu_backend import HEonGPUBackend
 
 
 def main():
-    # Use 40-chain for headroom
-    print("Init HEonGPU N=2^16, 40-chain...")
+    # Use 30-chain (proven Phase 3 config)
+    print("Init HEonGPU N=2^16, 30-chain (Phase 3 config)...")
     be = HEonGPUBackend(
         poly_modulus_degree=1 << 16,
-        q_prime_bits=(60,) + (50,) * 40,
+        q_prime_bits=(60,) + (50,) * 30,
         p_prime_bits=(60, 60, 60),
         scale_bits=50,
         bootstrap_hamming_weight=16,
