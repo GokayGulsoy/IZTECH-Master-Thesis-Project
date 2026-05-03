@@ -56,6 +56,10 @@ def _parse_args():
                    help="ciphertext packing: token (1 ct/token) or matrix (B tokens/ct)")
     p.add_argument("--block", type=int, default=0,
                    help="matrix-pack block (0 = auto = next_pow2(max_dim))")
+    p.add_argument("--poly-degree", type=int, default=8,
+                   help="Polynomial degree for GELU/LN/Softmax fits when no "
+                        "trained checkpoint is found (lower = shallower depth, "
+                        "fewer ciphertext multiplies, less bootstrap pressure)")
     return p.parse_args()
 
 
@@ -163,7 +167,7 @@ def main():
     from fhe_thesis.encryption.protocol import load_model_weights
     from fhe_thesis.encryption.coefficients import load_coefficients
     weights = load_model_weights(args.model, checkpoint_path=args.checkpoint)
-    coeffs = load_coefficients(args.model, task=args.task)
+    coeffs = load_coefficients(args.model, task=args.task, degree=args.poly_degree)
 
     # FHE inference
     print(f"\nRunning encrypted inference (layout={args.layout})...")
