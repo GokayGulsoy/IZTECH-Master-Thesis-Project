@@ -291,10 +291,12 @@ class HEonGPUBackend(CKKSBackend):
         else:
             diagonals, n = cached
 
-        # Cyclic-replicate input across n.
+        # Cyclic-replicate input so the period-n pattern fills every slot.
+        # (CKKS rotation is mod num_slots, not mod n, so we need real
+        # periodicity across the entire ring.)
         x = ct
         cur = in_dim
-        while cur < n:
+        while cur < self._num_slots:
             x = self.add(x, self.rotate(x, -cur))
             cur <<= 1
 
