@@ -81,7 +81,7 @@ def main():
         print(f"    pre-StoC depths: ct_t={be._ops.depth(ct_t)}, zero={be._ops.depth(zero_ct)}, "
               f"scales: ct_t={ct_t.scale():.2e}, zero={zero_ct.scale():.2e}")
         ct_t_coeff = be._ops.slot_to_coeff(ct_t, zero_ct, be._gk)
-        print(f"    after StoC: depth={be._ops.depth(ct_t_coeff)}, scale={be._ops.scale(ct_t_coeff):.2e}")
+        print(f"    after StoC: depth={be._ops.depth(ct_t_coeff)}, scale={ct_t_coeff.scale():.2e}")
 
         if t == 0:
             # Just check first token's coeff content matches X[0]
