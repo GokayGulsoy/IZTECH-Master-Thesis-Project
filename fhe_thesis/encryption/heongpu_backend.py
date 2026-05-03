@@ -518,6 +518,92 @@ class HEonGPUBackend(CKKSBackend):
         self._ops.clear_rescale_required(ct_y)
         return self.coeff_to_slot(ct_y)
 
+    @staticmethod
+    def _bitrev(i: int, bits: int) -> int:
+        r = 0
+        for b in range(bits):
+            r = (r << 1) | ((i >> b) & 1)
+        return r
+
+    def nexus_target_slots(self, in_dim: int, out_dim: int) -> List[int]:
+        """Slot indices where coeff_matvec_to_slot lands (W·x)[0..out_dim).
+
+        Useful for building gather masks. All values land in ``out[0]``
+        of :meth:`coeff_matvec_to_slot` provided ``in_dim·out_dim ≤ N/2``.
+        """
+        log_n = int(self._num_slots).bit_length() - 1
+        return [self._bitrev((i + 1) * in_dim - 1, log_n) for i in range(out_dim)]
+
+    def gather_slots(
+        self,
+        ct: Ciphertext,
+        src_indices: Sequence[int],
+        *,
+        dst_indices: Optional[Sequence[int]] = None,
+    ) -> Ciphertext:
+        """Permute slots: ``out[dst_indices[i]] = ct[src_indices[i]]``.
+
+        If ``dst_indices`` is ``None``, defaults to ``[0, 1, ..., m-1]``
+        (i.e. compact the source slots into a contiguous prefix).
+
+        Cost: ``len(src_indices)`` rotations + masks + adds. Used to land
+        the bit-reversed CtoS output of :meth:`coeff_matvec_to_slot` into
+        the contiguous layout expected by downstream slot-domain ops
+        (polyval, matmul_plain, …).
+
+        Multiplicative depth: 1 (one mul_plain mask).
+        """
+        srcs = list(src_indices)
+        m = len(srcs)
+        if dst_indices is None:
+            dsts = list(range(m))
+        else:
+            dsts = list(dst_indices)
+            if len(dsts) != m:
+                raise ValueError(
+                    f"dst_indices length {len(dsts)} != src_indices length {m}"
+                )
+
+        result: Optional[Ciphertext] = None
+        for src, dst in zip(srcs, dsts):
+            mask = [0.0] * self._num_slots
+            mask[src % self._num_slots] = 1.0
+            isolated = self.mul_plain(ct, mask)  # only ct[src] survives
+            shift = (dst - src) % self._num_slots
+            moved = self.rotate(isolated, -shift) if shift else isolated  # rotate left = negative
+            result = moved if result is None else self.add(result, moved)
+        if result is None:
+            return self.mul_plain(ct, [0.0] * self._num_slots)
+        return result
+
+    def nexus_linear(
+        self,
+        ct_x_coeff: Ciphertext,
+        weight,
+        *,
+        in_dim: int,
+        bias: Optional[Sequence[float]] = None,
+    ) -> "Ciphertext":
+        """Full NEXUS linear pipeline: coefficient input → slot output.
+
+        Composes :meth:`coeff_matvec_to_slot` + :meth:`gather_slots` so
+        the result has ``(W·x + b)[i]`` at slot ``i`` for ``i ∈ [0, m)``.
+
+        Caller is responsible for choosing ``in_dim`` such that
+        ``in_dim · out_dim ≤ N/2`` (the half-CtoS limit); otherwise split
+        into multiple calls.
+        """
+        import numpy as np
+        W = np.asarray(weight, dtype=np.float64)
+        out_dim = W.shape[0]
+        cts = self.coeff_matvec_to_slot(ct_x_coeff, W, in_dim=in_dim)
+        targets = self.nexus_target_slots(in_dim, out_dim)
+        gathered = self.gather_slots(cts[0], targets)
+        if bias is not None:
+            b_pad = list(bias) + [0.0] * (self._num_slots - len(bias))
+            gathered = self.add_plain(gathered, b_pad)
+        return gathered
+
     def slot_to_coeff(self, ct0: Ciphertext, ct1: Ciphertext) -> Ciphertext:
         """Homomorphic conversion: 2× slot-encoded → coefficient-encoded.
 
