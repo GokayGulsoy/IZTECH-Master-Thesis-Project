@@ -133,7 +133,7 @@ def main():
         # N=2^16 and a (60, 40*depth, 60) chain we comfortably hold the
         # entire BERT-tiny inference on a single GPU.
         backend = HEonGPUBackend(
-            poly_modulus_degree=1 << 16,
+            poly_modulus_degree=1 << 17,
             q_prime_bits=(60,) + (40,) * args.mult_depth + (60,),
             p_prime_bits=(60,),
             sec_none=False,
