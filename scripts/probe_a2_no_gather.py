@@ -58,15 +58,15 @@ def main():
     ct = cts[0]
     print(f"  coeff_matvec_to_slot(W1): {t_l1*1000:.1f}ms  depth={be._ops.depth(ct)}")
 
+    targets = be.nexus_target_slots(n, h)
+    print(f"  target slots[:8] = {targets[:8]}")
+
     # Add bias at the actual target positions
     bias_pad = [0.0] * be._num_slots
     for j in range(h):
         bias_pad[targets[j]] = b1[j]
     ct = be.add_plain(ct, bias_pad)
 
-    # Sanity: z1 should be at slot[bitrev(j)]
-    targets = be.nexus_target_slots(n, h)
-    print(f"  target slots[:8] = {targets[:8]}")
     dec = be.decrypt(ct)
     err_z1 = float(np.max(np.abs(np.array([dec[targets[j]] for j in range(h)]) - z1)))
     print(f"  z1 at target slots? err={err_z1:.3e}")
