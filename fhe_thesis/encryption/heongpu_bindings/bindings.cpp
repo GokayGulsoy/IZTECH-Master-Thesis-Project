@@ -278,6 +278,9 @@ struct Operator {
     void clear_rescale_required(Ciphertext& c) {
         c.ct->clear_rescale_required();
     }
+    void set_rescale_required(Ciphertext& c) {
+        c.ct->set_rescale_required();
+    }
 };
 
 // -----------------------------------------------------------------------------
@@ -392,5 +395,9 @@ PYBIND11_MODULE(_heongpu, m) {
         .def("clear_rescale_required", &Operator::clear_rescale_required,
              "NEXUS escape hatch: clear rescale_required_ on a ciphertext "
              "(use only when feeding into ops that handle scale alignment "
-             "internally, e.g. coeff_to_slot).");
+             "internally, e.g. coeff_to_slot).")
+        .def("set_rescale_required", &Operator::set_rescale_required,
+             "NEXUS escape hatch: force rescale_required_=true so a "
+             "follow-up rescale_inplace can drop a Q prime to bring "
+             "scale back to canonical (e.g. after CtoS leaves us at scale²).");
 }
