@@ -64,6 +64,11 @@ struct KeyGenerator {
         kg.generate_secret_key(*sk);
         return SecretKey{sk};
     }
+    SecretKey generate_secret_key_h(CKKSContext& c, int hamming_weight) {
+        auto sk = std::make_shared<heongpu::Secretkey<SCHEME>>(c.ctx, hamming_weight);
+        kg.generate_secret_key(*sk);
+        return SecretKey{sk};
+    }
     PublicKey generate_public_key(CKKSContext& c, SecretKey& s) {
         auto pk = std::make_shared<heongpu::Publickey<SCHEME>>(c.ctx);
         kg.generate_public_key(*pk, *s.sk);
@@ -227,6 +232,9 @@ PYBIND11_MODULE(_heongpu, m) {
     py::class_<KeyGenerator>(m, "KeyGenerator")
         .def(py::init<CKKSContext&>())
         .def("generate_secret_key", &KeyGenerator::generate_secret_key)
+        .def("generate_secret_key_h",
+             &KeyGenerator::generate_secret_key_h,
+             py::arg("ctx"), py::arg("hamming_weight"))
         .def("generate_public_key", &KeyGenerator::generate_public_key)
         .def("generate_relin_key",  &KeyGenerator::generate_relin_key)
         .def("generate_galois_key", &KeyGenerator::generate_galois_key_default,

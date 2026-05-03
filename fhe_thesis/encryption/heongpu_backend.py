@@ -61,6 +61,7 @@ class HEonGPUBackend(CKKSBackend):
         p_prime_bits: Sequence[int] = (60,),
         sec_none: bool = False,
         scale_bits: Optional[int] = None,
+        bootstrap_hamming_weight: Optional[int] = None,
     ) -> None:
         # Imported lazily so the rest of the package still imports on a
         # box without the compiled wrapper.
@@ -84,7 +85,10 @@ class HEonGPUBackend(CKKSBackend):
 
         self._ctx = hg.CKKSContext(self._N, q_bits, p_bits, sec_none=sec_none)
         kg = hg.KeyGenerator(self._ctx)
-        self._sk = kg.generate_secret_key(self._ctx)
+        if bootstrap_hamming_weight is not None:
+            self._sk = kg.generate_secret_key_h(self._ctx, bootstrap_hamming_weight)
+        else:
+            self._sk = kg.generate_secret_key(self._ctx)
         self._pk = kg.generate_public_key(self._ctx, self._sk)
         self._rk = kg.generate_relin_key(self._ctx, self._sk)
 
