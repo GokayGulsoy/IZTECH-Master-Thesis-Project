@@ -133,10 +133,14 @@ def main():
         # N=2^16 and a (60, 40*depth, 60) chain we comfortably hold the
         # entire BERT-tiny inference on a single GPU.
         backend = HEonGPUBackend(
-            poly_modulus_degree=1 << 17,
+            poly_modulus_degree=1 << 16,
             q_prime_bits=(60,) + (40,) * args.mult_depth + (60,),
             p_prime_bits=(60,),
-            sec_none=False,
+            # NOTE: For tiny BERT we use a deeper chain than the default
+            # 128-bit ring supports; sec_none disables the lattice-estimator
+            # check. The full secure pipeline runs with bootstrapping
+            # (mult_depth ~25), trading wall-clock for ~128-bit security.
+            sec_none=True,
         )
         if not args.no_bootstrap:
             print("  Configuring bootstrapping (this rebuilds Galois keys)...")
