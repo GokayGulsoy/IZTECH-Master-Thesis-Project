@@ -19,4 +19,5 @@ from ._heongpu import (  # noqa: F401
     Encryptor,
     Decryptor,
     Operator,
+    EncodingTransformContext,
 )
