@@ -405,6 +405,7 @@ class HEonGPUBackend(CKKSBackend):
         weight,
         *,
         in_dim: int,
+        rescale: bool = True,
     ) -> Ciphertext:
         """NEXUS-style coefficient-packed matrix–vector product.
 
@@ -450,7 +451,8 @@ class HEonGPUBackend(CKKSBackend):
         while self._ops.depth_of_plaintext(pt_w) < target_depth:
             self._ops.mod_drop_inplace_pt(pt_w)
         self._ops.multiply_plain_inplace(out, pt_w)
-        self._ops.rescale_inplace(out)
+        if rescale:
+            self._ops.rescale_inplace(out)
         return out
 
     def decrypt_coeff_extract(
@@ -475,13 +477,40 @@ class HEonGPUBackend(CKKSBackend):
         polynomial / element-wise ops.
 
         Requires :meth:`configure_bootstrapping` to have been called.
+        Input ``ct`` must be at depth 0 (top of the chain) — that is
+        where the precomputed CtoS plaintext matrices live.
         """
         if not self._bootstrap_ready:
             raise RuntimeError(
                 "coeff_to_slot requires configure_bootstrapping() first "
                 "(populates the CtoS BSGS matrices and rotation keys)"
             )
+        if self._ops.depth(ct) != 0:
+            raise RuntimeError(
+                f"coeff_to_slot requires depth-0 input, got depth={self._ops.depth(ct)}; "
+                f"call coeff_matvec(..., rescale=False) and skip the rescale, or use "
+                f"coeff_matvec_to_slot()"
+            )
         return self._ops.coeff_to_slot(ct, self._gk)
+
+    def coeff_matvec_to_slot(
+        self,
+        ct_x_coeff: Ciphertext,
+        weight,
+        *,
+        in_dim: int,
+    ) -> List[Ciphertext]:
+        """NEXUS-style fused matvec + slot conversion.
+
+        Computes ``y = W · x`` via :meth:`coeff_matvec` (no trailing
+        rescale, so the result stays at depth 0), then runs
+        :meth:`coeff_to_slot` so the inner products land in the slot
+        domain at indices ``[i·n + n − 1 for i in range(m)]``.
+
+        Returns the 2-ct list from CtoS. Use ``out[0]`` if ``m·n ≤ N/2``.
+        """
+        ct_y = self.coeff_matvec(ct_x_coeff, weight, in_dim=in_dim, rescale=False)
+        return self.coeff_to_slot(ct_y)
 
     def slot_to_coeff(self, ct0: Ciphertext, ct1: Ciphertext) -> Ciphertext:
         """Homomorphic conversion: 2× slot-encoded → coefficient-encoded.

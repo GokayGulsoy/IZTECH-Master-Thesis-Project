@@ -70,20 +70,21 @@ def main() -> int:
     err = np.max(np.abs(extracted - expected))
     print(f"  coeff-domain extract max-err: {err:.3e}")
 
-    print("\n[3] coeff_matvec → CtoS (depth 1 input)...")
+    print("\n[3] coeff_matvec_to_slot (fused, depth-0 → CtoS)...")
     t = time.time()
-    ct_y_slots = be.coeff_to_slot(ct_y_coeff)
+    ct_x_coeff = be.encrypt_coeff(x.tolist())
+    ct_y_slots = be.coeff_matvec_to_slot(ct_x_coeff, W, in_dim=in_dim)
     print(f"  wall: {time.time() - t:.3f}s   returned {len(ct_y_slots)} cts")
 
-    # Decode in slot domain.  out[0] holds coeffs [0..N/2), out[1] holds [N/2..N).
-    slots0 = np.asarray(be.decrypt(ct_y_slots[0]))
-    slots1 = np.asarray(be.decrypt(ct_y_slots[1]))
-    full = np.concatenate([slots0[: be._num_slots], slots1[: be._num_slots]])
-    print(f"  reconstructed coeff vec len: {len(full)}  (expected N={be._N})")
-
-    extracted_slots = np.array([full[(i + 1) * in_dim - 1] for i in range(out_dim)])
+    # CtoS gives slot[i] = coeff[i] for i in [0, N/2). Our values of
+    # interest are at coeff indices [n-1, 2n-1, ..., m·n - 1], all < N/2,
+    # so they all live in out[0].
+    slots0 = np.asarray(be.decrypt(ct_y_slots[0]))[: be._num_slots]
+    extracted_slots = np.array([slots0[(i + 1) * in_dim - 1] for i in range(out_dim)])
     err_slot = np.max(np.abs(extracted_slots - expected))
     print(f"  slot-domain extract max-err: {err_slot:.3e}")
+    print(f"  expected[:3] = {expected[:3]}")
+    print(f"  got[:3]      = {extracted_slots[:3]}")
 
     if err_slot < 5e-2:
         print("\n  PASS — coeff→slot conversion works on H100")
