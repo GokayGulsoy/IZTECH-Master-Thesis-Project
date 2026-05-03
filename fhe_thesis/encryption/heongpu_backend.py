@@ -191,9 +191,6 @@ class HEonGPUBackend(CKKSBackend):
         out = self._clone(a)
         da = self._ops.depth(out)
         db = self._ops.depth(b)
-        import os as _os
-        if _os.environ.get("HEONGPU_DEBUG_DEPTH"):
-            print(f"[mul] da={da} db={db}", flush=True)
         if da < db:
             for _ in range(db - da):
                 self._ops.mod_drop_inplace_ct(out)
@@ -229,43 +226,56 @@ class HEonGPUBackend(CKKSBackend):
 
     # ── high-level ops ────────────────────────────────────────────────
     def polyval(self, ct: Ciphertext, power_coeffs: Sequence[float]) -> Ciphertext:
-        """Evaluate p(x) = Σ c_i · x^i via Horner.
+        """Evaluate p(x) = Σ c_i · x^i with depth ≈ ⌈log₂(deg)⌉ + 1.
 
-        Depth is `deg` levels; we rely on the existing 30-level chain (no
-        bootstrapping) for the BERT-tiny target where polynomial degrees
-        stay ≤ ~5.
+        Strategy: precompute x^(2^i) by binary doubling, then build each
+        x^k by binary-tree multiplication of the powers indicated by the
+        bits of k. Finally sum c_k · x^k. Total multiplicative depth is
+        ⌈log₂(deg)⌉ + 1 — same order as Paterson-Stockmeyer.
         """
         coeffs = list(power_coeffs)
-        if not coeffs:
+        D = len(coeffs) - 1
+        if D < 0:
             return self.mul_plain(ct, [0.0] * self._num_slots)
-        # diagnostic
-        try:
-            d = self._ops.depth(ct)
-            import os as _os
-            if _os.environ.get("HEONGPU_DEBUG_POLYVAL"):
-                print(f"[polyval] input depth={d}, deg={len(coeffs)-1}", flush=True)
-        except Exception:
-            pass
-        if len(coeffs) == 1:
+        if D == 0:
             return self.add_plain(
                 self.mul_plain(ct, [0.0] * self._num_slots),
                 [coeffs[0]] * self._num_slots,
             )
-        # acc starts as plaintext c_d, promoted on first multiplication.
-        acc: Optional[Ciphertext] = None
-        for i in range(len(coeffs) - 2, -1, -1):
-            if acc is None:
-                # c_d * x + c_i
-                acc = self.add_plain(
-                    self.mul_plain(ct, [coeffs[-1]] * self._num_slots),
-                    [coeffs[i]] * self._num_slots,
-                )
-            else:
-                acc = self.add_plain(
-                    self.mul(acc, ct),
-                    [coeffs[i]] * self._num_slots,
-                )
-        return acc  # type: ignore[return-value]
+
+        # x^(2^i) for i in [0, L]
+        L = (D).bit_length() - 1
+        pow2: Dict[int, Ciphertext] = {1: ct}
+        for i in range(1, L + 1):
+            prev = pow2[1 << (i - 1)]
+            pow2[1 << i] = self.mul(prev, prev)
+
+        # Build x^k for each k in [1, D] used in the polynomial.
+        x_pow: Dict[int, Ciphertext] = {1: ct}
+        for k in range(2, D + 1):
+            if coeffs[k] == 0.0:
+                continue
+            bits = [1 << b for b in range(k.bit_length()) if (k >> b) & 1]
+            cur: List[Ciphertext] = [pow2[b] for b in bits]
+            while len(cur) > 1:
+                nxt: List[Ciphertext] = []
+                for j in range(0, len(cur), 2):
+                    if j + 1 < len(cur):
+                        nxt.append(self.mul(cur[j], cur[j + 1]))
+                    else:
+                        nxt.append(cur[j])
+                cur = nxt
+            x_pow[k] = cur[0]
+
+        result: Optional[Ciphertext] = None
+        for k in range(1, D + 1):
+            if coeffs[k] == 0.0:
+                continue
+            term = self.mul_plain(x_pow[k], [coeffs[k]] * self._num_slots)
+            result = term if result is None else self.add(result, term)
+        if result is None:
+            result = self.mul_plain(ct, [0.0] * self._num_slots)
+        return self.add_plain(result, [coeffs[0]] * self._num_slots)
 
     def matmul_plain(
         self,
