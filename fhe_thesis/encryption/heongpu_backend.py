@@ -98,6 +98,7 @@ class HEonGPUBackend(CKKSBackend):
         pow2 = [1 << k for k in range(max_log)]
         shifts = pow2 + [-s for s in pow2]
         self._gk = kg.generate_galois_key(self._ctx, self._sk, shifts)
+        self._registered_shifts = set(shifts)
 
         self._encoder = hg.Encoder(self._ctx)
         self._encryptor = hg.Encryptor(self._ctx, self._pk)
@@ -233,6 +234,13 @@ class HEonGPUBackend(CKKSBackend):
         s = steps % self._num_slots
         if s > self._num_slots // 2:
             s -= self._num_slots
+        # Fast path: if a Galois key for this exact shift exists, do
+        # one rotation. Otherwise fall back to the bit-decomposition.
+        registered = getattr(self, "_registered_shifts", None)
+        if registered is not None and s in registered:
+            out = self._clone(ct)
+            self._ops.rotate_rows_inplace(out, self._gk, s)
+            return out
         sign = 1 if s > 0 else -1
         rem = abs(s)
         out = self._clone(ct)
@@ -553,10 +561,13 @@ class HEonGPUBackend(CKKSBackend):
         If ``dst_indices`` is ``None``, defaults to ``[0, 1, ..., m-1]``
         (i.e. compact the source slots into a contiguous prefix).
 
-        Cost: ``len(src_indices)`` rotations + masks + adds. Used to land
-        the bit-reversed CtoS output of :meth:`coeff_matvec_to_slot` into
-        the contiguous layout expected by downstream slot-domain ops
-        (polyval, matmul_plain, …).
+        BSGS-style implementation: groups source positions by their
+        ``(dst − src) mod num_slots`` shift, builds one mask per unique
+        shift, then does ``mul_plain + rotate`` per shift. For a permutation
+        of ``m`` items this costs ``U`` rotations where ``U`` is the number
+        of *distinct* shift values (typically ``≪ m``). For the bit-reversal
+        gather pattern used by NEXUS this is ``≤ m`` rotations and often
+        much fewer.
 
         Multiplicative depth: 1 (one mul_plain mask).
         """
@@ -571,13 +582,21 @@ class HEonGPUBackend(CKKSBackend):
                     f"dst_indices length {len(dsts)} != src_indices length {m}"
                 )
 
-        result: Optional[Ciphertext] = None
+        # Group by shift (dst - src) mod num_slots.
+        shift_buckets: Dict[int, List[int]] = {}
         for src, dst in zip(srcs, dsts):
-            mask = [0.0] * self._num_slots
-            mask[src % self._num_slots] = 1.0
-            isolated = self.mul_plain(ct, mask)  # only ct[src] survives
             shift = (dst - src) % self._num_slots
-            moved = self.rotate(isolated, -shift) if shift else isolated  # rotate left = negative
+            shift_buckets.setdefault(shift, []).append(src % self._num_slots)
+
+        result: Optional[Ciphertext] = None
+        for shift, src_list in shift_buckets.items():
+            # One mask passes through all sources in this shift bucket.
+            mask = [0.0] * self._num_slots
+            for src in src_list:
+                mask[src] = 1.0
+            masked = self.mul_plain(ct, mask)
+            # rotate left by `shift` (rotate uses sign convention left=+).
+            moved = self.rotate(masked, -shift) if shift else masked
             result = moved if result is None else self.add(result, moved)
         if result is None:
             return self.mul_plain(ct, [0.0] * self._num_slots)
@@ -590,6 +609,7 @@ class HEonGPUBackend(CKKSBackend):
         *,
         in_dim: int,
         bias: Optional[Sequence[float]] = None,
+        register_keys: bool = True,
     ) -> "Ciphertext":
         """Full NEXUS linear pipeline: coefficient input → slot output.
 
@@ -599,12 +619,19 @@ class HEonGPUBackend(CKKSBackend):
         Caller is responsible for choosing ``in_dim`` such that
         ``in_dim · out_dim ≤ N/2`` (the half-CtoS limit); otherwise split
         into multiple calls.
+
+        ``register_keys=True`` ensures Galois keys exist for every gather
+        rotation on first call (subsequent calls with the same shape are
+        free).
         """
         import numpy as np
         W = np.asarray(weight, dtype=np.float64)
         out_dim = W.shape[0]
-        cts = self.coeff_matvec_to_slot(ct_x_coeff, W, in_dim=in_dim)
         targets = self.nexus_target_slots(in_dim, out_dim)
+        if register_keys:
+            shift_set = {(i - targets[i]) % self._num_slots for i in range(out_dim)}
+            self.register_rotation_keys(shift_set)
+        cts = self.coeff_matvec_to_slot(ct_x_coeff, W, in_dim=in_dim)
         gathered = self.gather_slots(cts[0], targets)
         if bias is not None:
             b_pad = list(bias) + [0.0] * (self._num_slots - len(bias))
@@ -687,6 +714,7 @@ class HEonGPUBackend(CKKSBackend):
         StoC_piece: int = 3,
         taylor_number: int = 11,
         less_key_mode: bool = True,
+        extra_shifts: Optional[Sequence[int]] = None,
     ) -> None:
         self._ops.generate_bootstrapping_params(
             self._scale, CtoS_piece, StoC_piece, taylor_number, less_key_mode
@@ -696,10 +724,39 @@ class HEonGPUBackend(CKKSBackend):
         boot_shifts = list(self._ops.bootstrapping_key_indexs())
         max_log = (self._num_slots).bit_length() - 1
         pow2 = [1 << k for k in range(max_log)]
-        all_shifts = sorted(set(boot_shifts + pow2 + [-s for s in pow2]))
+        extras = list(extra_shifts) if extra_shifts is not None else []
+        all_shifts = sorted(set(boot_shifts + pow2 + [-s for s in pow2] + extras))
         kg = self._hg.KeyGenerator(self._ctx)
         self._gk = kg.generate_galois_key(self._ctx, self._sk, all_shifts)
         self._bootstrap_ready = True
+        self._registered_shifts = set(all_shifts)
+
+    def register_rotation_keys(self, shifts: Sequence[int]) -> int:
+        """Add rotation keys for ``shifts`` (in addition to ±2^k and bootstrap keys).
+
+        Returns the number of *newly* added shifts. Re-runs
+        ``generate_galois_key`` on the union, which is a few seconds.
+        Used by NEXUS to cache one-shot rotation keys for the bit-rev
+        gather pattern produced by :meth:`coeff_matvec_to_slot`.
+        """
+        existing = getattr(self, "_registered_shifts", None)
+        if existing is None:
+            max_log = (self._num_slots).bit_length() - 1
+            pow2 = [1 << k for k in range(max_log)]
+            existing = set(pow2 + [-s for s in pow2])
+            if getattr(self, "_bootstrap_ready", False):
+                existing |= set(self._ops.bootstrapping_key_indexs())
+        wanted = set(int(s) % self._num_slots for s in shifts)
+        # Normalise to signed (HEonGPU expects shift in (-N/2, N/2]).
+        signed = {s if s <= self._num_slots // 2 else s - self._num_slots for s in wanted}
+        new = signed - existing
+        if not new:
+            return 0
+        merged = sorted(existing | signed)
+        kg = self._hg.KeyGenerator(self._ctx)
+        self._gk = kg.generate_galois_key(self._ctx, self._sk, merged)
+        self._registered_shifts = set(merged)
+        return len(new)
 
     def bootstrap(self, ct: Ciphertext) -> Ciphertext:
         """Refresh a CKKS ciphertext to a low-depth state.
