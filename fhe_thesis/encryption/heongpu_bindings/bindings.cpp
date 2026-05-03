@@ -276,7 +276,7 @@ struct Operator {
     // the next op handles the larger scale (CtoS internally manages
     // scales via its own rescale chain).
     void clear_rescale_required(Ciphertext& c) {
-        c.ct->rescale_required_ = false;
+        c.ct->clear_rescale_required();
     }
 };
 
