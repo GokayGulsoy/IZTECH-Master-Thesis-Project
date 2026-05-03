@@ -180,6 +180,16 @@ def main():
     print(f"\n  --- ctx_B identity sanity ---")
     ct_clone = be._ops.clone_ct(ct)
     print(f"    pre-CtoS: depth={be._ops.depth(ct_clone)} scale=2^{np.log2(ct_clone.scale()):.2f} encoding={ct_clone.encoding_type()}")
+
+    # Hypothesis: ctx-CtoS expects scale=2^100 (post-mul-without-rescale).
+    # Multiply by plaintext "1" to double the scale to 2^100 without changing values.
+    pt_one = be._encode_coeff_pad([1.0] + [0.0] * (be._N - 1))
+    while be._ops.depth_of_plaintext(pt_one) < be._ops.depth(ct_clone):
+        be._ops.mod_drop_inplace_pt(pt_one)
+    be._ops.multiply_plain_inplace(ct_clone, pt_one)
+    be._ops.clear_rescale_required(ct_clone)
+    print(f"    post-mul-by-1: depth={be._ops.depth(ct_clone)} scale=2^{np.log2(ct_clone.scale()):.2f}")
+
     cts_id = be._ops.coeff_to_slot_ctx(ct_clone, be._gk, ctx_B)
     for i, c in enumerate(cts_id):
         print(f"    post-CtoS[{i}]: depth={be._ops.depth(c)} scale=2^{np.log2(c.scale()):.2f}")
