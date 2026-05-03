@@ -41,6 +41,7 @@ def time_one(be, in_dim, out_dim, num_slots):
     # warmup + key registration
     ct_x = be.encrypt_coeff(x.tolist())
     _ = be.nexus_linear(ct_x, W, in_dim=in_dim, bias=b.tolist())
+    print(f"    [keys={len(be._registered_shifts)}]")
     times = []
     for _ in range(3):
         ct_x = be.encrypt_coeff(x.tolist())

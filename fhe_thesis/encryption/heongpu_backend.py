@@ -788,6 +788,12 @@ class HEonGPUBackend(CKKSBackend):
         if not new:
             return 0
         merged = sorted(existing | signed)
+        # Free the old Galois key BEFORE allocating the new one — each
+        # key holds ~|merged| × 32MB at N=2^16, L=31, so a careless
+        # double-allocation can blow the 75GB pool.
+        self._gk = None
+        import gc
+        gc.collect()
         kg = self._hg.KeyGenerator(self._ctx)
         self._gk = kg.generate_galois_key(self._ctx, self._sk, merged)
         self._registered_shifts = set(merged)
