@@ -210,6 +210,9 @@ class HEonGPUBackend(CKKSBackend):
     def dot(self, a: Ciphertext, b: Ciphertext) -> Ciphertext:  # pragma: no cover
         raise NotImplementedError("HEonGPUBackend.dot not implemented yet.")
 
+    def sum_slots(self, ct: Ciphertext) -> Ciphertext:  # pragma: no cover
+        raise NotImplementedError("HEonGPUBackend.sum_slots not implemented yet.")
+
     # ── ciphertext utilities ──────────────────────────────────────────
     def _clone(self, ct: Ciphertext) -> Ciphertext:
         """Return a fresh ciphertext with the same plaintext as ``ct``.
