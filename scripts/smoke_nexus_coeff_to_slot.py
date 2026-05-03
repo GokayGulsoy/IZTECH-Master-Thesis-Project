@@ -45,8 +45,17 @@ def main() -> int:
     expected = W @ x
 
     print("\n[1] CtoS isolation test (no multiply, depth 0)...")
-    # Encode a known coefficient vector directly so we can check that
-    # CtoS itself works before stacking it on top of coeff_matvec.
+    # CtoS in HEonGPU does a *bit-reversal permutation*:
+    #   slot[bit_rev(i, log2(N/2))] = coeff[i]   for i in [0, N/2)
+    log_n = int(np.log2(be._num_slots))
+
+    def bitrev(i: int, bits: int) -> int:
+        r = 0
+        for b in range(bits):
+            r = (r << 1) | ((i >> b) & 1)
+        return r
+
+    perm = np.array([bitrev(i, log_n) for i in range(be._num_slots)])
     raw = rng.standard_normal(be._N).astype(np.float64) * 0.1
     ct_raw_coeff = be.encrypt_coeff(raw.tolist())
     t = time.time()
@@ -54,9 +63,10 @@ def main() -> int:
     print(f"  wall: {time.time() - t:.3f}s   returned {len(cts)} cts")
     s0 = np.asarray(be.decrypt(cts[0]))[: be._num_slots]
     s1 = np.asarray(be.decrypt(cts[1]))[: be._num_slots]
-    err_lo = np.max(np.abs(s0 - raw[: be._num_slots]))
-    err_hi = np.max(np.abs(s1 - raw[be._num_slots :]))
-    print(f"  err half-low={err_lo:.3e}   half-high={err_hi:.3e}")
+    # raw[i] should appear at s0[bitrev(i)] for i < N/2 and s1[bitrev(i - N/2)] for i >= N/2.
+    err_lo = np.max(np.abs(s0[perm] - raw[: be._num_slots]))
+    err_hi = np.max(np.abs(s1[perm] - raw[be._num_slots :]))
+    print(f"  err half-low (bitrev'd)={err_lo:.3e}   half-high={err_hi:.3e}")
 
     print("\n[2] coeff_matvec...")
     t = time.time()
@@ -76,11 +86,11 @@ def main() -> int:
     ct_y_slots = be.coeff_matvec_to_slot(ct_x_coeff, W, in_dim=in_dim)
     print(f"  wall: {time.time() - t:.3f}s   returned {len(ct_y_slots)} cts")
 
-    # CtoS gives slot[i] = coeff[i] for i in [0, N/2). Our values of
-    # interest are at coeff indices [n-1, 2n-1, ..., m·n - 1], all < N/2,
-    # so they all live in out[0].
+    # Our values land at coeff index (i+1)*in_dim - 1 → slot bit_rev((i+1)*n-1).
     slots0 = np.asarray(be.decrypt(ct_y_slots[0]))[: be._num_slots]
-    extracted_slots = np.array([slots0[(i + 1) * in_dim - 1] for i in range(out_dim)])
+    target_coeff_idx = np.array([(i + 1) * in_dim - 1 for i in range(out_dim)])
+    target_slot_idx = np.array([bitrev(int(j), log_n) for j in target_coeff_idx])
+    extracted_slots = slots0[target_slot_idx]
     err_slot = np.max(np.abs(extracted_slots - expected))
     print(f"  slot-domain extract max-err: {err_slot:.3e}")
     print(f"  expected[:3] = {expected[:3]}")
