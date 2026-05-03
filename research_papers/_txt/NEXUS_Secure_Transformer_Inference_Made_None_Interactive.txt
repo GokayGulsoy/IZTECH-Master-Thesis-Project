@@ -1,0 +1,1258 @@
+ Secure Transformer Inference Made Non-interactive
+
+                              Jiawen Zhang∗ , Xinpeng Yang∗ , Lipeng He∗‡ , Kejia Chen∗ , Wen-jie Lu∗ ,
+                             Yinghao Wang∗ , Xiaoyang Hou∗ , Jian Liu∗† , Kui Ren∗† , Xiaohu Yang∗†
+                             ∗ The State Key Laboratory of Blockchain and Data Security, Zhejiang University
+                      † Hangzhou High-Tech Zone (Binjiang) Blockchain and Data Security Research Institute
+                                                         ‡ University of Waterloo
+
+                 {kevinzh, yangxinpeng, chenkejia, asternight, xiaoyanghou, jian.liu, kuiren, yangxh}@zju.edu.cn
+                                          lipeng.he@uwaterloo.ca, fionser@gmail.com
+
+   Abstract—Secure transformer inference has emerged as a              server S learns nothing about the input submitted by the
+prominent research topic following the proliferation of ChatGPT.       clients Cs, and C learns nothing about S’s model, except for
+Existing solutions are typically interactive, involving substantial    the inference results. Many such protocols were developed
+communication load and numerous interaction rounds between             for convolutional neural networks (CNNs) in the past few
+the client and the server.                                             years [40], [28], [2], [31], and some recent works also started to
+    In this paper, we propose NEXUS, the first non-interactive         support transformer-based models [25], [11], [27], [42], [45].
+protocol for secure transformer inference. The protocol requires
+the client to engage in just one round of communication with               It is noteworthy that most of these protocols are interactive,
+the server during the whole inference process: submitting an           warranting substantial communication costs and numerous
+encrypted input and receiving an encrypted result. NEXUS intro-        interaction rounds between C and S. For example, the state-of-
+duces several novel primitives, including SIMD ciphertext com-         the-art solution for secure transformer inference, BOLT [45],
+pression/decompression, SIMD slot folding, and secure Argmax,          documents 59.61GB of bandwidth consumption and 10,509 in-
+which enable it to significantly surpass the state-of-the-art in       teraction rounds for a single inference. Such a substantial com-
+communication while maintaining comparable runtime. Specif-            munication overhead notably contributes to network latency,
+ically, it reduces bandwidth consumption by 372.5× compared            especially in WAN configurations, and renders conventional
+to BOLT (Oakland ’24) and 53.6× compared to Bumblebee
+(NDSS ’25). Furthermore, its non-interactive property allows for
+                                                                       hardware acceleration techniques such as GPUs or FPGAs
+optimal hardware acceleration, with the GPU version achieving a        ineffective. In addition, the size of communication payload
+42.3× speedup in runtime. This enables NEXUS to run inference          makes the financial cost of secure inference highly undesirable.
+on a BERT-based model in just 37.3 seconds, consuming only             According to AWS’s pricing standards [1], the cost of each
+164 MB of bandwidth.                                                   reply token in BOLT [45] is $5.44, which means practical
+                                                                       deployment is expensive and infeasible.
+                                                                           We emphasize the critical importance of establishing a
+                        I.     I NTRODUCTION                           non-interactive model for secure inference, where C only
+                                                                       needs to submit one encrypted input in order to receive an
+    Transformers, such as GPT [48] and BERT [17], have                 encrypted prediction from S. For scenarios demanding real-
+revolutionized the field of artificial intelligence. They excel        time responses, existing secure inference protocols, whether
+in a wide range of applications such as language translation,          interactive or non-interactive, fail to meet the speed criteria.
+content generation, and question answering. However, these             Nevertheless, non-interactive protocols show promise in meet-
+applications often involve the manipulation of sensitive data,         ing this criterion when leveraging hardware acceleration [16],
+leading to growing concerns about user privacy over the                [15], [54], [56], [51], [3], [33]. In non-real-time scenarios
+years. Recently, OpenAI has developed ChatGPT as an online             such as data warehousing and hospital diagnosis, where C
+inference service, along with a public API for developers to           can tolerate an extended latency in response, the deployment
+easily access the platform by submitting prompts or messages.          of non-interactive protocols are attainable, whereas interactive
+While this approach is convenient, it poses significant risks          ones are not. This is because interactive protocols necessitate
+to data privacy as the content submitted by the users may              C’s computing resources to remain engaged during the waiting
+sometimes contain private information.                                 period, impeding on C’s ability to execute other tasks.
+   Secure inference is a two-party cryptographic protocol
+enabling model inference to proceed in a manner that the                  In the context of non-interactive secure inference, there are
+                                                                       two key differences between transformers and CNN models.
+     Jian Liu is the corresponding author.
+                                                                        1) Larger scale matrix-matrix multiplications. Prior
+                                                                           works on private neural networks, such as Gazalle [31]
+                                                                           and Cheetah [28], proposed optimized protocols for se-
+Network and Distributed System Security (NDSS) Symposium 2025              cure matrix-vector multiplications in the fully-connected
+23 - 28 February 2025, San Diego, CA, USA
+ISBN 979-8-9894372-8-3                                                     layers. However, transformers demand large-scale matrix-
+https://dx.doi.org/10.14722/ndss.2025.23868                                matrix multiplications. Previous works [31], [28], [25]
+www.ndss-symposium.org                                                     compute multiplications via inner dot products, and em-
+    ploy sparse packing for the resulting ciphertexts in cases             non-linear functions such as GELU, Softmax, and Layer
+    of matrix-matrix multiplication. As a result of this tech-             Normalization using RNS-CKKS.
+    nique, the majority of data slots in the ciphertexts are             • We provide an end-to-end implementation of NEXUS
+    often wasted, which introduces additional communication                on both CPU and GPU. Figure-1 illustrates the im-
+    overhead. Furthermore, the input dimensions of matrices                provements made by the proposed protocols compared to
+    in transformer models are often much higher, leading                   the baseline. In summary, compared to the state-of-the-art
+    to increased computational costs as a result of more                   protocol Bumblebee [42], NEXUS(CPU) is 1.79× faster
+    multiplications being done. Consequently, it is useful to              in computation, can save 98.1% of the communication
+    develop a new matrix multiplication protocol that is both              overhead, and able to reduces the financial cost by 2.38×.
+    time and space-efficient.                                              Leveraging the advantage of the non-interactive property
+ 2) Higher dimension inputs to Argmax. The last layer of                   of our protocol, we further provide a GPU-accelerated
+    both CNN and transformer is Argmax, whose input is a                   implementation. NEXUS(GPU) improves inference speed
+    probability vector with each entry being the probability               by 42.3× and achieves a financial cost reduction of
+    of an output label candidate (m labels in total). The                  17.2×, to only $0.05/token. Our code has been open-
+    inference output is the label with the highest probability.            sourced at https://github.com/zju-abclab/NEXUS.
+    Current state-of-the-art FHE algorithm for Argmax is
+    presented by Phoenix (CCS’22) [30], which demonstrates
+    a computational complexity of O(m). This metric is
+    often considered acceptable in CNN image classification
+    tasks, since the number of labels are typically not very
+    large, e.g. m = 1, 000 in ImageNet-1k. However, for
+    transformer-based NLP tasks, m equals to the size of
+    the vocabulary, with m reaching 30, 522 in BERT and
+    128, 256 in Llama-3-8B. It is evident that the existing
+    algorithm is not suitable for transformers, and a solution
+    with lower complexity is needed.
+
+A. Our contributions
+    In this paper, we propose NEXUS, which, to the best                Figure 1: The overall performance improvements of the pro-
+of our knowledge, is the first non-interactive protocol for            posed optimizations on the BERT-base model (128 input
+secure transformer inference. The protocol design of NEXUS             tokens, WAN with 100Mbps bandwidth and 80ms latency).
+begins with the client encrypting its input using RNS-CKKS             The price indicates the financial cost of outputting a word,
+fully homomorphic encryption (FHE), enabling the server to             according to current AWS pricing policy.
+evaluate the transformer model on FHE-encrypted data. We
+summarize our contribution as follows:
+  • Efficient and communication-optimized matrix mul-                                       II.   P RELIMINARIES
+    tiplications. Many previous secure inference protocols
+    such as Gazalle [31], Cheetah [28] and Iron [25] have                  In this section, we provide the necessary preliminaries of
+    wasted data slots in their output ciphertexts, which intro-        this paper. Table I shows the notations that are frequently used.
+    duces unnecessary communication overhead. BumbleBee
+    [42] eliminated wasted slots through ciphertext interleav-         A. Secure inference and threat model
+    ing, but requires more computations to be done. We adopt
+    the ciphertext compression and decompression strategy                 Secure inference is a two-party cryptographic protocol that
+    and take advantage of the special property of the mono-            enables model inference between a client C and a server S,
+    mial (cf. Section-III.B) in our our matrix multiplication          while preserving the privacy of both parties’ inputs. Similar
+    algorithm to reduce the communication cost. We also                to previous works [25], [45], [42], we assume C and S are
+    propose an amortization-friendly offline-online computing          semi-honest adversaries, adhering to the protocol specifications
+    strategy (cf. Section-III.C) to reduce the computation cost.       while endeavoring to gather extra information about the trans-
+  • Efficient Argmax and other non-linear functions eval-              former model or the user’s data. Additionally, we assume that
+    uation. To defend against membership inference attacks             an adversary is computationally bounded. Formal threat model
+    [53], [58], [57], a common approach is to output the               and security proof are provided in the Appendix-D.
+    logits vector after Argmax, which leaks the least infor-
+    mation about the model [53]. For an input of length                B. Transformer
+    m (m = 30, 522 in BERT, m = 128, 256 in Llama-3-
+    8B), the state-of-the-art protocol [30] requires m times               Figure 2 shows the structure and workflow of a transformer.
+    of S GN operations (cf. Section-II.C) and m times of               It takes an embedding, represented by a matrix, and passes
+    ciphertext rotations. Our method only requires (log m+1)           it through an attention layer and a feed forward network. In
+    times of S GN operations and (log m + 1) times of ci-              the end, it outputs a selection vector according to the highest
+    phertext rotations, which brings significant reductions to         value in the final logits. Layer normalization (L AYER N ORM)
+    computation overhead. Additionally, we also implement              is applied around each block.
+
+                                                                   2
+            Table I: A table of frequent notations.                    Layer normalization. The input
+                                                                                                    q to   L AYER N ORM is a ∈ Rn ,
+                                                                                   n−1                     n−1
+                                                                       let µ = n1 i=0 ai and σ = n1 i=0 (ai − µ)2 , the output
+                                                                                 P                       P
+                                                                             n
+    Notation           Description                                     y ∈ R is:
+    C                  client                                                                       xi − µ
+                                                                                           yi = γ ·        +β
+    S                  server                                                                          σ
+    E()                encryption                                      where γ, β ∈ R are two hyper-parameters.
+    π()                encoding
+                                                                       Feed-forward. The fully connected feed-forward network con-
+    E NC()             encoding-then encryption                        sists of two linear transformations with a GELU activation
+    ã                 FHE ciphertext                                  function placed in between:
+    ⊞/⊠                homomorphic addition / multiplication
+                                                                           F EED F ORWARD(X) = GELU(XW1 + b1 )W2 + b2 .
+    ROT L()/ROT R()    left rotation/right rotation
+    S UBS()            substitution                                    The GELU function can be evaluated using [26]:
+    S GN()             sign operation                                                               1               x
+                                                                                     GELU(x) =        x · (1 + ERF( √ ))
+    L                  multiplicative depth                                                         2                2
+    N′                 polynomial degree in RNS-CKKS                                                                      Rx    2
+                                                                       where the Gauss error function is ERF(x) = √2π 0 e−t dt. It
+    N                  # SIMD slots, N = N ′ /2                        is used as an activation function due to its favorable curvature
+    A                  input matrix                                    and non-monotonicity properties.
+    W                  weight matrix
+                                                                       C. Fully homomorphic encryption
+                                                                           Fully homomorphic encryption (FHE), which allows arbi-
+                                                                       trary operations to be performed over encrypted data [20], is
+                                                                       the the primary tool enabling us to build non-interactive secure
+                                                                       transformer inference. The FHE scheme used in this paper is
+                                                                       the full residue number system (RNS) variant of Cheon-Kim-
+                                                                       Kim-Song (CKKS) [12], [13].
+                                                                           RNS-CKKS is a leveled FHE, which can support compu-
+                                                                       tations up to a multiplicative depth L. Both the plaintexts and
+                                                                       ciphertexts of RNS-CKKS are elements in a polynomial ring:
+                                                                                                               ′
+                                                                                          RQ = ZQ [X]/(X N + 1),
+                                                                       where Q = ΠL   i=0 qi with distinct primes qi . Once a ciphertext’s
+                                                                       level becomes too low, a bootstrapping operation is required
+                                                                       to refresh it to a higher level to enable more computations.
+               Figure 2: Structure of transformer.                     In a nutshell, bootstrapping homomorphically evaluates the
+                                                                       decryption circuit and raises the modulus from q0 to qL by
+                                                                       leveraging the isomorphism Rq0 ∼    = Rq0 ×Rq1 ×···×RqL [10].
+                                                                       Suppose the bootstrapping consumes K levels, then a fresh
+Attention. The first step of the attention layer is to multiply        ciphertext can support L − K levels of computation.
+the embedding A ∈ Rm×n with three matrices (WQ ∈ Rn×k ,
+WK ∈ Rn×k , and WV ∈ Rn×k ) to produce a query matrix:                     RNS-CKKS supports single instruction multiple data
+Q = XWQ , a key matrix: K = XWK , and a value matrix:                  (SIMD), which enables encrypting a vector a ∈ RN , where
+V = XWV .                                                              N = N ′ /2, into a single ciphertext and processing the
+                                                                       encrypted elements in a batch without introducing any extra
+    For each attention unit, the transformer learns three weight       cost. To encrypt a in SIMD format, it first encodes a into a
+matrices: the query weights WQ , the key weights WK , and              polynomial in RQ using an encoding algorithm π(), and then
+the value weights WV . The input token representation X is             encrypts the polynomial using an encryption algorithm E().
+multiplied with each of the three weight matrices to produce           Throughout this paper, we use E() to denote the encryption of
+a query matrix Q = XWQ , a key matrix K = XWK , and                    a polynomial and use E NC() to denote the SIMD encryption
+a value matrix V = XWV . The attention is calculated using             of a vector:
+the formula:                                                                                E NC(a) = E(π(a)).
+                                          QKT
+       ATTENTION(Q, K, V) = S OFTMAX( √ )V.                               We summarize the homomorphic operations used in this
+                                             k
+                                                                       paper below:
+In the multi-head attention variant, an H-parallel attention
+ATTENTION(Qj , Kj , Vj ) for j ∈ [H] is computed, and the                • p(x) ← π(a). The encoding algorithm takes a vector a =
+H resulting matrices are concatenated.                                     [a0 , ..., aN −1 ] and outputs a polynomial p(x) ∈ RQ .
+
+                                                                   3
+  • ã ← E NC(a). The encryption algorithm takes a vector                 sparse packing for the resulting ciphertexts. This often leads
+    a = [a0 , ..., aN −1 ] and outputs an SIMD ciphertext                 to the empty slots in the ciphertexts being wasted, introducing
+    denoted by ã.                                                        additional communication overhead. BumbleBee [42] elim-
+  • a ← D EC(ã). The decryption algorithm takes an SIMD                  inates these wasted slots through ciphertext interleaving at
+    ciphertext ã and outputs a plaintext vector a.                       the cost of requiring a number of S UBS operations (same as
+  • c̃ ← ã ⊞ b̃. The addition takes two SIMD ciphertexts ã              automorphism). We leverage this technique to develop a secure
+    and b̃; outputs E NC([a0 + b0 , ..., aN −1 + bN −1 ]).                ciphertext compression algorithm for M ATRIX M UL.
+  • c̃ ← ã ⊠ b̃. The ciphertext multiplication takes ã and b̃;              We introduce our optimization based on the observation
+    outputs E NC([a0 b0 , ..., aN −1 bN −1 ]).                            that different A ∈ Rm×n matrices need to be multiplied with
+  • ã′ ← ROT L(ã, s). The left-rotation algorithm takes ã and          the same W ∈ Rn×k during transformer inference. For exam-
+    an integer s ∈ [N ]; left-rotates the vector by s slots.              ple, in GPT, the model autoregressively generates responses
+  • ã′ ← ROT R(ã, s). The right-rotation algorithm takes ã             based on previous output words (with different As) [27]; and
+    and an integer s ∈ [N ]; right-rotates the vector by s slots.         in BERT, batch inference is typically used to process multiple
+  • ã′ ← S UBS(ã, k). The substitution operation takes a                input samples (with different As) simultaneously [52]. Our
+    ciphertext that encrypts a polynomial p(x) and an odd                 goal is to reduce the amortized cost of M ATRIX M UL by
+    integer k; outputs a ciphertext that encrypts p(xk ).                 exploiting this fact. In Table-II, we compare the amortized
+  • b̃ ← S GN(ã). The sign operation, cf.§II-D.                          costs of computing t matrix multiplications using NEXUS with
+                                                                          the costs of using state-of-the-art M ATRIX M UL protocols.
+D. Homomorphic sign function
+                                                                            To present our solution, we start with a toy example with
+    As FHE only supports polynomial operations, it is non-                A ∈ R2×3 and WQ ∈ R3×3 in Figure-3.
+trivial to compare FHE-encrypted values in a non-interactive
+manner. To enable encrypted comparisons, we leverage the
+polynomial approximation of the sign function [37], [19], [14]:
+                                                      −α
+                              
+                              −1 −1 ≤ x ≤ −2
+                 df  dg
+      S GN(x) = f (g (x)) = 0              x=0
+                                        2−α ≤ x ≤ 1
+                              
+                                 1
+where f (), g() are two polynomials and df , dg are the
+number of repetitions. Notice that this approximation requires
+the input to fall within the interval [−1, 1]. Therefore, any input
+a ∈ [amin , amax ] to the S GN() function must be normalized
+beforehand:
+                   ∆ = max{|amax |, |amin |}
+We use S GN() to denote running both the normalization and                                                                         x
+the sign approximation on an SIMD ciphertext:
+                                                                          Figure 3: A toy example of SIMD-based matrix multiplication
+  • b̃ ← S GN(ã): bi = f df (g dg (ai /∆)), ∀ i ∈ [N ].
+In our implementation, both f () and g() are of degree 9; we                 Let ai,j ∈ R be the element in the i-th row and j-th column
+set α = 20, df = 2, dg = 2 and evaluate the polynomials using             of A, wj ∈ Rk be the j-th row of WQ and qi ∈ Rk be the i-th
+the Baby-Step-Giant-Step algorithm [24]. In future work, sign             row of Q. Then, qi is the vector sum of (ai,j · wj ) ∀ j ∈ [n].
+function evaluation could benefit from the ongoing efforts in
+optimizing FHE approximations of non-polynomial functions,                                       n
+                                                                                                 X
+such as the latest extension of Lee et al. [35].                                          qi =         (ai,j · wj ) ∀ i ∈ [m].
+                                                                                                 j=1
+         III.   E FFICIENT M ATRIX M ULTIPLICATION                        We could have C homomorphically encrypt each ai,j and send
+    Transformer-based models consist of large matrix multi-               the corresponding ciphertexts to S, who can then homomor-
+plications. In this section, we propose an efficient protocol for         phically evaluate M ATRIX M UL. However, the challenge of this
+matrix-matrix multiplications.                                            trivial solution is that C needs to send m · n ciphertexts, each
+                                                                          of which is a ciphertext encoded in SIMD. Specifically, we
+A. Overview                                                               have C encrypt each ai,j as:
+
+   The M ATRIX M UL operation takes input matrix A ∈ Rm×n                         ãi,j := E NC([ai,j , ..., ai,j ]) (suppose k < N ).
+form C and weight matrix W ∈ Rn×k from S, and then                                               | {z }
+outputs Q := A · W ∈ Rm×k .                                                                              k
+
+    Similar to prior works, we use HE to compute them                     To reduce the communication cost, we aim to fully utilize all
+securely, as HE is relatively efficient for linear operations.            ciphertext slots. We propose a method enabling C to compress
+Some of these works such as Gazalle [31], Cheetah [28] and                m×n ciphertext in the form above into m×n
+                                                                                                                 N ′ ciphertexts, while
+Iron [25] compute matrix multiplication via inner dot products.           ensuring S can correctly decompress them and perform the
+In cases of matrix-matrix multiplications, these works employ             aforementioned computations (cf. Section-III.B). To reduce the
+
+                                                                      4
+                                                                                                                                               ′
+                                                                                                          p̃2,2 ← p̃1,1 ⊞ S UBS(p̃1,1 , N 21′ + 1),
+Table II: Amortized cost of t matrix multiplications (Rm×n ·
+Rn×k ). N is the # of elements batched in a ciphertext.                                                   p̃2,3 ← p̃′1,1 ⊞ S UBS(p̃′1,1 , N
+                                                                                                                                          21 + 1)
+# Ciphertexts represents the number of ciphertexts that need                                           3) ......
+to be transmitted. Note that the cost of S UBS is almost equal
+to the cost of a ciphertext rotation, its main step is key                                            After log N ′ steps, S obtain N ′ ciphertexts, representing the
+switching, so we use the number of key switchings to represent                                        individual encryption of [a0 , a1 , ..., aN ′ −1 ]. Figure-4 visualizes
+the computational cost of matrix multiplications. We include                                          this process with a toy polynomial with degree 3. Algorithm-
+an example using real BERT-base and GPT-2 parameters:                                                 1 describes the full decompression process. Clearly, it only
+m = 256, n = 768, k = 64, N = 4096, t = 256                                                           requires 2N ′ substitutions in total. We prove its correctness in
+                                                                                                      Appendix-A.
+      Methods              # Ciphertexts                  # Key switching
+                            mn                               √
+    Gazalle [31]             k               3072          2k m                      2048
+                             √
+                          2m√ nk
+   Cheetah [28]              N
+                                             1774              -                      0
+                           √
+                          2 √mnk
+      Iron [25]              N
+                                                 111           -                      0
+                          m(n+k)                          mk log(N )
+ Bumblebee [42]             N                    52          √
+                                                            2 N
+                                                                                     1536
+                                                          q
+                          m(n+k)                              m 2 n2 k
+    BOLT [45]               N                    52            N2                    384
+                          mk  nk                           2nk−2
+        Ours              N + Nt                 5           t                       384              Figure 4: A toy example showcasing the decompression pro-
+                                                                                                      cess.
+
+computation cost, we propose an amortization-friendly offline-
+online computing strategy (cf. Section-III.C)
+                                                                                                      Algorithm 1 Secure Decompression on RNS-CKKS
+                                                                                                                                                                    ′
+B. SIMD Ciphertexts Compression and Decompression                                                     Input: p̃0 = E(a0 + a1 x + a2 x2 + ... + aN ′ −1 xN −1 )
+                                                                                                      Output: [ã0 , ..., ãN ′ −1 ], where each ãi = E NC([ai , ..., ai ])
+Secure Compression. Suppose C wants to send N ′ ciphertexts                                                                                                  | {z }
+to S with each ciphertext encrypting N identical values in                                                                                                              N
+SIMD format: E NC([a0 , ..., a0 ]), ..., E NC([aN ′ −1 , ..., aN ′ −1 ]).                              1: function D ECOMPRESS (p̃0 )
+                   | {z }                      |         {z         }                                  2:    p̃0,0 := p̃0
+                             N                                           N                             3:    for i = 0 to log N ′ do
+We have C pack [a0 , a1 , ..., aN ′ −1 ] into a polynomial                                             4:         for j = 0 to 2i − 1 do
+                                                                                                                                          i
+         p(x) = a0 + a1 x + a2 x2 + ... + aN ′ −1 xN −1
+                                                                         ′
+                                                                                                       5:             p̃′i,j ← p̃i,j ⊠ x−2
+                                                                                                                                                               ′
+                                                                                                       6:                 p̃i+1,2j −1 ← p̃i,j ⊞ S UBS(c, N    2i + 1)
+and send p̃0 := E(p(x)) to S. In this way, we reduce the                                                                                 ′                ′ N′
+communication cost from N ′ ciphertexts to a single ciphertext.                                        7:                 p̃i+1,2j ← p̃i,j ⊞ S UBS(c , 2i + 1)
+                                                                                                       8:           end for
+Secure Decompression. We extend SealPIR’s ciphertext                                                   9:      end for
+decompression algorithm [7] to matrix multiplication. In                                              10:      for j = 0 to N ′ − 1 do
+Algorithm-1, S UBS(p̃0 , N ′ + 1) returns:                                                            11:           ãj ← p̃log N ′ ,j ⊠ N1′
+                  ′                  ′                                       ′             ′
+                                                                                                      12:      end for
+  E(a0 + a1 xN +1 + a2 x2(N +1) + ... + aN ′ −1 x(N −1)(N +1) )                                       13:      re-arrange [ã0 , ã1 , ..., ãN ′ −1 ] according to the order of
+                  ′              ′           2                                   ′     (N ′ −1)           [a0 , a1 , ..., aN ′ −1 ] and return the result
+=E(a0 + a1 xN +1 + a2 (xN +1 ) + ... + aN ′ −1 (xN +1 )                                           )   14: end function
+                                 2                                  (N ′ −1)               1
+=E(a0 + a1 (−x) + a2 (−x) + ... + aN ′ −1 (−x)                                        ).
+                                                                                                         Next, we prove that each output ãi of Algorithm-1 is
+   It is evident that p̃0 ⊞ S UBS(p̃0 , N ′ +1) eliminates all odd-                                   exactly an SIMD ciphertext encrypting a vector of N ai s.
+degree terms of p(x). Then, S can extract E(a0 + 0x1 + ... +
+    ′
+0xN −1 ) via log N ′ substitutions:                                                                   Theorem 1. The encryption′ of a polynomial with only constant
+                                         ′                                                            term: E(as +0x1 +...+0xN −1 ) is exactly an SIMD encryption
+ 1) p̃1,0 ← p̃0 ⊞ S UBS(p̃0 , N 20′ + 1),                                                             of N identical values: E NC([as , as , ..., as ]).
+    p̃1,1 ← p̃′0 ⊞ S UBS(p̃′0 , N
+                                20 +′ 1)
+                                                                                                                                   |     {z        }
+                                                                                                                                                   N
+ 2) p̃2,0 ← p̃1,0 ⊞ S UBS(p̃1,0 , N 21′ + 1),
+    p̃2,1 ← p̃′1,0 ⊞ S UBS(p̃′1,0 , N
+                                    21 + 1),                                                                Proof: Given that
+  1 Observe           ′                               ′
+              that xN + 1 ≡ 0 (mod xN + 1) and hence xN +1 ≡
+                                                                                      ′
+                                                                                                                E NC([as , as , ..., as ]) = E(π([as , as , ..., as ])),
+          ′
+−x (mod xN + 1).
+                                                                                                                      |     {z        }           |     {z        }
+                                                                                                                              N                            N
+
+
+                                                                                                  5
+we only need to prove
+                                                               ′
+     E(π([as , as , ..., as ])) = E(as + 0x1 + ... + 0xN −1 ).
+          |     {z        }
+                   N
+
+The encoding function (i.e., π) is performed as follows:
+                                         
+                                         as
+                                    −1  .. 
+              π([as , ..., as ]) = V ·  .  ,
+                                         as
+                                                                                                   (a) Offline computation at the client
+where V−1 is the inverse of Vandermonde matrix
+V(ζ0 , ζ1 , · · · , ζN −1 ). Thereby, we just need to prove:
+                                   as       as
+                                    
+                                   as   0 
+                           V−1 · 
+                                 
+                                  ...  =  ...            (1)
+                                         
+
+                                  as           0
+
+   By multiplying V(ζ0 , ζ1 , · · · , ζN −1 ) to the right-hand side
+of Equation 1, we can get:
+        1                  · · · ζ0n−1
+                                                  
+        as            ζ0                           as       as                                     (b) Online computation at the server
+      0       1    ζ1      · · · ζ1n−1        0  as 
+   V·                                   ..  ·                                    Figure 5: Protocol for offline-online matrix multiplication
+       ...  =                                  ...  =  ...  ,
+                                             
+                  .   ..      ..                        
+                 ..    .         .       . 
+         0                              n−1        0        as
+                 1 ζN −1 · · · ζN          −1
+
+which is equal to V multiplied by the left side of the equation.                  each [wi,j , ..., wi,j ] occupies multiple ciphertexts. As C has no
+                                                                                        |      {z      }
+                                                                                            t×m
+                                                                                  knowledge of the inputs (i.e., As) in the preprocessing phase,
+C. Offine-Online Batch Matrix Multiplication                                      it samples U ∈$ R(tm)×n , and computes:
+   Let A = [a0 , ..., an−1 ] with ai ∈ Rm being each column                                        n−1                                   
+of A. Suppose S and C need to generate t response words,
+then there are t input matrices:
+                                                                                   E NCS (vj ) ←   ⊞
+                                                                                                   i=0
+                                                                                                          ui ⊠ E NCS ([wi,j , ..., wi,j ]) , ∀ j ∈ [k]
+                                                                                                                       |      {z      }
+                                                                                                                              t×m
+                     A0 = [a0,0 , a0,1 , ..., a0,n−1 ]                            where ui is the i-th column of U. Next, C encrypts each
+                     A1 = [a1,0 , a1,1 , ..., a1,n−1 ]                            E NCS (vj ) with its own key and sends each E NCC (E NCS (vj ))
+                                ......                                            to S. Notice that E NCC (E NCS (vj )) ≡ E NCS (E NCC (vj )) (see
+                                                                                  Appendix-B for more details), hence S can decrypt it and get
+                    At−1 = [at−1,0 , ..., at−1,n−1 ]
+                                                                                  E NCC (vj ) ∀ i ∈ [k].
+                                                                                     In the online phase, after knowing A′ = a′0 ||a′1 ||...||a′n−1 ,
+                    
+                a0,i
+                                 n−1                                              C sends (A′ − U) to S. (A′ − U) can be regarded as an one-
+    Let a′i =  ...  and q′j :=
+                                 P ′
+                                     ai wi,j ∀ j ∈ [k], then
+                    
+                                         i=0
+                                                                                  time-pad encryption of A′ , given that S does not know U.
+                 at−1,i                                                           Then, S computes:
+                                                                                     (A′ − U)W ⊞ (E NCC (v0 )||E NCC (v1 )||...||E NCC (vk ))
+                                                  
+                                              A0 W
+              Q′ = q′0 ||q′1 ||...||q′k−1 = 
+                                               ..                                 = (A′ W − V) ⊞ (E NCC (v0 )||E NCC (v1 )||...||E NCC (vk ))
+                                                 . 
+                                                   At−1 W                           = E NCC (q′0 )||E NCC (q′1 )||...||E NCC (q′k−1 )
+                                                                                  where q′j is the j-th column of Q′ . Figure-5 give an example
+   To this end, we introduce a preprocessing phase, where S                       of our protocol. The security proof of our matrix multiplication
+sends C the compressed (E NCS ([wi,j , ..., wi,j ]) ∀ i ∈ [n], j ∈                protocol can be found in Appendix-D.
+                                |      {z      }
+                                               t×m
+                                                                                      We remark that this optimized M ATRIX M UL protocol does
+[k]),2 using our compression technique described in Section-
+                                                                                  not compromise the non-interactive property of NEXUS: C
+III.B. Notice that this transfer occurs only once, unless the
+                                                                                  only needs to send (A′ − U) to S and receive the inference
+model changes. Next, C performs decompression to obtain
+                                                                                  result in the online phase.
+E NCS ([wi,j , ..., wi,j ]) ∀ i ∈ [n], j ∈ [k]. If t × m > N ,
+        |      {z
+              t×m
+                       }                                                              After the ciphertext-plaintext matrix multiplication, the
+                                                                                  subsequent matrix multiplication requires row-wise encryption
+  2 We use E NC to denote an encryption under S’s public key. Similarly, we
+               S
+                                                                                  for both Q, K, V in attention layer). It is noteworthy that
+use E NCC to denote an encryption under C’s public key.                           the multiplication of Q and KT remains feasible even when
+
+                                                                              6
+subjected to column-wise encryption. We show the detailed                Algorithm 2 Secure A RGMAX on RNS-CKKS
+ciphertext-ciphertext matrix-matrix multiplication process in            Input: ã = E NC([a0 , ..., am−1 ,0, ..., 0]) with 2m < N
+Appendix-C.                                                              Output: E NC([b0 , ..., bm−1 , 0, ..., 0]) (cf. Equation 2)
+                                                                          1: function A RGMAX (c)
+  IV.   E FFICIENT N ON - LINEAR F UNCTION E VALUATIONS                   2:    ãmax ← Q UICK M AX(ã)
+                                                                          3:    ã ← ã ⊟ ãmax
+A. Secure Argmax Evaluation                                               4:    b̃ ← S GN(ã) // b = 0 or −1
+    The number of classes in a text generation task is equal to           5:    b̃ ← b̃ ⊞ 1
+the number of unique words/tokens. For example, in BERT-                  6:    return b̃
+base model, the vocabulary size is 30522, hence many of the               7: end function
+classes have very small probabilities in the model’s prediction
+vector. Several previous works [53], [58], [57] have designed
+membership inference attacks based on the class probability              E NC([s, ..., s]). For example, if f () is a max function, then for
+                                                                               | {z }
+distribution of the prediction vector that cause information                       N
+leakage about the model.                                                 the input E NC([2, −1, 3, 1]), the output is E NC([3, 3, 3, 3]).
+    To defend against membership inference attacks, a common                In general, this solution is applicable to all functions that
+approach is to output the probabilities of the most likely k             supports associativity:
+classes [53]. The smaller the k is, the less information the                             f (f (a0 , a1 ), a2 ) = f (a0 , f (a1 , a2 ))
+model leaks. In the most extreme case, the model returns only
+the label of the most likely class and without reporting its             A trivial solution is to rotate E NC([a0 , ..., aN −1 ]) for (N − 1)
+probability. A RGMAX is widely used in this scenario.                    times and subsequently apply f () to the resulting ciphertexts.
+                                                                         Suppose N = 4, the rotated ciphertexts are:
+    Suppose the encrypted logits is ã = E NC([a0 , ..., am−1 ]),
+the final output of the transformer should be a selection vector                              ã0 := E NC([a0 , a1 , a2 , a3 ]),
+b̃ = E NC([b0 , ..., bm−1 ]), where                                                           ã1 := E NC([a1 , a2 , a3 , a0 ]),
+                                                                                              ã2 := E NC([a2 , a3 , a0 , a1 ]),
+    bi = 1 iff ai = max(a0 , ..., am−1 ), otherwise bi = 0.                                   ã3 := E NC([a3 , a0 , a1 , a2 ]).
+
+The state-of-the-art non-interactive protocol that can achieve           We can aggregate them by employing a binary tree construc-
+this goal is Phoneix [30]. Phoenix adopts the idea of bubble             tion:
+sorting to compare each element with its adjacent elements by
+rotating the ciphertext and calculating the difference:                                          ã0,1 := f (ã0 , ã1 ) =
+                                                                                 E NC([f (a0 , a1 ), f (a1 , a2 ), f (a2 , a3 ), f (a3 , a0 )]),
+                 s˜1 ← S GN(ã − ROT L(ã, 1))
+                                                                                                 ã2,3 := f (ã2 , ã3 ) =
+                 s˜2 ← S GN(ã − ROT L(ã, 2))                                   E NC([f (a2 , a3 ), f (a3 , a0 ), f (a0 , a1 ), f (a1 , a2 )]);
+                    ...
+                s˜m ← S GN(ã − ROT L(ã, m))                            with:
+                                 m
+Then a summation s̃ ← ⊞i=1 s˜i is performed over all                                       f (ã0,1 , ã2,3 ) = E NC([s, s, s, s]).
+the comparison results. It follows that the entry of s̃ that
+corresponds to the position of the maximum element will have             This trivial solution requires N − 1 rotations.
+value m, and the values of other entries will be less than m.
+After that, through simple linear transformations, b̃ can be                  A key observation is that ã2,3 can be obtained by left-
+obtained from s̃ (cf. Phoenix [30] for details).                         rotating ã0,1 by two slots, hence there is no need to compute
+                                                                         ã2 and ã3 at all. More generally, each right-child in the binary
+    However, this method requires m number of S GN evalu-                tree can be obtained by left-rotating the corresponding right-
+ations and m rotations, which makes it very inefficient when             child by 2i slots. Given that we know the left-most leaf (i.e.,
+m is large (e.g. m = 30, 522 in BERT, m = 128, 256 in                    ã0 ), we can compute the root (i.e., the final result s) in a
+Llama-3-8B). To solve the problem, we innovatively propose               manner akin to a “binary tree” (cf. Figure-6). Notice that when
+to approximate each bi as:                                               the number of rotated slots is a power of two, the rotation
+                                                                         overhead is equal to a single rotation. As a result, our solution
+                  bi = S GN(ai − amax ) + 1.                  (2)        only requires (log N − 1) rotations.
+We describe the algorithm for computing A RGMAX in                          The solution above is useful only when the length
+Algorithm-2 with the use of Q UICK M AX. Before going into               n of the input vector is equal to N . However,
+details, we first need to introduce a general design called SIMD         in the transformers we evaluate, n ≪ N . In this
+slots folding. With this technique, we will only require log m           case, we transform E NC([a0 , ..., an−1 , 0, ..., 0]) into
+S GNs and log m rotations to get the maximum value in ã.                                                          | {z }
+                                                                                                                                      N −n
+SIMD slots folding Our goal is to compute function f () over             E NC([a0 , ..., an−1 ,a0 , ..., an−1 , 0, ..., 0])    before     proceeding
+                                                                                                                | {z }
+all the SIMD slots of the input ã = E NC([a0 , ..., aN −1 ]), and                                               N −2n
+replace each individual slot with a value in the result s̃ =             with the aforementioned process.
+
+                                                                     7
+                                                                             B. Other Non-linear Functions
+
+                                                                             GELU. Referring to BumbleBee [42] and PUMA [18], we
+                                                                             adopt the following piecewise polynomial to approximate
+                                                                             GELU(x), which gives an average error within 10−4 when
+                                                                             x ∈ [−8, 8]3 :
+                                                                                            
+                                                                                            
+                                                                                             0                 x ≤ −4
+                                                                                                     Pi=3
+                                                                                              P (x) = i=0 ci xi −4 < x ≤ −1.95
+                                                                                            
+                                                                                            
+                                                                               GELU(x) =             Pi=6                        (3)
+                                                                                            
+                                                                                             Q(x) = i=0 di xi −1.95 < x ≤ 3
+                                                                                            
+                                                                                            x                  x>3
+
+                                                                                  First, we use the S GN operation to obtain 4 encrypted bits:
+                                                                             b0 , b1 , b2 , b3 , such that:
+Figure 6: A toy example for computing f () on SIMD slots
+(n = N ).                                                                                 bi = 1 iff x belongs to the i-th segment.
+
+                                                                             Then, GELU(x) = b0 · 0 + b1 P (x) + b2 Q(x) + b3 x.
+Algorithm 3 SIMD slots folding on RNS-CKKS                                       Note that we can accurately estimate ã even when the
+Input: ã = E NC([a0 , ..., an−1 ,0, ..., 0]) with 2n < N                    input is near the dividing points. For example, for an input
+Output: E NC([s, ..., s, 0, ..., 0]), where s = f (a0 , ..., an−1 )          |ã − (−1.95)| < 2−α , we have t̃0 = 0.5, t̃2 = −0.5, b̃0 =
+                                                                             0, b̃3 = 0, and P (x) ≈ Q(x) ≈ −0.05, where −0.05 is the
+               | {z }
+                        n
+ 1: function F OLD (ã)                                                      ground truth of GELU(−1.95), hence:
+ 2:    ã ← ã ⊞ ROT R(ã, n)
+ 3:    for i = 0 to log n − 1 do                                                              ỹ = (b̃1 ⊠ P (ã)) ⊞ (b̃2 ⊠ Q(ã))
+ 4:        t̃ ← ROT L(ã, 2i ) // left-rotate by 2i steps                                        ≈ −0.05 ⊠ (b̃1 ⊞ b̃2 )
+ 5:        t̃ ← f (t̃, c)                                                                        = −0.05 ⊠ (t̃0 ⊟ t̃1 ⊞ t̃1 ⊟ t̃2 )
+ 6:        ã := t̃
+ 7:    end for                                                                                   = −0.05 ⊠ 1 = −0.05
+ 8:    return t̃ ⊠ [1, ..., 1, 0, ..., 0]
+                                                                             Softmax Recall that the function needs to be applied to each
+                            | {z }
+                              n
+ 9: end function                                                             row of A. The function is commonly evaluated using the
+                                                                             formula:
+                                                                                                     EXP (ai − amax )
+                                                                                           yi = Pm−1                                  (4)
+                                                                                                    j=0 EXP (aj − amax )
+   Algorithm-3 gives the detail of SIMD slots folding, as
+mentioned earlier, f () can be any function that satisfies the               where amax = max(a0 , ..., am−1 ) ensures all inputs to the
+associative law, such as sum, max, etc. Based on this, we define             exponential function (i.e., a′j = aj − amax ) are non-positive,
+Q UICK S UM and Q UICK S UM.                                                 achieving numerical stability [34].
+                                                                                 Although we can use Q UICK M AX to find amax , consider-
+QuickSum. Given [a0 , ..., an−1 ,0, ..., 0], S can obtain                    ing that softmax in BERT-base is executed multiple times and
+  N
+  X −1           N
+                 X −1                                                        the value of amax does not affect the result of softmax, in order
+[      ai , ...,      ai , 0, ..., 0] through Algorithm-3 by replacing       to improve efficiency, we take amax as a constant. Following
+ i=0          i=0                                                            BumbleBee [42], we approximate the exponentiation using the
+                                                                             Taylor series:
+|        {z         }
+          n
+Line 5 with:                                                                                                    x 2r
+                                  t̃ ← t̃ ⊞ ã.                                              EXP (x) ≈ (1 + r ) , x ≤ 0
+                                                                                                                2
+                                                                             with r = 8, which limits the average error to be within 10−5 .
+QuickMax. Given [a0 , ..., an−1 ,0, ..., 0], S can obtain                    Then, S could compute the exponentiation in SIMD format
+E NC([amax , ..., amax , 0, ..., 0]) through Algorithm-3 by replac-          and obtain E NC([e0 , ..., em−1 ]), where ej = EXP(a′j ). Next,
+      |      {z      }                                                                                                m−1
+                                                                                                                      X              m−1
+                                                                                                                                     X
+               n                                                             S applies Q UICK S UM to obtain E NC([        ej , ...,     ej ]). In
+ing f () with max(). We leverage
+                                                                                                                               j=0           j=0
+                      a + b + (a − b) · S GN(a − b)                                                                           |         {z
+                                                                                                                                        m
+                                                                                                                                                    }
+         max(a, b) =
+                                    2                                        the end, S computes the final result in SIMD format using
+to compute the max function on encrypted values. Then,                       the Goldschmidt division algorithm [22], [46]. Algorithm-4
+Line 5 in Algorithm-3 is replaced with:                                      describes the details of our secure S OFTMAX algorithm.
+
+         t̃ ← 0.5 ⊠ (ã ⊞ t̃ ⊞ (ã ⊟ t̃) ⊠ S GN(ã ⊟ t̃)).                     3 Our experimental results show that all inputs are in this range.
+
+
+
+
+                                                                         8
+LayerNorm For ease of computation, we perform the follow-              n = 128, if N = 32768, we can batch process 128 inputs using
+ing to compute L AYER N ORM:                                           one ciphertext.
+                   ai − µ
+          yi = γ ·         +β                                                     V.   P LACEMENT OF BOOTSTRAPPING
+                      σ
+                          n(ai − µ)                                        NEXUS is based on RNS-CKKS, which is a leveled
+             =γ· q P                      +β
+                        1   n−1
+                   n n i=0 (ai − µ)2                                   homomorphic encryption scheme that allows at most L mul-
+                                                                       tiplications on a ciphertext in any computation path. Once a
+                √            nai − nµ
+             = nγ · qP                        + β.                     ciphertext’s level becomes too low, bootstrapping is required
+                            n−1             2                          to refresh it to a higher level to enable more multiplications.
+                            i=0 (na i − nµ)
+                                                                       As the bootstrapping operation is expensive and the cost scales
+                            Pn−1
+Let zi = nai − nµ = nai − i=0 ai , then                                linearly relative to the number of ciphertext inputs, its place-
+                      √                                                ment is crucial for the overall performance. We observe that the
+                                 zi
+               yi = γ n · qP             + β.          (5)             size of GELU input/output matrices is R128×3072 (packed in
+                                 n−1 2
+                                      z                                12 ciphertexts), but it is then reduced to R128×768 (packed in
+                                 i=0 i
+                                                                       3 ciphertexts) by the subsequent M ATRIX M UL. As a result,
+                                                Pn−1                   bootstrapping will execute much faster if performed after
+    We apply Q UICK S UM again to compute
+Pn−1 2                                            i=0 ai and           the M ATRIX M UL. It is clear that we should circumvent the
+       z
+   i=0 i . For  the inverse square root, we adopt the  method          execution of bootstrapping during operations involving large
+proposed in [47], which employs Newton’s iteration with a              input/output sizes, such as GELU, by judiciously selecting
+proper initial value. Algorithm-4 describes the details of our         the multiplicative depth.
+secure L AYER N ORM.
+
+Algorithm 4 Secure Non-linear functions on RNS-CKKS
+Input: ã = E NC([a0 , ..., an−1 ,0, ..., 0]) with 2n < N
+Output: E NC([y0 , ..., yn−1 , 0, ..., 0]) (cf. Equation 3,4,5)
+  1: function GELU(ã)
+  2:    Compare a with the breakpoints:
+            t̃0 ← 0.5 ⊠ S GN(ã ⊞ 4)         // s0 = 0.5{a > −4}
+            t̃1 ← 0.5 ⊠ S GN(ã ⊞ 1.95) // s1 = 0.5{a > −1.95}
+            t̃2 ← 0.5 ⊠ S GN(ã ⊟ 3)         // s2 = 0.5{a > 3}
+  3:    Compute segment selection:
+            b̃0 ← 0.5 ⊟ t̃0      // b0 = 1{x < −4}
+            b̃1 ← t̃0 ⊟ t̃1      // b1 = 1{−4 < x < −1.95}
+            b̃2 ← t̃1 ⊟ t̃2      // b2 = 1{−1.95 < x < 3}
+            b̃3 ← 0.5 ⊞ t̃2      // b3 = 1{x > 3}
+  4:    Compute GELU:
+            ỹ ← (b̃0 ⊠ 0) ⊞ (b̃1 ⊠ P (ã)) ⊞ (b̃2 ⊠ Q(ã)) ⊞ (b̃3 ⊠ ã)
+  5:    return ỹ
+  6: end function
+  7: function S OFTMAX (ã)
+  8:    ã ← 1 ⊞ ã ⊠ 21r                                                Figure 7: Placement of bootstrapping for a BERT-base trans-
+  9:    for i = 0 to r do                                                former.
+ 10:        ã ← S QUARE(a)
+ 11:    end for
+ 12:    t̃ ← Q UICK S UM(ẽ)                                                  Figure-7 shows the placement of bootstrapping for a BERT-
+ 13:    return ẽ ⊠ I NVERSE(t̃)                                         base transformer employing NEXUS. The width of the building
+ 14: end function                                                        blocks represents the dimension of the input/output. Matrix
+ 15: function L AYER N ORM (ã)                                          multiplications will bring about a change in dimensions. We try
+ 16:    t̃ ← Q UICK S UM(ã)                     Pn−1                    to perform bootstrapping when the dimension is the smallest
+ 17:    z̃ ← (n ⊠ ã) ⊟ t̃     // zi = nai − i=0 ai                      (that is, when the number of packed ciphertexts is the least).
+ 18:    ỹ ← S QUARE(z̃)
+ 19:    ỹ ← Q UICK S UM(ỹ)
+                                                                                                    VI. E VALUATION
+ 20:    ỹ ← I NVERT S QRT(ỹ)                 pPn
+        ỹ ← z̃ ⊠ ỹ                                     2
+ 21:                        √ // yi = zi /          i=1 zi               A. Implementation
+ 22:    return (ỹ ⊠ γ ⊠ n) ⊞ β
+ 23: end function                                                             We implement NEXUS in C++, utilizing the SEAL library4
+                                                                         for CKKS homomorphic encryption and FHE-MP-CNN5 for
+                                                                         bootstrapping. We use HEXL [9] to accelerate SEAL on Intel
+     We remark that the (N − 2n) empty slots can be used
+                                                  N
+to fold other ãs, thereby we can process 2n         vectors with a        4 https://github.com/microsoft/SEAL
+
+single ciphertext. For example, in L AYER N ORM of BERT-base,              5 https://github.com/snu-ccl/FHE-MP-CNN
+
+
+
+
+                                                                   9
+CPUs and Phantom6 for GPU implementation. Following the               advantages. Specifically, it outperforms BOLT by 1.6× in
+“Homomorphic Encryption Standard” [6], we set the polyno-             running time and 1.6× in communication costs.
+mial degree to N ′ = 216 (hence N = 215 ) and the ciphertext
+modulus as 1763-bit to achieve 128-bit security. We set the
+multiplicative depth to L = 35 and the depth for bootstrapping
+to K = 14, which indicates that the multiplicative depth
+available for normal computations is L − K = 21. We set
+q0 ≈ 260 and qi ≈ 250 ∀ i ≥ 1. We leverage the scale
+propagation technique [10] to eliminate the dominant noise
+components.
+
+B. Experimental setup
+    We primarily compare our work with Iron [25], BOLT
+[45], and Bumblebee [42]. As of current, Bumblebee has been
+open sourced in the SPU library [43], but Iron and BOLT do                                     (a) Amortized Runtime vs. #inputs.
+not yet have open source implementations. To enable a direct
+comparison with the results (of both Iron and BOLT) reported
+in the BOLT paper [45], we conduct our benchmarks under
+the same experimental settings as BOLT’s:
+  • For the CPU benchmark, we use two instances with
+    3.70GHz Intel Xeon processors and 128 GB of RAM.
+    We set the the number of threads to 32, same as BOLT.
+    For the GPU benchmark, we use four Tesla A100 GPUs
+    with 40 GB of memory. All results are averaged over 10
+    runs.
+  • We control the communication bandwidth between them
+    using the Linux Traffic Control (tc) command. We set the
+    bandwidth to 3Gbps and the round-trip latency to 0.8 ms
+                                                                                        (b) Amortized Communication vs. #inputs.
+    to simulate the communication in LAN. Our simulation
+    for WAN consists of four settings: {100Mbps, 40ms},               Figure 8: Evaluation of runtime and communication for
+    {100Mbps, 80ms}, {200Mbps, 40ms}, and {200Mbps,                   R128×768 ×R768×768 ciphertext-plaintext matrix multiplication
+    80ms}, same as BOLT’s.                                            with single thread in LAN (amortized cost of multiple inputs).
+  • We do not apply any machine learning optimizations,
+    such as word elimination or fine-tuning. The model
+    parameters were taken from a pre-trained BERT-base
+    transformer [17].                                                 Table III: Evaluation of non-linear functions. There are 12 ×
+    In terms of price, we use the current AWS financial cost          R128×3072 inputs to GELU, 144 × R128×128 to S OFTMAX,
+structure for running a server with “c6i.16xlarge” specifica-         24 × R128×768 to L AYER N ORM, and R30522 to A RGMAX.
+tions [1]. Therefore, the CPU per-hour cost is estimated to be        Unit of communication cost is GB, and the WAN setting is
+$2.72/2 = $1.36 (since this machine has 64 vCPUs, and we              100Mbps bandwidth and 80ms latency.
+run on 32 threads), the GPU per-hour cost is $1.29, and the
+                                                                            Setting          Protocol   Comm    LAN(s)    WAN(s)    Error    Price($)
+download cost is $0.09 per GB.
+                                                                                           Iron          93.3     126      4118     5.8e-4    8.453
+                                                                                          BOLT           17.2      14       774     9.8e-4    1.554
+C. Microbenchmarks                                                          GELU        BumbleBee         3.3     24       338      1.1e-3    0.308
+                                                                                         NEXUS             0       44        44     7.7e-4    0.020
+                                                                                         NEXUS*            0      2.1       2.1     7.7e-4    0.003
+Matrix Multiplication. Figure-8 shows the amortized cost of
+M ATRIX M UL in LAN over multiple inputs. In order to better                               Iron          42.1     60       1900     3.2e-5    3.816
+                                                                                          BOLT           16.9     16        775     1.4e-6    1.528
+compare performance metrics, we conduct this microbench-                   S OFTMAX     BumbleBee         1.7     23       241      7.2e-6    0.170
+mark using a single thread. For a fair comparison, we did not                            NEXUS             0      47         47     3.1e-5    0.019
+distinguish the overhead from the offline and online phases,                             NEXUS*            0      1.2       1.2     3.1e-5    0.002
+which means that we take into account all the preprocessing                                    Iron      20.4     16       1158     1.7e-3    1.843
+                                                                       L AYER N ORM           BOLT       14.0     14        914        -      1.266
+and online overhead. Considering that transformer often gener-                               NEXUS        0       32         32     4.5e-4    0.013
+ates several hundred words in a single response, t = 256 would                               NEXUS*       0       2.0       2.0     4.5e-4    0.003
+be a reasonable number for inputs. The amortized runtime (for                                Phoenix      0       3004     3004     1.9e-2    1.252
+                                                                           A RGMAX
+256 inputs) of NEXUS is 1.31s, 3.3× faster than BumbleBee,                                   NEXUS        0        54       54      7.6e-4    0.023
+1.3× faster than Iron and 1.2× faster than BOLT. When the                                    NEXUS*       0        2.5      2.5     7.6e-4    0.004
+                                                                       *
+number of inputs increases to 1,024, which is also a commonly              GPU accelerated
+seen number, NEXUS demonstrates even greater performance
+                                                                      Non-linear Functions. Table-III shows a comparison of
+ 6 https://github.com/encryptorion-lab/phantom-fhe                    several metrics between NEXUS and other works for
+
+                                                                 10
+Figure 9: End-to-end comparisons with the existing secure inference frameworks using BERT-base. The input to the model
+consists of 128 tokens. For the CPU implementation, we use 32 threads for the benchmarks across the board.
+
+
+
+evaluating non-linear functions (GELU, L AYER N ORM,
+S OFTMAX, A RGMAX). Iron and BOLT implement these
+non-linear functions through secure two-party computation,
+which is expensive in terms of both bandwidth consumption
+and communication rounds. In contrast, NEXUS holds a
+superiority particularly in poor network conditions, owing to
+its non-interactive feature. For example, when the bandwith
+is 100Mbps and round-trip latency is 80ms, NEXUS performs:
+
+  • for GELU, 93.6× faster and 422.7× cheaper than Iron,
+    17.6× faster and 77.7× cheaper than BOLT, 7.9× faster
+    and 15.4× cheaper than BumbleBee;
+  • for S OFTMAX, 40.4× faster and 200.8× cheaper than
+    Iron, 16.5× faster and 80.4× cheaper than BOLT, 5.1×                  Figure 10: Performance of A RGMAX using RNS-CKKS over
+    faster and 8.9× cheaper than BumbleBee;                               inputs of different dimensions. We mark the vocabulary size
+  • for L AYER N ORM, 36.2× faster and 141.8× cheaper than                of BERT, GPT-2, and GPT-3 in the chart.
+    Iron, 28.6× faster and 97.4× cheaper than BOLT.
+    The last column of Table-III shows the average error of the
+three schemes. For Iron and BOLT, we calculate their average              D. End-to-End Benchmark
+errors by multiplying the ULP errors [50] reported in their
+papers by their respective scales (BOLT did not report their              End-to-End Performance. The end-to-end performance is
+ULP errors for L AYER N ORM). For NEXUS, taking GELU as                   roughly the aggregation of the microbenchmarks. Note that
+an example, we first uniformly sample [x1 , ..., x1000 ] from the         for the scaling of floating-point numbers to integers, Iron and
+corresponding domain. Then for each xi , we calculate both the            BOLT need to perform secure truncations to prevent overflows.
+real yi = GELU(x) and the approximatedPyi′ = GELU(x).                     In contrast, NEXUS avoids the need for truncations by lever-
+                                               1000       ′
+                                               i=1 |yi −yi |              aging RNS-CKKS, which supports floating-point numbers but
+The average error is then computed as             1000       . The
+results indicate that the average errors introduced by NEXUS              requires bootstrappings. The end-to-end workflow of NEXUS
+are comparable to those of prior works.                                   follows Figure-7.
+
+   Regarding A RGMAX, while both Phoenix and NEXUS are                        Figure-9 shows the end-to-end performance (amortized
+non-interactive, NEXUS demands notably fewer rotations and                for 128 inputs). Notably, NEXUS only consumes 164MB of
+S GN operations. As a result, NEXUS outperforms Phoenix by                bandwidth, which is a 1737.5× reduction over Iron, a 368.6×
+55.6× in terms of speed and price.                                        reduction over BOLT and a 53.7× reduction over BumbleBee.
+                                                                          In terms of end-to-end runtime, NEXUS still achieves up to
+    Figure-10 shows the performance of A RGMAX with respect               14.8× speedup over Iron, 3.6× speedup over BOLT and 1.8×
+to inputs of different dimensions (vocabulary sizes). In newer            speedup over BumbleBee. In terms of price, NEXUS is 70.6×
+models such as Llama-3-8B, the vocabulary size could reach                cheaper than Iron, 15.1× cheaper than BOLT and 2.4× cheaper
+128,256, in which case NEXUS can achieve up to 136.5×                     than Bumblebee. As for NEXUS (GPU), it takes only 37
+speedup when compared to previous works. The advantage                    seconds and $0.05 to produce the output, which demonstrates
+of having logarithmic complexity is highlighted.                          the scalability and practicality of hardware acceleration for
+
+                                                                     11
+Table IV: Performance breakdown between two transformers generating a one word output using NEXUS. Inputs to the BERT-
+base model and Llama-3-8B model consist of 128 and 8 tokens respectively. We batched 32 inputs in total and evaluated the
+benchmark on a machine with a 32-core CPU and four A100 GPUs. Depth represents the change in available multiplication
+depth before and after each operation. Runtime is the amortized latency of each input.
+
+                                                      BERT-base (12 layers)                                            Llama-3-8B (32 layers)
+    Operation         Depth
+                                                  Input                     CPU(s)     GPU(s)                       Input                    CPU(s)     GPU(s)
+   M ATRIX M UL      21 → 20    (R128×768 × R768×768 ) × 3                    65        2.68        (R8×4096 × R4096×4096 ) × 3               308        12.71
+                                     128×64               64×128                                           8×128            128×8
+   M ATRIX M UL      20 → 21    (R             ×R                  ) × 12     14        0.54          (R           ×R               ) × 32     1          0.03
+                                              128×128                                                              8×8
+     S OFTMAX        19 → 3              (R                ) × 12             47        1.15                  (R         ) × 32                2          0.04
+   M ATRIX M UL       3→2       (R128×128 × R128×64 ) × 12                    9         0.36          (R8×8 × R8×128 ) × 32                    1          0.02
+                                         128×768            768×768                                        8×4096            4096×4096
+   M ATRIX M UL       2→1            R                ×R                      2         0.06          R             ×R                         10         0.28
+ B OOTSTRAPPING      1 → 17                   R128×768                       127        5.63                       R8×4096                    113         5.00
+                                                  128×768                                                           8×4096
+   L AYER N ORM      17 → 1                   R                               16        1.01                       R                           14         0.91
+                                                  128×768                                                           8×4096
+ B OOTSTRAPPING      1 → 17                   R                              127        5.63                       R                          113         5.00
+   M ATRIX M UL      17 → 16       R128×768 × R768×3072                       48        1.71          R8×4096 × R4096×14336                   203         7.33
+                                                128×3072                                                            8×14336
+      GELU           16 → 2                   R                               44        3.35                   R                               36         2.72
+   M ATRIX M UL       2→1          R128×3072 × R3072×768                      8         0.20          R8×14336 × R14336×4096                   34         0.88
+                                                  128×768                                                           8×4096
+ B OOTSTRAPPING      1 → 17                   R                              127        5.63                       R                          113         5.00
+   L AYER N ORM      17 → 1                   R128×768                        16        1.01                       R8×4096                     14         0.91
+                                                  128×768                                                           8×4096
+ B OOTSTRAPPING      1 → 21                   R                              153        5.90                       R                          136         5.92
+                                                   30522                                                               128256
+     A RGMAX            *                         R                           54        2.48                       R                          110         5.09
+       Total            -                             -                      857        37.34                           -                     1088       51.84
+
+
+
+secure transformer inference.                                                        • RQ2: Why is NEXUS more accurate than MPC-based
+                                                                                       methods?
+    Table-IV lists the runtime for each individual operation in                      • RQ3: What’s the trade-off between accuracy and latency?
+NEXUS. Bootstrapping is the most time-consuming part of the
+entire process, requiring 534s and occupying 62.3% of the total                        We present the formulas for calculating the errors of spe-
+runtime in our CPU implementation.                                                 cific homomorphic operations in the following table according
+                                                                                   to [32], [38]. We take a message scaling factor of ∆ ≈ 250 , the
+Accuracy We evaluate the inference accuracy of NEXUS                               discrete Gaussian distribution with standard deviation σ = 3.2,
+with 3 datasets (RTE, SST-2, and QNLI) from the GLUE                               hamming weight h = 192.
+benchmark [55], a widely adopted evaluation benchmark for
+transformers. As shown in Table-V, NEXUS attains compara-
+ble levels of accuracy relative to plaintext inference.                                 Table VI: Error of specific homomorphic operations
+
+                                                                                        Operation                            Error                   Bound
+Table V: Inference accuracy of BERT-base and Llama-3-8B
+                                                                                                                                √
+                                                                                                                                √
+on the GLUE benchmarks.                                                              encode-encrypt          eclean ≤ 18σ N 3∆
+                                                                                                                             +32 6σN
+                                                                                                                                                   6.73 × 10−8
+                                                                                                                        √      √
+       Model          Dataset        Plaintext               NEXUS                      rescaling               ers ≤ 3 3N3∆+8 2N
+                                                                                                                                                   7.01 × 10−9
+                        RTE           70.04%                 69.88%                                                 √     √        √
+                                                                                      key-switching         eks ≤ 3 3N +8 3∆3·σN +8 2N
+                                                                                                                                                   3.46 × 10−8
+     BERT-base         SST-2          92.36%                 92.11%
+                       QNLI           90.30%                 89.90%                   bootstrapping            parameter II in [10]                4.32 × 10−5
+                        RTE           82.75%                 81.24%
+     Llama-3-8B        SST-2          94.94%                 94.46%                PdAccording     to the Lemma 7 in [13], if polynomial f (x) =
+                                                                                               j
+                       QNLI           90.70%                 90.20%                   j=0 aj x   and input p has relative error β0 , one can compute
+                                                                                   f (p) with a relative error bounded by βd < 2 · d · β0 .
+                                                                                      We use 4 polynomials in our S GN implementation and each
+E. Error Analysis and Trade-offs                                                   polynomial has degree 9, hence we can consider S GN as a 36-
+   Our analysis aims to answer three research questions:                           degree polynomial. And the error introduced by S GN is
+
+  • RQ1: Why is NEXUS more accurate than Phoenix[30]?                                           esgn ≈ 2−α + 72 · eclean ≈ 3.89 × 10−7
+
+
+                                                                              12
+To answer RQ1, for argmax evaluation, the error introduced                      Figure-11 shows the trade-off between accuracy and la-
+by Phoenix [30] is                                                          tency. For NEXUS, we use high/low-degree polynomials to
+                                                                            approximate sin(x) function in bootstrapping. And for Bum-
+           eargmax
+            phoenix = m · (esgn + eks ) ≈ 1.18 × 10
+                                                    −2
+                                                                            blebee, we use different bit lengths and scales for secret
+the error introduced by NEXUS is                                            sharing. Both HE and MPC protocols can achieve higher
+                                                                            accuracy, but it will be at a cost of increased inference time
+                                                       −4
+      eargmax
+       nexus = log m · (esgn + eks + ebs ) ≈ 6.91 × 10                      and higher financial spending.
+
+   To answer RQ2, we assume that the polynomial fits are                                        VII.     R ELATED W ORK
+identical and only discuss the errors caused by MPC and HE
+computations.                                                               Interactive secure inference for transformers. With the
+    The error in MPC comes from the float-to-fixed conversion.              proliferation of ChatGPT, secure transformer inference has
+Given a scale f ∈ Z, it maps a real number r to a l-bit integer             become a key area of research. There are works such as
+⌊r · 2f ⌋ ∈ Z2l . Note that the bits after the f -bit are truncated.        Privformer [4], Puma [18] and Sigma [23] that present three-
+So the error introduced by MPC is                                           party protocols that require additional trust assumptions. There
+                                                                            are also several other works based on 2PCs: [11], [25], [45],
+                         r · 2f − ⌊r · 2f ⌋                                 [27], [42], [39]. Iron [25] is an optimization of a secure CNN
+                empc =                      ≈ 2−f                           protocol named Cheetah [28] and uses a more efficient packing
+                                2f
+                                                                            strategy to reduce the cost of matrix multiplication. Bumble-
+    Take GELU evaluation as an example. Both BOLT [45] and                  bee [42] further optimized this packing strategy. Similar to
+BumbleBee [42] set the scale f = 12 and bit length l = 32,                  NEXUS, all these three protocols use polynomial coefficients
+where the minimum error is 2−f ≈ 2.4 × 10−4 . Whereas the                   to pack matrices, but they did not make full use of the
+error introduced by NEXUS is                                                coefficients (i.e., a large number of coefficients are wasted). In
+                                                       −6                   contrast, NEXUS can use all coefficients to pack matrix entries,
+         egelu
+          nexus = 3 · (esgn + 12 · eclean ) ≈ 1.24 × 10                     resulting in a much lower number of ciphertexts needed to be
+                                                                            transferred. THE-X [11] and MPCFormer [39] simply replace
+    To answer RQ3, we should first figure out where the trade-              GELU, S OFTMAX with a combination of ReLU and polyno-
+offs come from. The accuracy and latency of NEXUS mainly                    mials, hence both of them require model retraining. BOLT [45]
+depends on bootstrapping. It can be observed from Table-                    is the state-of-the-art solution for secure transformer inference.
+IV that bootstrapping takes up 62.3% of the total time, and                 Our experimental results show that NEXUS achieves a speedup
+Table-VII shows that the error of bootstrapping is the largest              of 3.6× and a remarkable bandwidth reduction of 368.6×
+among all homomorphic operations. The trade-off comes from                  compared to BOLT.
+the polynomial approximation of sin(x) function in the boot-
+strapping process [10], [38]. Lower-degree polynomials can                  Non-interactive secure inference. To the best of our knowl-
+effectively accelerate this process but will lead to a significant          edge, all existing non-interactive secure inference proto-
+drop in accuracy, and vice versa.                                           cols [49], [41], [36], [8], [21], [29] are designed for convo-
+                                                                            lutional neural networks (CNNs). AutoFHE [8] can automat-
+                                                                            ically optimize the placement of bootstrapping operations in
+                                                                            the CNN workflow. CryptoNAS [21] and DeepReduce [29]
+                                                                            proposed evaluating non-linear functions like ReLU using
+                                                                            FHE, but they cannot support the non-linear functions re-
+                                                                            quired by transformers, such as GELU, Softmax and Layer
+                                                                            Normalization. NEXUS is arguably the first protocol for non-
+                                                                            interactive secure transformer inference.
+                                                                            FHE acceleration. Recent research on optimizing compil-
+                                                                            ers [16], [15], [54], GPU acceleration [56], [5], and special-
+                                                                            ized hardware accelerators [51], [3], [33] has demonstrated
+                                                                            significant speedups for RNS-CKKS. These results can be used
+                                                                            directly to accelerate NEXUS.
+
+Figure 11: Trade-offs between inference accuracy and amor-                                       VIII.    C ONCLUSION
+tized latency of BERT-base on QNLI. The network settings
+are: 100Mbps bandwidth and 80ms latency.                                        We propose NEXUS, the first non-interactive secure trans-
+                                                                            former inference protocol. We design a series of new protocols
+                                                                            based on RNS-CKKS that allow the server to efficiently
+    The accuracy-latency trade-off made by MPC-based meth-                  and accurately compute each layer of the transformer model
+ods pertains to the bit-length l and scale f in secret sharing,             on encrypted data. Since the scalability of non-interactive
+where ⌊r ·2f ⌋ ∈ Z2l . Secret sharing with larger bit lengths and           protocols is not limited by network bandwidth, we posit
+scales can be computed with higher accuracy but will incur                  that combining NEXUS with carefully designed and deeply
+more communication overhead, which significantly increases                  integrated hardware acceleration implementations will make
+financial costs and the latency in WAN settings.                            secure transformer inference ready for practical deployment.
+
+                                                                       13
+                         ACKNOWLEDGMENT                                             [14]   Jung Hee Cheon, Dongwoo Kim, and Duhyeong Kim. Efficient homo-
+                                                                                           morphic comparison methods with optimal complexity. In Advances
+    This work is funded by National Key Research and De-                                   in Cryptology–ASIACRYPT 2020: 26th International Conference on
+                                                                                           the Theory and Application of Cryptology and Information Security,
+velopment Project (Grant No: 2022YFB2703100) and Na-                                       Daejeon, South Korea, December 7–11, 2020, Proceedings, Part II 26,
+tional Key Research and Development Program of China                                       pages 221–256. Springer, 2020.
+(2023YFB2704000).                                                                   [15]   Sangeeta Chowdhary, Wei Dai, Kim Laine, and Olli Saarikivi. Eva
+                                                                                           improved: Compiler and extension library for ckks. In Proceedings of
+                                                                                           the 9th on Workshop on Encrypted Computing & Applied Homomorphic
+                                                                                           Cryptography, pages 43–55, 2021.
+                             R EFERENCES
+                                                                                    [16]   Roshan Dathathri, Olli Saarikivi, Hao Chen, Kim Laine, Kristin Lauter,
+                                                                                           Saeed Maleki, Madanlal Musuvathi, and Todd Mytkowicz. Chet: an
+ [1]   https://aws.amazon.com/cn/ec2/pricing/on-demand/, 2024.    Accessed:
+                                                                                           optimizing compiler for fully-homomorphic neural-network inferencing.
+       2024-04-18.
+                                                                                           In Proceedings of the 40th ACM SIGPLAN conference on programming
+ [2]   Nitin Agrawal, Ali Shahin Shamsabadi, Matt J Kusner, and Adrià                     language design and implementation, pages 142–156, 2019.
+       Gascón. Quotient: two-party secure neural network training and
+                                                                                    [17]   Jacob Devlin, Ming-Wei Chang, Kenton Lee, and Kristina Toutanova.
+       prediction. In Proceedings of the 2019 ACM SIGSAC Conference on
+                                                                                           Bert: Pre-training of deep bidirectional transformers for language un-
+       Computer and Communications Security, pages 1231–1247, 2019.
+                                                                                           derstanding. arXiv preprint arXiv:1810.04805, 2018.
+ [3]   Rashmi Agrawal, Leo de Castro, Guowei Yang, Chiraag Juvekar,
+                                                                                    [18]   Ye Dong, Wen-jie Lu, Yancheng Zheng, Haoqi Wu, Derun Zhao, Jin
+       Rabia Yazicigil, Anantha Chandrakasan, Vinod Vaikuntanathan, and
+                                                                                           Tan, Zhicong Huang, Cheng Hong, Tao Wei, and Wenguang Cheng.
+       Ajay Joshi. Fab: An fpga-based accelerator for bootstrappable fully
+                                                                                           Puma: Secure inference of llama-7b in five minutes. arXiv preprint
+       homomorphic encryption. In 2023 IEEE International Symposium
+                                                                                           arXiv:2307.12533, 2023.
+       on High-Performance Computer Architecture (HPCA), pages 882–895.
+       IEEE, 2023.                                                                  [19]   Nir Drucker, Guy Moshkowich, Tomer Pelleg, and Hayim Shaul.
+                                                                                           Bleach: cleaning errors in discrete computations over ckks. Journal
+ [4]   Yoshimasa Akimoto, Kazuto Fukuchi, Youhei Akimoto, and Jun
+                                                                                           of Cryptology, 37(1):3, 2024.
+       Sakuma. Privformer: Privacy-preserving transformer with mpc. In
+       2023 IEEE 8th European Symposium on Security and Privacy (EuroSP),           [20]   Craig Gentry. A fully homomorphic encryption scheme.           Stanford
+       pages 392–410, 2023.                                                                university, 2009.
+ [5]   Ahmad Al Badawi, Bharadwaj Veeravalli, Jie Lin, Nan Xiao, Mat-               [21]   Zahra Ghodsi, Akshaj Kumar Veldanda, Brandon Reagen, and Siddharth
+       sumura Kazuaki, and Aung Khin Mi Mi. Multi-gpu design and                           Garg. Cryptonas: Private inference on a relu budget. Advances in Neural
+       performance evaluation of homomorphic encryption on gpu clusters.                   Information Processing Systems, 33:16961–16971, 2020.
+       IEEE Transactions on Parallel and Distributed Systems, 32(2):379–391,        [22]   Robert E Goldschmidt. Applications of division by convergence. PhD
+       2020.                                                                               thesis, Massachusetts Institute of Technology, 1964.
+ [6]   Martin Albrecht, Melissa Chase, Hao Chen, Jintai Ding, Shafi Gold-           [23]   Kanav Gupta, Neha Jawalkar, Ananta Mukherjee, Nishanth Chandran,
+       wasser, Sergey Gorbunov, Shai Halevi, Jeffrey Hoffstein, Kim Laine,                 Divya Gupta, Ashish Panwar, and Rahul Sharma. Sigma: secure gpt
+       Kristin Lauter, et al. Homomorphic encryption standard. Protecting                  inference with function secret sharing. Cryptology ePrint Archive, 2023.
+       privacy through homomorphic encryption, pages 31–62, 2021.
+                                                                                    [24]   Kyoohyung Han and Dohyeong Ki. Better bootstrapping for approxi-
+ [7]   Sebastian Angel, Hao Chen, Kim Laine, and Srinath Setty. Pir with                   mate homomorphic encryption. In Cryptographers’ Track at the RSA
+       compressed queries and amortized query processing. In 2018 IEEE                     Conference, pages 364–390. Springer, 2020.
+       symposium on security and privacy (SP), pages 962–979. IEEE, 2018.           [25]   Meng Hao, Hongwei Li, Hanxiao Chen, Pengzhi Xing, Guowen Xu,
+ [8]   Wei Ao and Vishnu Naresh Boddeti. Autofhe: Automated adaption                       and Tianwei Zhang. Iron: Private inference on transformers. Advances
+       of cnns for efficient evaluation over fhe. 33st USENIX Security                     in Neural Information Processing Systems, 35:15718–15731, 2022.
+       Symposium (USENIX Security 24), 2024.                                        [26]   Dan Hendrycks and Kevin Gimpel. Gaussian error linear units (gelus).
+ [9]   Fabian Boemer, Sejun Kim, Gelila Seifu, Fillipe DM de Souza, and                    arXiv preprint arXiv:1606.08415, 2016.
+       Vinodh Gopal. Intel hexl: Accelerating homomorphic encryption with           [27]   Xiaoyang Hou, Jian Liu, Jingyu Li, Yuhan Li, Wen-jie Lu, Cheng Hong,
+       intel avx512-ifma52. In Proceedings of the 9th on Workshop on                       and Kui Ren. Ciphergpt: Secure two-party gpt inference. Cryptology
+       Encrypted Computing & Applied Homomorphic Cryptography, pages                       ePrint Archive, 2023.
+       57–62, 2021.
+                                                                                    [28]   Zhicong Huang, Wen-jie Lu, Cheng Hong, and Jiansheng Ding. Chee-
+[10]   Jean-Philippe Bossuat, Christian Mouchet, Juan Troncoso-Pastoriza,                  tah: Lean and fast secure {two-party} deep neural network inference. In
+       and Jean-Pierre Hubaux. Efficient bootstrapping for approximate                     31st USENIX Security Symposium (USENIX Security 22), pages 809–
+       homomorphic encryption with non-sparse keys. In Annual Interna-                     826, 2022.
+       tional Conference on the Theory and Applications of Cryptographic
+       Techniques, pages 587–617. Springer, 2021.                                   [29]   Nandan Kumar Jha, Zahra Ghodsi, Siddharth Garg, and Brandon
+                                                                                           Reagen. Deepreduce: Relu reduction for fast private inference. In
+[11]   Tianyu Chen, Hangbo Bao, Shaohan Huang, Li Dong, Binxing Jiao,                      International Conference on Machine Learning, pages 4839–4849.
+       Daxin Jiang, Haoyi Zhou, Jianxin Li, and Furu Wei. THE-X: Privacy-                  PMLR, 2021.
+       preserving transformer inference with homomorphic encryption. In
+       Smaranda Muresan, Preslav Nakov, and Aline Villavicencio, editors,           [30]   Nikola Jovanovic, Marc Fischer, Samuel Steffen, and Martin Vechev.
+       Findings of the Association for Computational Linguistics: ACL 2022,                Private and reliable neural network inference. In Proceedings of the
+       pages 3510–3520, Dublin, Ireland, May 2022. Association for Compu-                  2022 ACM SIGSAC Conference on Computer and Communications
+       tational Linguistics.                                                               Security, pages 1663–1677, 2022.
+[12]   Jung Hee Cheon, Kyoohyung Han, Andrey Kim, Miran Kim, and                    [31]   Chiraag Juvekar, Vinod Vaikuntanathan, and Anantha Chandrakasan.
+       Yongsoo Song. A full rns variant of approximate homomorphic                         {GAZELLE}: A low latency framework for secure neural network
+       encryption. In Selected Areas in Cryptography–SAC 2018: 25th                        inference. In 27th USENIX Security Symposium (USENIX Security 18),
+       International Conference, Calgary, AB, Canada, August 15–17, 2018,                  pages 1651–1669, 2018.
+       Revised Selected Papers 25, pages 347–368. Springer, 2019.                   [32]   Andrey Kim, Antonis Papadimitriou, and Yuriy Polyakov. Approximate
+[13]   Jung Hee Cheon, Andrey Kim, Miran Kim, and Yongsoo Song. Homo-                      homomorphic encryption with reduced approximation error. In Cryp-
+       morphic encryption for arithmetic of approximate numbers. In Advances               tographers’ Track at the RSA Conference, pages 120–144. Springer,
+       in Cryptology–ASIACRYPT 2017: 23rd International Conference on the                  2022.
+       Theory and Applications of Cryptology and Information Security, Hong         [33]   Jongmin Kim, Sangpyo Kim, Jaewan Choi, Jaiyoung Park, Donghwan
+       Kong, China, December 3-7, 2017, Proceedings, Part I 23, pages 409–                 Kim, and Jung Ho Ahn. Sharp: A short-word hierarchical accelerator
+       437. Springer, 2017.                                                                for robust and practical fully homomorphic encryption. In Proceedings
+
+
+                                                                               14
+       of the 50th Annual International Symposium on Computer Architecture,                     A fast and programmable accelerator for fully homomorphic encryption.
+       pages 1–15, 2023.                                                                        In MICRO-54: 54th Annual IEEE/ACM International Symposium on
+[34]   Yann LeCun, Yoshua Bengio, and Geoffrey Hinton. Deep learning.                           Microarchitecture, pages 238–252, 2021.
+       nature, 521(7553):436–444, 2015.                                                 [52]    Microsoft     batch-inference.            https://github.com/microsoft/
+[35]   Eunsang Lee, Joon-Woo Lee, Young-Sik Kim, and Jong-Seon No.                              batch-inference, January 2023.       Microsoft Research, Redmond,
+       Optimization of homomorphic comparison algorithm on RNS-CKKS                             WA.
+       scheme. Cryptology ePrint Archive, Paper 2021/1215, 2021. https:                 [53]    Reza Shokri, Marco Stronati, Congzheng Song, and Vitaly Shmatikov.
+       //eprint.iacr.org/2021/1215.                                                             Membership inference attacks against machine learning models. In 2017
+[36]   Eunsang Lee, Joon-Woo Lee, Junghyun Lee, Young-Sik Kim, Yongjune                         IEEE symposium on security and privacy (SP), pages 3–18. IEEE, 2017.
+       Kim, Jong-Seon No, and Woosuk Choi. Low-complexity deep con-                     [54]    Alexander Viand, Patrick Jattke, Miro Haller, and Anwar Hithnawi.
+       volutional neural networks on fully homomorphic encryption using                         {HECO}: Fully homomorphic encryption compiler. In 32nd USENIX
+       multiplexed parallel convolutions. In International Conference on                        Security Symposium (USENIX Security 23), pages 4715–4732, 2023.
+       Machine Learning, pages 12403–12422. PMLR, 2022.                                 [55]    Alex Wang, Amanpreet Singh, Julian Michael, Felix Hill, Omer Levy,
+[37]   Eunsang Lee, Joon-Woo Lee, Jong-Seon No, and Young-Sik Kim.                              and Samuel R Bowman. Glue: A multi-task benchmark and anal-
+       Minimax approximation of sign function by composite polynomial for                       ysis platform for natural language understanding. arXiv preprint
+       homomorphic comparison. IEEE Transactions on Dependable and                              arXiv:1804.07461, 2018.
+       Secure Computing, 19(6):3711–3727, 2021.                                         [56]    Zhiwei Wang, Peinan Li, Rui Hou, Zhihao Li, Jiangfeng Cao, XiaoFeng
+[38]   Yongwoo Lee, Joon-Woo Lee, Young-Sik Kim, Yongjune Kim, Jong-                            Wang, and Dan Meng. He-booster: An efficient polynomial arithmetic
+       Seon No, and HyungChul Kang. High-precision bootstrapping for                            acceleration on gpus for fully homomorphic encryption. IEEE Trans-
+       approximate homomorphic encryption by error variance minimization.                       actions on Parallel and Distributed Systems, 34(4):1067–1081, 2023.
+       In Annual International Conference on the Theory and Applications of             [57]    Hongyang Yan, Shuhao Li, Yajie Wang, Yaoyuan Zhang, Kashif Sharif,
+       Cryptographic Techniques, pages 551–580. Springer, 2022.                                 Haibo Hu, and Yuanzhang Li. Membership inference attacks against
+[39]   Dacheng Li, Rulin Shao, Hongyi Wang, Han Guo, Eric P Xing, and Hao                       deep learning models via logits distribution. IEEE Transactions on
+       Zhang. Mpcformer: fast, performant and private transformer inference                     Dependable and Secure Computing, 2022.
+       with mpc. International Conference on Learning Representations                   [58]    Jiayuan Ye, Aadyaa Maddi, Sasi Kumar Murakonda, Vincent Bind-
+       (ICLR), 2023.                                                                            schaedler, and Reza Shokri. Enhanced membership inference attacks
+[40]   Jian Liu, Mika Juuti, Yao Lu, and Nadarajah Asokan. Oblivious neural                     against machine learning models. In Proceedings of the 2022 ACM
+       network predictions via minionn transformations. In Proceedings of                       SIGSAC Conference on Computer and Communications Security, pages
+       the 2017 ACM SIGSAC conference on computer and communications                            3093–3106, 2022.
+       security, pages 619–631, 2017.
+[41]   Qian Lou and Lei Jiang. Hemet: A homomorphic-encryption-friendly                                                   A PPENDIX
+       privacy-preserving mobile neural network architecture. In International
+       conference on machine learning, pages 7102–7110. PMLR, 2021.                     A. Correctness of Ciphertext Decompression
+[42]   Wen-jie Lu, Zhicong Huang, Zhen Gu, Jingyu Li, Jian Liu, Kui Ren,                Theorem 2. Let N ′ be a power of 2, p(x) = a0 + a1 x1 + ... +
+       Cheng Hong, Tao Wei, and WenGuang Chen. Bumblebee: Secure two-                                ′
+
+       party inference framework for large transformers. Cryptology ePrint              aN ′ −1 xN −1 be the polynomial encoding of A, and E(p(x))
+       Archive, 2023.                                                                   be the encryption of p(x). Then, the N ′ output ciphertexts
+[43]   Junming Ma, Yancheng Zheng, Jun Feng, Derun Zhao, Haoqi Wu,                      o0 , ..., oN −1 of Decompress(E(p(x))) satisfy:
+       Wenjing Fang, Jin Tan, Chaofan Yu, Benyu Zhang, and Lei Wang.
+       SecretFlow-SPU: A performant and User-Friendly framework for                            os = E NC(as + 0x1 + 0x2 + ... + 0xN −1 ) ∀s ∈ [N ′ ]
+       Privacy-Preserving machine learning. In 2023 USENIX Annual Tech-
+       nical Conference (USENIX ATC 23), pages 17–33, Boston, MA, July                       Proof: It suffices to prove the case N ′ = 2ℓ . For j =
+       2023. USENIX Association.
+                                                                                        {0, 1, ..., ℓ − 1}, we claim that after j th iteration of the outer
+[44]   Pratyush Mishra, Ryan Lehmkuhl, Akshayaram Srinivasan, Wenting                   loop, we have ciphertexts = [c0 , . . . , c2j+1 −1 ] such that
+       Zheng, and Raluca Ada Popa. Delphi: A cryptographic inference service
+       for neural networks. In 29th USENIX Security Symposium (USENIX
+                                                                                                                    ′
+                                                                                                                                                  
+                                                                                                                   N   −1
+       Security 20), pages 2505–2522. USENIX Association, August 2020.                                             X
+                                                                                                     cs = E 2j+1           ai xi−s
+                                                                                                                                   
+                                                                                                                                              j+1
+                                                                                                                                                  
+[45]   Qi Pang, Jinhao Zhu, Helen Möllering, Wenting Zheng, and Thomas                                                                     i≡s mod 2
+       Schneider. Bolt: Privacy-preserving, accurate and efficient inference for                                          i=0
+       transformers. IEEE Symposium on Security and Privacy (SP), 2024.
+                                                                                        We prove the claim by induction on j. The base case j = 0
+[46]   Hongyuan Qu and Guangwu Xu. Improvements of homomorphic
+       evaluation of inverse square root. Available at SSRN 4258571.                    is explained before. Suppose the claim is true for some j ≥
+[47]   Hongyuan Qu and Guangwu Xu. Improvements of homomorphic secure
+                                                                                        0. Then in the next iteration, there is an integer r such that
+       evaluation of inverse square root. In International Conference on                i − s = 2j+1 · r, then we compute an array
+       Information and Communications Security, pages 110–127. Springer,                  ′
+       2023.                                                                            cs = cs + S UBS(cs , N/2j+1 + 1)
+                                                                                                              −1 h
+                                                                                                            N
+                                                                                                                                                                       !
+[48]   Alec Radford, Jeffrey Wu, Rewon Child, David Luan, Dario Amodei,                                     X              j+1   j+1
+                                                                                                                                     i
+       Ilya Sutskever, et al. Language models are unsupervised multitask                   = cs + E 2j+1           ai x(N/2 +1)(2 r)
+       learners. OpenAI blog, 1(8):9, 2019.                                                                                                             i≡s mod 2j+1
+                                                                                                                   i=0
+[49]   Ran Ran, Xinwei Luo, Wei Wang, Tao Liu, Gang Quan, Xiaolin Xu,                                              N −1
+                                                                                                                                                           !
+       Caiwen Ding, and Wujie Wen. Spencnn: orchestrating encoding and                                       j+1
+                                                                                                                   X
+                                                                                                                           ai (−1)r xi−s i≡s mod 2j+1
+                                                                                                                                       
+       sparsity for fast homomorphically encrypted neural network inference.                   = cs + E 2
+       In International Conference on Machine Learning, pages 28718–28728.                                         i=0
+       PMLR, 2023.                                                                                                                −1
+                                                                                                                                N
+                                                                                                                                                               !
+                                                                                                                                X
+                                                                                                                   r      j+1
+                                                                                                                                        i−s 
+[50]   Deevashwer Rathee, Mayank Rathee, Rahul Kranti Kiran Goli, Divya                        = E [1 + (−1) ] · 2                      ai x  i≡s mod 2j+1
+       Gupta, Rahul Sharma, Nishanth Chandran, and Aseem Rastogi. Sirnn:                                                        i=0
+       A math library for secure rnn inference. In 2021 IEEE Symposium on
+                                                                                                              −1
+                                                                                                            N
+                                                                                                                                             !
+       Security and Privacy (SP), pages 1003–1020. IEEE, 2021.                                              X
+                                                                                               = E 2j+2
+                                                                                                                    i−s 
+[51]   Nikola Samardzic, Axel Feldmann, Aleksandar Krastev, Srinivas De-                                            ai x  i≡s mod 2j+2
+       vadas, Ronald Dreslinski, Christopher Peikert, and Daniel Sanchez. F1:                                i=0
+
+
+
+                                                                                   15
+It is necessary to explain that when r is odd, it is clear that the             Algorithm 5 Ciphertext-Ciphertext M ATRIX M UL
+corresponding term will be eliminated. When r is even, let’s                    Input: Column-packed matrix Q ∈ Rm×n and K ∈ Rm×n
+denote it as r = 2r′ (where r′ is an integer). In this case, only               Output: Q × KT ∈ Rm×m
+the terms satisfying i − s = 2j+1 · 2r′ will be left, and this                   1: function M ATRIX M UL(Q, KT )
+condition can also be expressed as i ≡ s mod 2j+2 .                              2:    for i = 0 to m − 1 do
+    Finally, with the above claim we show that after the outer                   3:        r←0
+loop, where j = ℓ − 1, we have an array of N ciphertexts such                    4:        for j = 0 to n − 1 do
+that:                                                                            5:            ri ← ri ⊞ (qj ⊠ kj )
+                         N −1
+                                                   !                             6:        end for
+                         X                            1                          7:        for j = 0 to n − 1 do
+       os = E 2j+1 ·           ai xi−s i≡s mod 2j+1 ·
+                                      
+                                                      N                          8:            kj ← ROT L(kj , 1)
+                         i=0
+                      N −1
+                                               !                                 9:        end for
+                      X     i−s                  1                            10:    end for
+           =E N·            ai x                 ·
+                                     i≡s mod N     N                                    return [r0 , r1 , · · · , rm−1 ]
+                      i=0
+                                                                                11: end function
+           = E(as + 0x1 + 0x2 + ... + 0xN −1 )
+Note that i < N = 2ℓ , so i ≡ s mod N implies i = s. Hence
+os is an encryption of monomial N as + 0x1 + ... + 0xN −1 . To                    • Corrupted server. We require that a corrupted, semi-
+obtain an encryption of as , we multiply os by N1 in the last                       honest server to not be able to learn anything about
+step (Line 12-15 in Algorithm 1).                                                   the private input A of the client. Formally, we require
+                                                                                    the existence of an efficient simulator SimS such that
+                                                                                    V iewS ≈c SimS (W, out), where V iewS denotes the
+B. Commutable Encryption                                                            view of the server in the execution, and out denotes the
+   A RLWE ciphertext consists of a pair of polynomials                              output, namely E NCc (A · W).
+(A, As + m + e). Then, E NCC (E NCS (m)) can be obtained                            The functionality of offine-online batch matrix multipli-
+by letting the client run the following procedure:                              cation (cf. Section III.C) is denoted by FM atrixmul . We
+ 1) Parse E NCS (m) as (A, AsS + m + e)                                         summarize the privacy of this functionality in theorem 3.
+ 2) Output (A, AsS + AsC + m + e + e′ )                                         Theorem 3. Assuming FEnc is the homomorphic encryption
+    Decrypting it with the server’s secret key yields:                          functionality. The functionality of offine-online batch matrix
+                                                                                multiplication (cf. Section III.C) securely realize FM atrixmul
+                                                                                in the FEnc model.
+(A, AsS +AsC +m+e+e′ )−(0, AsS ) = (A, AsC +m+e+e′ ).
+                                                                                     Proof: Corrupted client. The client view consists of
+                                                                                ciphertexts {E NCS (wγ )}. The simulator SimC can be con-
+    Which is a valid ciphertext under client’s secret key.
+                                                                                structed by:
+C. Ciphertext-Ciphertext M ATRIX M UL                                            1) Output ciphertexts EncS (0).
+    Suppose the matrix Q ∈ Rm×n and K ∈ Rm×n packed                             The security against a corrupted client is directly reduced to
+in column and qj , kj are column vectors for ∀ j ∈ [n]. We                      the semantic security of the underlying RLWE encryption.
+leverage the SIMD element-wise multiplication to find that                         Corrupted server. The server view consists of ciphertexts
+(q0 ⊠ k0 ) ⊞ (q1 ⊠ k1 ) · · · ⊞ (qn−1 ⊠ kn−1 ) is the diagonal-                 {E NCC (E NCS (vα,δ ))}, plaintext polynomials aα,β − uα,β ,
+pack of matrix Q × KT . And we can continue computing                           and the output E NCc (A · W). The simulator SimS can be
+the other diagonal of matrix Q × KT by just rotating the                        constructed by:
+vector k0 , k1 , · · · , kn−1 and get the results r0 , r1 , · · · , rn−1
+as shown in Algorithm 5.                                                         1) The simulator follows step 2 and 3 in the algorithm with
+                                                                                    knowledge of W. The only difference is that uα,β is
+D. Security Analysis                                                                replaced with ûα,β which is sampled by the simulator
+                                                                                    instead of C such that
+    1) Security Proof of Matrix Multiplication: We follow the                                                                          
+definition of privacy in the simulation paradigm. Namely,
+the algorithm should be secure against a static semi-honest
+                                                                                        E NCS (v̂α,δ ) ← ⊞
+                                                                                                        β∈[n]
+                                                                                                                              ′
+                                                                                                              ûα,β ⊠ E NCS (w(δ−1)n+β )
+
+probabilistic polynomial time adversary corrupting either C or
+S.                                                                                  The output ciphertexts {E NCC (E NCS (v̂α,δ ))} are indis-
+                                                                                    tinguishable from {E NCC (E NCS (vα,δ ))} by the semantic
+  • Corrupted client. We require that a corrupted, semi-                            security of the underlying RLWE encryption.
+    honest client to not be able to learn anything about the                     2) The simulator samples and outputs random plaintext
+    server’s input W. Formally, we require the existence of an                      polynomials {pα,β }. The random plaintext polynomials
+    efficient simulator SimC such that V iewC ≈c SimC (A),                          are indistinguishable from {aα,β − uα,β } as {uα,β } are
+    where V iewC denotes the view of the client in the exe-                         uniformly random one-time pads in the plaintext ring
+    cution (the view includes the client’s input, randomness,                       RQ = ZQ [X]/(X N + 1). Therefore, {aα,β − uα,β } are
+    and the transcript of the protocol).                                            also uniformly random in RQ .
+
+                                                                           16
+ 3) The simulator receives the output E NCc (A · W) and
+    forwards it.
+
+
+    2) Threat Model and Security: In this work we assume a
+static semi-honest probabilistic polynomial time adversary A,
+who corrupts either the server S or the client C. The adversary
+A follows the protocol honestly. When A corrupts the server,
+it may try to learn the input of the client. When A corrupts
+the client, it tries to learn the model parameters. We adopt the
+definition of security from [44].
+   We summarize the correctness and security of our proposed
+protocol in definition 1.
+Definition 1. A protocol Π between S holding a model
+parameters M = (M1 , ..., Mℓ ) and C holding an input A
+is a secure inference protocol if it satisfies:
+  • Correctness. The output at the end of execution is the
+    correct inference result M(A).
+  • Security.
+    ◦ Corrupted client. There exists an efficient simulator
+      SimC such that V iewCΠ ≈c SimC (A, out), where
+      V iewCΠ denotes C’s view during the execution of Π (the
+      view includes the client’s input, randomness, and the
+      transcript of the protocol), and out denotes the output
+      of the inference.
+    ◦ Corrupted server. There exists an efficient simulator
+      SimS such that V iewSΠ ≈c SimS (M), where V iewSΠ
+      denotes S’s view during the execution of Π.
+
+     Proof: Π can be constructed by replacing the function
+with its secure implementations. The correctness derives di-
+rectly from the underlining algorithms. It follows that the
+privacy of Π is also achieved since only HE ciphertexts are
+exchanged.
+
+
+
+
+                                                                   17
+

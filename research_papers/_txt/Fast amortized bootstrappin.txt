@@ -1,0 +1,1794 @@
+            Fast amortized bootstrapping
+    with small keys and polynomial noise overhead
+
+               Antonio Guimarães1       and Hilder V. L. Pereira2
+                    1
+                        IMDEA Software Institute, Madrid, Spain
+      2
+          Institute of Computing, University of Campinas (UNICAMP), Brazil
+                           antonio.guimaraes@imdea.org
+                                 hilder@unicamp.br
+
+
+
+      Abstract. Most homomorphic encryption (FHE) schemes exploit a tech-
+      nique called single-instruction multiple-data (SIMD) to process several
+      messages in parallel. However, they base their security in somehow strong
+      assumptions, such as the hardness of approximate lattice problems with
+      superpolynomial approximation factor. On the other extreme of the spec-
+      trum, there are lightweight FHE schemes that have much faster boot-
+      strapping but no SIMD capabilities. On the positive side, the security
+      of these schemes is based on lattice problems with (low-degree) poly-
+      nomial approximation factor only, which is a much weaker security as-
+      sumption. Aiming the best of those two options, Micciancio and Sorrell
+      (ICALP’18) proposed a new amortized bootstrapping that can process
+      many messages at once, yielding sublinear time complexity per message,
+      and allowing one to construct FHE based on lattice problems with poly-
+      nomial approximation factor.
+      Some subsequent works on this line achieve near-optimal asymptotic per-
+      formance, nevertheless, concrete efficiency remains mostly an open prob-
+      lem. The only existing implementation to date (GPV23, Asiacrypt 2023)
+      requires keys of up to a hundred gigabytes while only providing gains for
+      relatively large messages. In this paper, we introduce a new method for
+      amortized bootstrapping where the number of homomorphic√       operations
+      required per message is O(h) and the noise overhead is O( hλ log λ),
+      where h is the Hamming weight of the LWE secret key and λ is the
+      security parameter. This allows us to use much smaller parameters and
+      to obtain faster running time. Our method is based on a new efficient
+      homomorphic evaluation of sparse polynomial multiplication. We boot-
+      strap 2 to 8-bit messages in 1.46 ms to 28.5 ms, respectively. Compared
+      to TFHE-rs, this represents a performance improvement of 2.5 to 38.7
+      times while requiring bootstrapping keys up to 47.5 times smaller.
+
+
+1    Introduction
+
+Fully homomorphic encryption (FHE) [Gen09] is a powerful cryptographic prim-
+itive that allows one to evaluate arbitrary functions on encrypted data. However,
+evaluating a function homomorphically is typically orders of magnitude slower
+than evaluating it in clear, especially due to the bootstrapping, which is by far
+2      Antonio Guimarães      and Hilder V. L. Pereira
+
+            O(1)                O (poly(n))                O (2n )
+
+
+                                                                         γ
+                             Known algorithms        Solved in poly(n)
+            NP-Hard
+                           run in exponential time     time by LLL
+
+
+Fig. 1. Hardness of approximate lattice problems, such as GapSVPγ , as the approxi-
+mation factor γ grows as a function of the lattice dimension, n.
+
+
+
+the most expensive operation in any FHE scheme. Thus, aiming to reduce the
+overhead of the homomorphic evaluation, many of the FHE schemes [BGV14,
+CKKS17, BBL17] can pack several messages into one ciphertext in such a way
+that each homomorphic operation operates on all the messages in parallel. This
+is known as single-instruction multiple data (SIMD) [SV14]. In particular, with
+those schemes, by evaluating one single bootstrapping, one refreshes many mes-
+sages, so that the amortized time complexity (number of operations required to
+evaluate the boostrapping divided by the number of messages) becomes more
+acceptable.
+    The most popular FHE schemes are constructed on top of the Learning With
+Errors (LWE) [Reg05] problem and its ring variant (RLWE) [LPR10], which are
+appealing because of the well-known worst-case to average-case reductions that
+allows us to base the security on lattice problems that where already believed to
+be hard even before the advent of homomorphic encryption. Roughly speaking,
+if one is able to solve in polynomial time LWE in dimension n, with modulus q,
+and discrete Gaussian errors with parameter σ, then one can solve hard problems
+like approximate shortest vector problem, GapSVPγ , in dimension n and with
+approximation factor γ = Õ(n · q/σ) [Reg05, BLP+ 13].
+    However, the noise overhead, that is, the noise introduced by the bootstrap-
+ping, or, in other words, the noise “inside” the ciphertexts output by the boot-
+strapping, is superpolynomial for those schemes. Basically, if the bootstrapping
+outputs ciphertexts with noise magnitude e, then one has to choose the cipher-
+text modulus q > e, thus, bootstrapping with larger noise overhead implies larger
+approximation factor γ for the underlying lattice problem basing the securing
+of scheme. However, as we increase γ, solving the approximate lattice problems,
+as GapSVPγ , becomes easier, therefore, supposing that GapSVPγ is hard in the
+worst-case becomes a stronger assumption as γ grows, as illustrated in Figure 1.
+Ideally, we would like to construct our schemes under weak assumptions. In
+summary, for BGV and CKKS, since the bootstrapping noise overhead is super-
+polynomial, q has to be superpolynomial, and thus, the approximation factor γ of
+the lattice problems is also superpolynomial (in the security parameter). When
+one constructs FHE based on NTRU instead of (R)LWE, this noise overhead is
+even more problematic, since there are already known algorithms to efficiently
+solve the NTRU problem with large q [ABD16, KF17, DvW21].
+    Hence, it is important to construct FHE with bootstrapping noise overhead
+just polynomially large (in the security parameter). To achieve this, Alperin-
+Sheriff and Peikert [AP14] used the GSW scheme [GSW13] to bootstrap a very
+Fast amortized bootstrapping with small keys and polynomial noise overhead          3
+
+simple LWE-based scheme which could only encrypt one bit. This line of research
+was further improved by the schemes FHEW [DM15] and TFHE [CGGI16],
+which, for the first time, were able to run the bootstrapping in less than one
+second. The time complexity of those bootstrapping algorithms, measured in
+number of GSW homomorphic operations, is Õ(λ), that is, quasilinear in the
+security parameter. Moreover, the noise overhead is just a low-degree polynomial.
+On the negative side, they can only refresh one message per bootstrapping, which
+means that, when evaluating a function homomorphically, one has to run the
+bootstrapping several times, and this can end up being slow.
+    Thereupon, Micciancio and Sorrell proposed the concept of amortized boot-
+strapping [MS18], which consists in refreshing O(λ) messages at once, but faster
+than running FHEW/TFHE bootstrapping O(λ) times and still having poly(λ)
+noise overhead3 . Subsequent works improved those results, reducing even fur-
+ther the amortized time complexity while maintaining polynomial noise over-
+head [GPvL23,DKMS24,LW23a,LW23b], however, they are not yet practical. In
+particular, to date, the only available implementation of this family of amortized
+bootstrapping [GPvL23] requires huge bootstrapping keys of up to a hundred
+gigabytes.
+    In this work, we use LWE and RLWE with sparse secrets to construct a
+practical amortized bootstrapping whose number of GSW homomorphic oper-
+ations per message is linear in the Hamming weight of the RLWE secret key,
+and has much smaller bootstrapping key when compared to [GPvL23], while
+having quasilinear noise overhead. Moreover, we provide an open-source public
+implementation showing that our amortized running times are up to 29.9 times
+faster than [GPvL23] and up to 38.7 times faster than TFHE-rs. These results
+are summarized in Table 1.
+
+
+1.1    Overview of existing amortized bootstrapping algorithms
+
+The sequence of works [AP14, DM15, CGGI16] introduced a shift in the boot-
+strapping paradigm existing at the time, from slow bootstrapping algorithms
+refreshing many messages at once and producing refreshed ciphertext with su-
+perpolynomial noise to much simpler and faster bootstrapping refreshing a single
+message. The general framework is organized in two layers: one is the LWE-based
+scheme whose ciphertexts must be refreshed and the other is the (ring) GSW
+scheme used to homomorphically evaluate the decryption circuit of the first
+scheme, that is, to bootstrap it.
+    Given an LWE ciphertext (a, b) ∈ Zn+1
+                                        q    encrypting some message m, the first
+step of the decryption circuit consists in computing the inner product between
+a and the secret s ∈ Zn , then subtracting it from b. Thus, the bootstrapping
+proceeds in a loop where at each iteration, the GSW scheme is used to generate
+an RLWE encryption of X −ai ·si , which is then accumulated so that at the end of
+the loop, one obtains an encryption of X b−a·s = X e+m , where e is the noise in the
+3
+    Notice
+          that
+              [LW23c] does not satisfy this definition, because its noise overhead is
+    Θ λlog(λ) , which is superpolynomial.
+4        Antonio Guimarães        and Hilder V. L. Pereira
+
+                Table 1: Functional bootstrapping with polynomial noise.
+
+                   Number of     Precision     Bootstrapping                 Time
+                   messagesa      (bits)         Key Size            Total      Amortized
+                                                            b
+                                     2           76.27MB            9.8ms           9.8ms
+    TFHE-rs                          4             52.1MB           13.6ms        13.6ms
+                       1
+    [Zam22]                          6            488.5MB          131.1ms       131.1ms
+                                     8             3.25GB            1.1s           1.1s
+    [GPvL23]          1024           7              63GB           14m30s         851ms
+                                     2             17.1MB            8.2s           4.0ms
+                      2048
+                                     4             18.4MB            8.8s           4.3ms
+    This work
+                                     6             16.9MB            36.2s          4.4ms
+                      8192
+                                     8             70.1MB           3m52s         28.5ms
+a
+  See results for fewer messages in Table 5
+b
+  Could be reduced to 12.7MB with seeded-LWE. All others parameters could only be
+  compressed up to a factor of 2
+: Failure probability ≈ 2−64 and λ ≈ 128 for all cases. Execution time includes all necessary
+  key switchings. See Section 7.2 for key switching key sizes of each implementation.
+
+
+
+
+input ciphertext. In other words, the linear part of the decryption is evaluated
+“in the exponent” of the indeterminate X. Finally, an extraction procedure maps
+this RLWE encryption of X e+m to an LWE encryption m. It is evident that this
+approach requires Õ(n) = Õ(λ) GSW homomorphic operations per message.
+     Then, Micciancio and Sorrel [MS18] proposed a packing algorithm to com-
+bine O(λ) LWE ciphertexts encrypting messages mi ’s into one single RLWE
+ciphertext encrypting all the O(λ) messages and to follow the LWE-GSW ap-
+proach, but with a RLWE ciphertext as input. However, the inner-product in
+the LWE decryption circuit is now a polynomial product, as RLWE samples are
+composed by pairs of polynomials. Thus, [MS18] proposed an algorithm to homo-
+morphically evaluate a DFT-like algorithm using GSW in such a way that, at the
+end, they obtained several ciphertexts encrypting messages of the form X ei +mi ,
+from which the extraction procedure could be applied and refreshed LWE cipher-
+texts encrypting the mi ’s could be produced. Their amortized bootstrapping has
+noise overhead Õ(λ2+3·ρ ) and requires Õ(3ρ · λ1+1/ρ ) GSW homomorphic oper-
+ations, where ρ is a parameter controlling the recursion depth of the DFT-like
+algorithm. Since it refreshes O(λ) messages at once, it only requires Õ(3ρ · λ1/ρ )
+GSW homomorphic operations per message, i.e., it has sublinear amortized time
+complexity.
+     This approach was further improved [GPvL23, DKMS24, LW23a, LW23b],
+still using the GSW scheme to evaluate some DFT-like algorithm, and the
+asymptotic cost per message is now only O(poly(log λ)). However, those amor-
+tized bootstrapping are still far from practical, as only one of them was ac-
+Fast amortized bootstrapping with small keys and polynomial noise overhead                5
+
+tually implemented [GPvL23] and ended up needing gigabytes of bootstrap-
+ping keys. The main limitation of this approach is the requirement for in-
+creased parameters to instantiate the GSW scheme, which brings a huge over-
+head to each homomorphic operation and to size of the bootstrapping key, as
+it is actually a list of GSW ciphertexts. Also, since performing computation
+in the exponent is implemented mainly with homomorphic multiplication (e.g.,
+Enc(X m1 ) · Enc(X m2 ) = Enc(X m1 +m2 )), we would like to use efficient homomor-
+phic multiplication, such as the external product [CGGI16, BIP+ 22]. However,
+because of their multiplicative depth, the DFT-like algorithms force us to use
+regular GSW multiplication, which means a logarithmic slowdown in practice.
+Instead, in our approach, we are able to just use external products and small
+parameters, therefore, having fast running time and small bootstrapping keys in
+practice.
+
+
+1.2    Overview of our contributions and techniques
+
+New GSW-friendly sparse-by-dense polynomial multiplication. Firstly,
+we propose a new algorithm that allows us to multiply, “in the exponent”, two
+polynomials a and s, where a is in clear, s is encrypted, has binary coefficients,
+and has Hamming weight4 h. This is a key piece of many bootstrapping algo-
+rithms, since it corresponds to evaluating the first part of the decryption circuit
+of RLWE-based schemes.
+    Let idx(s) be the set containing the degrees of nonzero coefficients of s and let
+⊙ represent a monomial-by-polynomial multiplication. Then, one can compute
+b − a · s as the summation of h monomial-by-polynomial multiplications:
+
+                                                             N
+                                                                              !
+                                X                  X         X
+                                           i                              i
+            b−a·s=b−a·                    X =b−                    ai X           ⊙ Xj   (1)
+                               i∈idx(s)           j∈idx(s)   i=0
+
+
+    It is clear that above equation can be computed in O(hN ) operations on
+cleartext. However, when the indexes j are encrypted, the situation is less clear.
+Considering this, we introduce the algorithm MPmul (Algorithm 1 in Section 3),
+for homomorphically evaluating monomial-by-polynomial multiplication (with
+messages in the exponent) in time O(N log B), where B is a bound for the
+degree of the monomial. This algorithm only requires external products and
+Galois Automorphisms and has noise overhead O(log B).
+    We also generalize this algorithm so that it can handle encrypted polynomials
+s with non-binary coefficients, that is, polynomials s with Hamming weight h
+and coefficients in {−ρ, ..., −1, 0, 1, ..., ρ}. This allows us to bootstrapping FHE
+schemes that use more general secret keys instead of simply binary ones.
+
+4
+    We define the Hamming weight of a polynomial as the number of nonzero coefficients
+    it has.
+6       Antonio Guimarães      and Hilder V. L. Pereira
+
+New decryption circuit compatible with our MPmul algorithm It is
+clear that Equation 1 could be evaluated homomorphically as
+                                  X
+                  b−a·s=b−             MPmul(a, Enc(X j ))  (2)
+                                     j∈idx(s)
+
+    Considering, for simplicity, B = N , this would result in an amortized boot-
+strapping with complexity O(hN log N ) homomorphic operations (i.e., O(h log N )
+per message). However, since all the values are encrypted “in the exponent”, the
+summation would actually require homomorphic multiplications, therefore, we
+would either have to use expensive RLWE-times-RLWE products or use GSW
+multiplication in our MPmul instead of external products so that we could
+perform another level of multiplications to evaluate the sum. It would also sig-
+nificantly increase the practical parameters, likely resulting in slightly better pa-
+rameters than [GPvL23] but still worse than [CGGI16] and [LMK+ 23]. To avoid
+this, we proceed as follows: Let j̃ = idx(s) be the set of exponents      of the nonzero
+coefficients of s. Checking again Equation 1, we see that b − j∈idx(s) a ⊙ X j can
+                                                                      P
+be rewritten as
+                                                                  
+                 b ⊙ X −j̃0 − a ⊙ X j̃0 −j̃1 − a ⊙ X j̃1 −j̃2 · · · − a ⊙ X j̃h
+
+Now, using MPmul, we have:
+                                                                   
+     MPmul . . . MPmul MPmul b, X −j̃0 − a, X j̃0 −j̃1 · · · − a, X j̃h
+
+    With this formulation, we no longer have to use GSW multiplications, and
+we can evaluate the bootstrapping entirely with external products, which are
+faster by a factor of Θ(log λ). In more detail, notice that all uses of MPmul
+are now nested with at least one operand (X j̃ ) being a fresh encryption, which
+can be then defined as the bootstrapping key. Moreover, all subtractions, al-
+though still implemented as multiplications, have at least one operand (the
+polynomial a) as a cleartext, thus not adding any noise nor requiring expensive
+ciphertext-ciphertext multiplication. Hence, we are able to evaluate the boot-
+strapping with O(hN log N ) external products. Moreover, noise and key size
+are only O(h log N ), enabling us to have use the same (or better) parameters
+as [CGGI16] and [LMK+ 23] while having smaller evaluation keys.
+    As a last adjustment to this base technique, notice that we are now always
+multiplying by a monomial with degree given by the difference of consecutive
+elements from (j̃0 , ..., j̃h−1 ) = idx(s) and it is easy to establish a high-probability
+bound B = O(N/h) for the values j̃i − j̃i+1 , allowing us to run MPmul in
+time O(N log (N/h)), reducing bootstrapping complexity to O(hN log (N/h))
+and both the noise overhead and the key size to O(h log (N/h)). We provide
+further detail in Sections 3 to 6.
+
+New packing algorithms exploiting low-Hamming weight secrets We
+propose a new algorithm to pack many LWE ciphertexts encrypting messages
+Fast amortized bootstrapping with small keys and polynomial noise overhead                                   7
+
+
+
+    [m1 ]
+                                                                       m +e 
+                                                       New             X 1 1                        [f1 (m1 )]
+      ..     ..    New                             homomorphic   ..       ..          Message .        ..
+       .
+                               P
+                                    mi · X   i
+                                                                               ..              .
+              .   packing                           polynomial    .        .     .   extraction .       .
+    [mn ]                                              mult.           mn +en 
+                                                                       X                            [fn (mn )]
+
+
+                  High noise                                                                        Low noise
+
+
+
+
+                  Fig. 2. Overview of our function amortized bootstrapping.
+
+
+mi ∈ Z under a secret      Pkey si with Hamming weight h into a single RLWE
+encryption of m(X) =         mi X , which can then be used as input of our homo-
+morphic decryption circuit. Our algorithm presents new time-noise tradeoffs, as
+it is possible to set its parameters so that it introduces more noise in the packed
+ciphertexts but runs faster.
+     Putting it all together, we are able to evaluate the bootstrapping over O(λ)
+messages at once, as illustrated in Figure 2. The process starts with high-noise
+LWE ciphertexts encrypting messages mi ∈ Zt and finishes with low-noise LWE
+ciphertexts encrypting fi (mi ), where fi are arbitrary functions from Zt to Zt .
+
+
+Proof-of-concept implementation and practical results We provide an
+open-source C implementation5 of our amortized functional bootstrapping al-
+gorithm for many message spaces. We compare our results to [GPvL23], the
+only public implementation of amortized bootstrapping to date, and to TFHE-
+rs [Zam22], the fastest implementation of non-amortized bootstrapping we are
+aware of. The practical results are summarized in Table 1. Firstly, we notice
+that our bootstrapping keys are much smaller, being 3 orders of magnitude
+less than the ones of [GPvL23] and even about 2 orders of magnitude less than
+TFHE-rs for some message spaces. Moreover, we obtained speedups of 29.9 times
+over [GPvL23] and up to 38.7 times for TFHE-rs.
+
+
+2          Preliminaries
+
+For any vector u, we denote the infinity norm by ∥u∥ and the Euclidean norm by
+∥u∥2 . The Hamming Weight of a vector u, represented by HamWeight(u), is the
+                                                                          Pd
+number of nonzero entries ui from u. For any polynomial a = i=0 ai · X i , we
+define the norm (and the Hamming weight) of a as the norm (and the Hamming
+weight) of the coefficient vector (a0 , ..., ad ). If a is an element of a polynomial ring
+like Z[X]/⟨f (X)⟩, we consider a′ ∈ Z[X] as the unique canonical representation
+of a (with degree less than the degree of f ), and thus the norm (and the Hamming
+weight) of a is simply the norm (and the Hamming weight) of a′ .
+5
+    Github: https://github.com/antoniocgj/Fast-Amortized-Bootstrapping.
+8       Antonio Guimarães        and Hilder V. L. Pereira
+
+    We use power-of-two cyclotomic rings of the form Z[X]/⟨X N + 1⟩, where
+N = 2k for some k ∈ N, which we denote by R. For any positive integer Q, we
+define RQ := R/(QR) i.e., the same ring as before but with coefficients of the
+elements reduced modulo Q.
+
+
+Probability distributions We denote by U(X) the uniform distribution over
+a finite set X and by x ← D we mean that s was sampled following the distri-
+bution D. The discrete Gaussian distribution        P with parameter σ and centered on
+c samples z ∈ Z with probability ρ(z)/( y∈Z ρ(y)), where ρ(x) = exp(−π(x −
+c)2 /σ 2 ). A random variable X is subgaussian with parameter σ > 0, in short σ-
+subgaussian, if for all t ∈ R it holds that E[exp(2πtX)] ≤ exp(πσ 2 t2 ). In this case,
+we also write X ∼ SG(E). The “tails” os subgaussians are bounded by a Gaussian
+function of standard deviation σ, that is ∀b ∈ R, Pr[|X| ≥ b] ≤ 2 exp(−πb2 /σ 2 ).
+From this, one canpbound the absolute value of         p X with overwhelming  p probability,
+since fixing b = σ λ/π, implies Pr[|X| ≥ σ λ/π] ≤ 2 exp(−π(s         p          λ/π)2 /s2 ) =
+                  −λ
+2 exp(−λ) < 2 . In other words, |X| is less than σ λ/π with probability
+at least 1 − 2−λ . Linear combinations of independently distributed subgaus-
+sians are again subgaussians, i.e., given independent σi -subgaussian           Pn distribu-
+                                                        n
+tions Xi ’s, then for any u    =
+                             pPn (u 1 , ..., u  n ) ∈ R   , it holds that  Z :=  i=1 ui Xi is
+σ-subgaussian with σ =                 c 2 σ 2 . In particular, if all σ are equal to some
+                                  i=1 i i             √                  i       √
+σ̂, then, σ = σ̂ · ∥c∥2 . Also, since ∥c∥2 ≤ n · ∥c∥∞ , we have σσ̂ · n · ∥c∥∞ .
+We say that a polynomial a is σ-subgaussian if its coefficients are independent
+σi -subgaussian, with σi ≤ σ. For any n ∈ N∗ , given f equal to X n ± 1 and
+two polynomials a and b of degree less than n following subgaussians with pa-
+rameters
+ √           σa and σb , we can see that for c = a · b mod f , each coefficient ci is
+( n · σa · σb )-subgaussian,
+                √              but the ci ’s are not necessarily independent, thus, to
+say that c is ( n · σa · σb )-subgaussian, we use the independence heuristic, which
+is commonly to simplify analysis of FHE schemes [CGGI16, CGGI17, BIP+ 22].
+
+
+Independence heuristic All the coefficients of the noise terms of the RLWE
+samples appearing in the linear combinations we consider are assumed to be
+independent and concentrated. In more detail, they follow σ-subgaussian, where
+σ 2 is their variance.
+
+
+Variants of LWE The learning with errors problem [Reg05] with parameters
+n, q, and σ, denoted LWEn,m,q,σ , an attacker has to find a secret vector s ←
+U(Znq ) given up to m samples of the form (ai , bi ), where ai is uniform in Znq and
+bi := ai · s + ei mod q, with ei following a discrete Gaussian distribution with
+parameter σ.
+    In the ring version of LWE, known as RLWEN,m,q,σ [LPR10], we fix the ring
+R = Z[X]/⟨X N + 1⟩ and a secret polynomial s ← U(Rq ). Then, an attacker is
+given up to m samples of the form (ai , bi ), where ai is uniformly sampled from
+Rq and bi := ai · s + ei ∈ Rq , for some small noise term ei following a discrete
+Gaussian distribution with parameter σ, and the attacker has to find s.
+Fast amortized bootstrapping with small keys and polynomial noise overhead             9
+
+     Both RLWE and LWE problems also have decision versions, where the at-
+tacker has to distinguish the samples (ai , bi ) from (ai , ui ) where ui is uniformly
+distributed. Moreover, both problems are often instantiated with a secret hav-
+ing a known Hamming weight. Following [CHK+ 17], we define Sn,h,r := {u ∈
+Zn : HamWeight(u) = h and ∥u∥∞ ≤ r}, i.e., the set of vectors with Ham-
+ming weight h and entries in the interval J−r, rK, and we use spLWEn,m,q,σ,r,h to
+denote LWEn,m,q,σ , but with secret s sampled uniformly from Sn,h,r instead of
+Znq . Analogously, we define spRLWEn,m,q,σ,r,h as the sparse-secret RLWE (that
+is, with secret polynomial s having its coefficient vector sampled from SN,h,r ).
+
+2.1     LWE and RLWE encryption schemes
+We define the set of LWE encryptions of a message m ∈ Zt , where t ≥ 2, under
+a secret key s ∈ Zn , with E-subgaussian noise and scaling factor ∆ ∈ Z as
+
+      LWEqs (∆m, E) = {(a, b) ∈ Zn+1
+                                 q   : b = [as + e + ∆ · m]q and e ∼ SG(E)}
+
+   For a power-of-two cyclotomic polynomial R, the set of RLWE ciphertexts
+encrypting a message m ∈ R, with scaling factor ∆ ∈ N, under a secret key s,
+and with E-subgaussian noise is
+
+      Rq LWEs (∆m, E) := {(a, b) ∈ R2q : b = [as + e + ∆ · m]q and e ∼ SG(E)}
+
+     In both cases, the decryption is done by multiplying the term a (or a) by
+the secret key and subtracting it from b modulo q, which produces e′ = e + ∆ ·
+m mod q, then outputting ⌊e′ /∆⌉ mod t. If ∥e + ∆ · m∥ < q/2 and ∥e∥ < q/(2t),
+then the decryption correctly outputs m mod t.
+     We also briefly describe the ring variant of the GSW scheme [GSW13] pre-
+sented in [DM15]. By fixing a decomposition base β and a gadget vector g =
+(β 0 , β 1 , ..., β ℓ−1 ), where ℓ := ⌊logβ (q)⌋+1, the set of GSW ciphertexts encrypting
+a message m ∈ R, under a secret key s, and with E-subgaussian noise is
+
+        Rq GSWℓs (m, E) := {[a, a · s + e] + m · g ⊗ I2 ∈ Rq2ℓ×2 : e ∼ SG(E)}
+
+   At last, we also define the set of key-switching keys from a key s to a key
+z, with E-subgaussian noise. For this, consider a decomposition base βksk and
+                                                                0      1           ℓ−1
+a modulus q, then define ℓksk := ⌊logβksk (q)⌋ + 1 and gksk = (βksk , βksk , ..., βksk ).
+Then, this set is defined as
+
+        Rq KSβksk (s  z, E) := {[a, a · z + e + s · gksk ] ∈ Rqℓksk ×2 : e ∼ SG(E)}
+
+Common homomorphic operations In this section, we describe in a high-
+level the homomorphic operations we will use in our boostrapping algorithms.
+
+ – FHE.Add: homomorphically add two ciphertexts of the same type, e.g., maps
+   (c0 , c1 ) ∈ Rp
+                 q LWEs (m0 , E0 )×Rq LWEs (m1 , E1 ) to c ∈ Rq LWEs (m0 + m1 , E)
+   where E ≤ E02 + E12 .
+10      Antonio Guimarães        and Hilder V. L. Pereira
+
+ – FHE.ModSwt: Given ĉ ∈ LWEQ                                                 q
+                                   s (⌊Q/t⌉·m, Ê) and q ∈ N, output c ∈ LWEs (⌊q/p⌉·
+                   2                2           2
+   m, E), with E ≤ (Ê · (q/Q)) + (∥s∥2 /2) .
+ – FHE.KeySwt: Given ĉ ∈ LWEqs (m, Ê), and a key-switching key ksk from s ∈
+   ZN to z ∈ Zn , output c ∈ LWEqz (⌊q/p⌉ · m, E), with E 2 ≤ Ê 2 + n · logβksk (q) ·
+    2      2
+   βksk · Eksk , where βksk is the decomposition base of ksk. There are also key-
+   switching procedures for RLWE ciphertexts.
+                                                                      ℓ
+ – FHE.ExtProd: given c0 ∈ Rq LWEs (∆·m0 , E0 ) and   qC1 ∈ Rq GSWs (m1 , E1 ), it
+                                                                                           2
+   outputs c ∈ Rq LWEs (∆·m0 ·m1 , E) where E ≤ ℓN · β 2 · E12 + ∥m1 ∥2 · E02 ,
+   where β is the decomposition base.
+   Although the external product multiplies the messages, it is often use to add
+   them “in the exponent”, that is, instead of encrypting mi ∈ Z, one encrypts
+   X mi . Then, external products produces encryptions of X mi +mj .
+ – FHE.Automorphism: Given ĉ ∈ Rq LWEs (m, Ê), odd integer k ∈ J1, 2N K,
+   and ksk ∈ Rq KSβksk (s  s(X k ), Eksk ), output c ∈ Rq LWEs (m(X k ), E), with
+   E 2 ≤ Ê 2 + N · logβksk q · βksk
+                                 2      2
+                                     · Eksk .
+
+2.2   Test vectors and extraction
+Now, we describe the well-known technique to “extract” the message from the
+exponent of X to constant coefficient [CGGI16, CIM19]. The RLWE sample we
+obtain at the end of the main loop of the bootstrapping, which encrypts some-
+thing of the form X e+⌊2N/p⌉m , can be converted to an RLWE sample encrypting a
+polynomial u(X) whose coefficient u0 is equal f (m), for any function f : Np/2 →
+                                                      PN −1     ip
+Np/2 . To do so, we define the polynomial t(X) = − i=0 f (⌊ 2N     ⌋)X N −i , then,
+              e+⌊2N/p⌉m          N
+u = t(X) · X             mod X + 1 has the desired property, u0 = f (m). If f is
+public, we then define its corresponding test vector as t := (0, ∆ · t(X)) ∈ R2 ,
+which is a trivial and noiseless RLWE ciphertext. Otherwise, we actually encrypt
+t(X), obtaining t = Rq LWEs (∆ · t(X)).
+    Moreover, given c = Rq LWEs (∆ · u, E), one can extract ĉ ∈ LWEqs (∆ · u0 , E)
+for free, thus, obtaining an LWE encryption of m.
+
+
+3     Homomorphic multiplication of monomial and
+      polynomial
+In this section, we present an algorithm that homomorphically performs the mul-
+tiplication u·Y v mod Y n +1, where u is an arbitrary polynomial in Z[Y ]/⟨Y n +1⟩,
+v is an integer between 0 and n, and both are encrypted. Notice that multiplying
+by Y v means that we want to rotate the coefficients of u by v and multiply v of
+them by −1, as follows
+       (u0 , u1 , ..., un−1 ) 7→ (−un−v , −un−v+1 , ..., −un−1 , u0 , u1 , ..., un−v−1 )
+                                  |          {z              }
+                                       negate v positions
+
+     By starting with a list of ciphertext ci ∈ Rq LWEs (X ui ) encrypting the coef-
+ficients of u (in the exponent), we could simply rotate the list of ci ’s itself and
+Fast amortized bootstrapping with small keys and polynomial noise overhead                11
+
+multiply some of them, however, since we do not know the value of v, performing
+this rotation in not trivial.
+     Our solution is as follows. Let’s say we can homomorphically multiply by
+      i
+Y vi 2 where vi ∈ {0, 1}, then we can multiply by Y v by sequentially multiplying
+         0         1                L
+by Y v0 2 , Y v1 2 , ..., and Y vL 2 , where (v0 , v1 , ..., vL ) is the binary decomposition
+                                     i
+of v. But multiplying by Y vi 2 is the same as evaluating the following function:
+                               (
+                                 (u0 , u1 , ..., un−1 )                       if vi = 0
+         f (u0 , ..., un−1 ) =
+                                 (−un−2i , ..., −un−1 , u0 , ..., un−2i −1 ) if vi = 1
+
+Now, notice that the number of elements that have to be multiplied by −1 is
+2i , where i is known, in other words, we know exactly which elements have
+to negated (the first 2i ) and which only have to be rotated. Also, since the
+homomorphic CMUX [CGGI16] allows us to perform two different computations
+depending on an encrypted bit, we can differentiate the two scenarios. In more
+detail, given Ci ∈ Rq GSWℓs (vi ), then for 2i ≤ j ≤ n − 2i − 1, it is enough to
+evaluate                                    
+                           ĉj ← cj−2i − cj  Ci + cj .
+One can see that if vi = 0, then ĉj = cj , i.e., no rotation is performed, and if
+vi = 1, then ĉj = cj−2i , that is, a rotation by 2i is performed, as expected. And
+for the first 2i positions, we can use the same CMUX, but we first apply the
+automorphism X 7→ X −1 so that the value we obtain is either an encryption
+of X uj itself (when bi = 0) or an encryption of X −un−2i +j , that is, both the
+rotation by 2i and the negation happens. In more detail, for 0 ≤ j ≤ 2i , we can
+evaluate
+                                                             
+              ĉj ← FHE.Automorphism(cn−2i +j , −1) − cj  Ci + cj
+
+    This shows how we can obtain the list (ĉ0 , ..., ĉn−1 ) representing the encryp-
+                   i
+tion of u · Y vi ·2 mod Y n + 1. Hence, we just need to repeat this procedure for
+0 ≤ i ≤ L, where L is any upper bound on the number of bits of v (for instance,
+one could set L = ⌊log n⌋+1). This gives us the full homomorphic multiplication,
+which is shown in detail in Algorithm 1, MPmul.
+    To analyze the noise growth, we can focus on line 3, as it introduces more
+noise than line 5. Suppose that at the i-th iteration, we have a list of RLWE
+ciphertexts (c0 , ..., cn−1 ) with subgaussian noise with parameter Ei , a GSW ci-
+phertext with whose noise is EG -subgaussian, and a key-switching key with Ek -
+subgaussian noise. Then, from the description of the external product and the au-
+tomorphismqin Section 2.1, after the automorphism we have Ẽ-subgaussian noise
+with Ẽ ≤ Ei2 + N · logβksk q · βksk   2 · E 2 , where β
+                                              k           ksk is the decomposition base
+used to key switch. q   Thus, after the external product, we have Ei+1 -subgaussian
+                                                   q
+noise where Ei+1 ≤ ℓN β 2 EG      2 + |b |Ẽ 2 ≤    ℓN β 2 EG2 + N log          2    2    2
+                                         i                             βksk (q)βksk Ek + Ei .
+Hence,
+q        after log B iterations, the output has noise with parameter Eout ≤
+                     2 + N log           2     2
+                                                    2
+   (log B) ℓN β 2 EG            βksk (q)βksk Ek + E0 . This gives us the following lemma.
+12       Antonio Guimarães      and Hilder V. L. Pereira
+
+
+    Algorithm 1: Monomial-times-polynomial multiplication (MPmul)
+   Input : a list ci ∈ Rq LWEz (X ui ) for 0 ≤ i < n representing a polynomial
+                 u(Y ) encrypted in the exponent
+   Input : P     a list Ci ∈ Rq GSWℓz (vi ) for 0 ≤ i < log B where vi ∈ {0, 1} and
+                    log B−1
+                    i=0     vi 2i = v < B
+   Input : a key ksk ∈ Rq KSβksk (z(X −1 )  z, Eksk ) for the automorphism
+   Output: a list ci ∈ Rq LWEz (X wi ) for 0 ≤ i < n representing an encryption
+                 of a polynomial w(Y ) such that w = u · Y v mod (Y n + 1)
+ 1 for 0 ≤ i ≤ log B − 1 do
+                                                 i
+       /* For each i, multiply by Y vi 2 mod Y n + 1                                */
+ 2     for 0 ≤ j < 2i do                                      
+ 3          ĉj ← FHE.Automorphism(cn−2i +j , −1) − cj  Ci + cj
+               i                i
+ 4     for 2 ≤ j < n − 2 do        
+ 5          ĉj ← cj−2i − cj  Ci + cj
+ 6     (c0 , ..., cn−1 ) ← (ĉ0 , ..., ĉn−1 )
+ 7 return (c0 , ..., cn−1 )
+
+
+
+
+Lemma 3.1 (Noise overhead of MPmul). Let ci ∈ Rq LWEz (X ui , E0 ) and
+Cj ∈ Rq GSWℓz (vj , EG ) be the input ciphertexts of Algorithm 1. Also, consider
+that input key-switching key is ksk ∈ Rq KSβksk (z(X −1 )  z, Eksk ) and let ℓksk :=
+⌊logβksk q⌋ + 1. Then, the output ciphertexts have Eout -subgaussian noise with
+                         q
+                Eout ≤                        2 + Nℓ
+                             (log B) (ℓN β 2 EG          2    2        2
+                                                    ksk βksk Eksk ) + E0
+
+
+
+
+4     Homomorphically multiplying the secret key
+
+In this section, we describe three different ways of using our algorithm MPMul
+to perform the main step of the decryption that has to be evaluated homo-
+morphically during the bootstrapping. To avoid confusion, we use ring R :=
+Z[X]/⟨X N + 1⟩ for the bootstrapping key and the ring RY := Z[Y ]/⟨Y n + 1⟩
+for the input ciphertext. Basically, the homomorphic computation is performed
+in the exponent of X, but we are evaluating functions on RY .
+    Thus, consider that we have an RLWE ciphertext (a(Y ), b(Y ) = a(Y )·s(Y )+
+e(Y ) + m(Y )), defined modulo Y n + 1 and a bootstrapping key encrypting the
+h nonzero coefficients of s(Y ) in some way. Then, we would like to compute
+p(Y ) := b(Y ) − a(Y )s(Y ) mod Y n + 1 in the exponent, that is, to obtain cipher-
+texts encrypting X pi . From this, we can use standard techniques to extract the
+message from the exponent, generating LWE samples.
+    Define j̃ = idx(s) as the sequence of exponents of the nonzero coefficients of
+s. For instance, if s(Y ) = 1 − 1 · Y 5 + 1 · Y 7 , then j̃ = (0, 5, 7). Also, define
+d := diff(s) ∈ J−n, nKh+1 as d[0] = −j̃0 , d[h] = −j̃h−1 , and d[i] = j̃i−1 − j̃i for
+1 ≤ i ≤ h − 1.
+Fast amortized bootstrapping with small keys and polynomial noise overhead                  13
+
+
+ Algorithm 2: Subtract a·s when s is a binary sparse secret (bin-SAB)
+   Input : an RLWE ciphertext (a, b) ∈ R2Y encrypting m(Y ) = n                     i
+                                                                          P
+                                                                           i=0 mi Y
+             under a key s with noise e. For 0 ≤ i < n, ai , bi ∈ Z2N
+   Input : GSW ciphertexts encrypting the binary decomposition of
+             d := diff(s), as required by MPmul,
+                                               P i.e.,     Ci,j ∈ Rq GSWℓz (di,j ) for
+             0 ≤ i ≤ h, 0 ≤ j < log B, where log  j=0
+                                                     B−1
+                                                           di,j 2j = d[i]
+                                   βksk   −1
+   Input : a key ksk ∈ Rq KS (z(X )  z, Eksk ) for the automorphism
+   Input : test vectors t0 , ..., tn−1 encoding LUTs as polynomials ti (X)
+   Output: a list ci ∈ Rq LWEz (ti (X) · X mi +ei ) for 0 ≤ i < n.
+                                                             b
+ 1 Let c := (c0 , ..., cn−1 ) where ci = FHE.MultPtxt(ti , X i )
+ 2 for 0 ≤ i ≤ h − 1 do
+       /* Multiply by X d[i]                                                           */
+ 3     Let C = (Ci,1 , ..., Ci,log n−1 )
+ 4     c ← MPmul(c, C, ksk)
+       /* Subtract a(Y )                                                               */
+ 5     for 0 ≤ k ≤ n − 1 do
+ 6         ck ← FHE.MultPtxt(ci , X −ak )
+ 7     c ← (c0 , ..., cn−1 )
+ 8 Let C = (Ch,1 , ..., Ch,log n−1 )
+ 9 c ← MPmul(c, C, ksk)
+10 return c
+
+
+
+
+4.1   Bootstrapping with binary secrets
+
+                      P the simplest case where s has binary coefficients. Define
+Firstly, let’s consider
+r := b − a · s = b − j∈idx(s) a ⊙ Y j . Then, we have
+                                                             
+           r=       b ⊙ Y d[0] − a ⊙ Y d[1] − a ⊙ Y d[2] · · · − a ⊙ Y d[h]   (3)
+
+Now, using MPmul, we have:
+                                                                
+     MPmul . . . MPmul MPmul b, Y d[0] − a, Y d[1] · · · − a, Y d[h]
+
+    Notice that since a is a known polynomial, subtracting it means that we
+can simply multiply each RLWE ciphertext ci returned by MPmul by X −ai ,
+which is almost for free and does not increase the noise of the ciphertexts. This
+gives us Algorithm 2, which takes as input the values d[i] decomposed into bits
+and encrypted as GSW ciphertexts, as required by MPmul, and the RLWE
+ciphertext to be refreshed, i.e., (a(Y ), b(Y )) ∈ R2Y such that b = a · s + e +
+m mod Y n + 1, then computes a list of RLWE ciphertexts encrypting u :=
+b−a·s mod Y n +1 in the exponent. As an optimization for the moment it is used
+in the functional bootstrapping, it also receives test vectors ti representing look-
+up-tables, which are combined with the product. Thus, instead of just outputting
+a list of encryptions of X ui , Algorithm 2 outputs encryptions of ti (X) · X ui .
+Lemma 4.1 (Correctness, noise growth and complexity of bin-SAB).
+Let the input of Algorithm 2 be (a(Y ), b(Y )) ∈ R2Y , ksk ∈ Rq KSβksk (z(X −1 ) 
+14      Antonio Guimarães       and Hilder V. L. Pereira
+
+z, Eksk ), Ci,j ∈ Rq GSWℓz (di,j , EG ), and ti ∈ Rq LWEz (ti (X), ET ), where ti are
+possibly trivial RLWE samples and b(Y ) = a(Y )·s(Y )+e(Y )+m(Y ) mod ⟨Y n +
+1, 2N ⟩ for some secret key s with Hamming weight h and coefficients in {0, 1}.
+    Then, the output satisfies ci ∈ Rq LWEs (ti (X) · X mi +ei , Eout ) where
+                     q
+            Eout ≤                               2 + Nℓ
+                         (h + 1)(log B) (ℓN β 2 EG          2    2        2
+                                                       ksk βksk Eksk ) + ET
+
+
+Moreover, the time complexity is O(h · n · log B) external products.
+
+Proof. Correctness follows trivially from Equation (3), since each call to MPmul
+multiplies the accumulator by Y d[i] and the inner loop subtracts a(Y ) in the
+exponent.
+    Also, since MPmul executes O(n log B) external products (and some au-
+tomorphisms, which have essentially the same time complexity as an external
+product), it is easy to see that claimed time complexity holds.
+    Now, from the noise growth of the homomorphic operations shown in Sec-
+tion 2.1, we see that the multiplications by plaintext do not increase the noise,
+since ∥X −ai ∥2 = X −bi 2 = 1. Thus, only the calls to MPmul change the
+noise. But from Lemma 3.1, considering that the i-th call to MPmul has RLWE
+samples with Ei -subgaussian noise and GSW ciphertexts with EG -subgaussian
+noise, we can see that the output has Ei+1 -subgaussian noise where
+                        q
+                Ei+1 ≤ (log B) (ℓN β 2 EG 2 + Nℓ      2    2        2
+                                                 ksk βksk Eksk ) + Ei
+
+
+therefore, since E0 = ET , the last call to MPmul, when i = h, gives us
+                    q
+            Ei+1 ≤ (h + 1)(log B) (ℓN β 2 EG 2 + Nℓ     2    2        2
+                                                   ksk βksk Eksk ) + ET
+
+
+
+
+4.2   Bootstrapping with ternary secrets
+
+Now let’s move to a widely used case, when the RLWE has fixed Hamming
+weight, h, and coefficients sampled fromP {−1, 0, 1}. Then, defining j̃ := idx(s),
+d := diff(s), and r := b − a · s = b − j∈idx(s) (asj ) ⊙ Y j as in Section 4.1, we
+can write
+                                                               
+         r=      b ⊙ Y d[0] − asj̃0 ⊙ Y d[1] − asj̃1 · · · − asj̃h−1 ⊙ Y d[h]   (4)
+
+    The only difference when compared to Equation 3 is that we do not simply
+subtract a all the time. When the coefficient sj̃i is −1, we have to add a instead
+of subtracting it. To achieve this, we include as input another encrypted control
+bit which is 1 if sj̃i = 1 and 0 otherwise. Then, by using this control bit, we use
+a CMux to select between FHE.MultPtxt(ci , X −ai ) and FHE.MultPtxt(ci , X ai ).
+We show this in detail in Algorithm 3.
+Fast amortized bootstrapping with small keys and polynomial noise overhead                  15
+
+
+ Algorithm 3: Ternary Sparse Amortized Bootstrapping (tern-SAB)
+   Input : an RLWE ciphertext (a, b) ∈ R2Y encrypting m(Y ) = n                     i
+                                                                          P
+                                                                           i=0 mi Y
+             under a key s with noise e. For 0 ≤ i < n, ai , bi ∈ Z2N
+   Input : GSW ciphertexts encrypting the binary decomposition of
+             d := diff(s), as required by MPmul,
+                                               P i.e.,     Ci,j ∈ Rq GSWℓz (di,j ) for
+             0 ≤ i ≤ h, 0 ≤ j < log B, where log  j=0
+                                                     B−1
+                                                           di,j 2j = d[i]
+                                   βksk   −1
+   Input : a key ksk ∈ Rq KS (z(X )  z, Eksk ) for the automorphism
+   Input : test vectors t0 , ..., tn−1 encoding LUTs as polynomials ti (X)
+   Input : encrypted control bits Vi ∈ Rq GSWℓz (bi ) for 1 ≤ i ≤ h where bi = 1
+             if sj̃i = 1 and bi = 0 otherwise
+   Output: a list ci ∈ Rq LWEz (ti (X) · X mi +ei ) for 0 ≤ i < n.
+                                                             b
+ 1 Let c := (c0 , ..., cn−1 ) where ci = FHE.MultPtxt(ti , X i )
+ 2 for 0 ≤ i ≤ h − 1 do
+       /* Multiply by X d[i]                                                           */
+ 3     Let C = (Ci,1 , ..., Ci,log n−1 )
+ 4     c ← MPmul(c, C, ksk)
+       /* Subtract or add a(Y )                                                        */
+ 5     for 0 ≤ k ≤ n − 1 do
+ 6         p ← FHE.MultPtxt(ck , X −ak )
+ 7         z ← FHE.MultPtxt(ck , X ak )
+ 8         ck ← (p − z)  Vk + z
+ 9     c ← (c0 , ..., cn−1 )
+10 Let C = (Ch,1 , ..., Ch,log n−1 )
+11 c ← MPmul(c, C, ksk)
+12 return c
+
+
+
+
+Lemma 4.2 (Correctness, noise growth and complexity of tern-SAB).
+Consider an execution of Algorithm 3 with this input: (a(Y ), b(Y )) ∈ R2Y , Ci,j ∈
+Rq GSWℓz (di,j , EG ), ti ∈ Rq LWEz (ti (X), ET ), ksk ∈ Rq KSβksk (z(X −1 )  z, Eksk ),
+and Vi ∈ Rq GSWℓz (bi , EG ), where ti are possibly trivial RLWE samples and
+b(Y ) = a(Y ) · s(Y ) + e(Y ) + m(Y ) mod ⟨Y n + 1, 2N ⟩ for some secret key s with
+Hamming weight h and coefficients in {0, 1}, bi ∈ {0, 1}, and bi = 1 ⇔ j̃i = 1.
+   Then, the output ciphertexts ci satisfy ci ∈ Rq LWEs (ti (X) · X mi +ei , Eout )
+where
+            q
+      Eh ≤ hℓN β 2 EG     2 + (h + 1)(log B) (ℓN β 2 E 2 + N ℓ     2    2        2
+                                                       G      ksk βksk Eksk ) + ET
+
+Moreover, the time complexity is O(h · n · log B) external products.
+Proof. The proof is almost the same as Lemma 4.1.
+     Correctness follows from Equation 4 and from the fact that line 8 subtracts
+sj̃k · ak , as expected, since sj̃k = 1 implies Vk encrypting 1, which means that
+ck · X −ak is selected, otherwise, Vk encrypts 0 and ck is updated to z = ck · X ak .
+     Also, it only performs hn additional external products (line 8) compared
+to Algorithm 2, thus, the time complexity is O(hn log B + hn) = O(hn log B)
+external products.
+16      Antonio Guimarães      and Hilder V. L. Pereira
+
+   As for the noise, consider that at the i-th iteration, the vector c has ci-
+phertexts
+p          with Ei -subgaussian noise. After executing MPmul we have Ê ≤
+                   2 + Nℓ
+  (log B) (ℓN β 2 EG          2     2         2
+                         ksk βksk Eksk ) + Ei . The calls to FHE.MultPtxt do not in-
+                                         −ak
+                          ak
+crease the noise since ∥X ∥2 = ∥X            ∥2 = X −bi 2 = 1. Then, the external
+product in line 8 yields
+                   q
+         Ei+1 ≤ ℓN β 2 EG  2 + b · Ê 2
+                                  k
+                   q
+               ≤ ℓN β 2 EG 2 + (log B) (ℓN β 2 E 2 + N ℓ        2    2        2
+                                                  G        ksk βksk Eksk ) + Ei
+
+Thus, after h iterations, we have
+               q
+         Eh ≤ hℓN β 2 EG   2 + h(log B) (ℓN β 2 E 2 + N ℓ     2    2        2
+                                                 G       ksk βksk Eksk ) + Ei
+
+and the final call to MPmul gives us
+                       q
+                                       2 + Nℓ
+               Eout ≤ (log B) (ℓN β 2 EG          2    2        2
+                                             ksk βksk Eksk ) + Eh
+
+which is the claimed bound since E0 = ET .
+
+4.3   Bootstrapping with general sparse secrets
+Finally, let’s consider a more general case where the RLWE secret has h nonzero
+coefficients, all sampled from J−ρ, ρK, where ρ is any integer larger than or equal
+to 1. As in Section 4.1, define j̃ := idx(s) and d := diff(s). Then, we can write
+b − a · s exactly as in Equation 4, but with sj̃1 ∈ J−ρ, ρK.
+     To evaluate this equation efficiently, we could use MPmul to perform the
+multiplications by Y d[i] , then homomorphically subtract asj̃i . For the subtrac-
+tion, we could have GSW ciphertexts encrypting X sj̃i , use GSW automor-
+phism [GPvL23] to obtain GSW encryptions of X −ak sj̃i for each coefficient ak
+of a, then use external products to accumulate X −ak sj̃i , effectivelly subtracting
+asj̃i in the exponent. However, one GSW automorphism costs essentially the
+same as O(log λ) regular RLWE automorphisms.
+     Thus, we evaluate this formula differently, using two RLWE automorphisms,
+                                                                                 −1
+as proposed in [BDF18]. Firstly, we apply the automorphisms X 7→ X −ak ,
+for each coefficient ak , to the RLWE ciphertexts output by MPmul. Then, we
+multiply by Y j̃i using external product. Finally, we apply the automorphisms
+X 7→ X −ak . This can be viewed as starting with some polynomial u(Y ) (with
+coefficients encrypted in the exponent of X), then obtaining a new polynomial
+v(Y ) where each coefficient vi equals −ui · a−1i  mod 2N , then computing v(Y ) +
+        j̃i
+sj̃i · Y (with n external products), and finally using the second automorphism
+to obtain w(Y ) with coefficients wi = −vi · ai − ai · sj̃i = ui − ai · sj̃i .
+     Hence, with one external product and two RLWE automorphisms per coef-
+ficient instead of one GSW automorphism per coefficient, we are able to homo-
+morphically subtract a(Y ) · sj̃i , as required in Equation 4. Then, multiplying by
+Y d[i] is performed as before, using MPmul. This gives us Algorithm 4.
+Fast amortized bootstrapping with small keys and polynomial noise overhead                   17
+
+
+ Algorithm 4: General Sparse Amortized Bootstrapping (ρ-SAB)
+   Input : an RLWE ciphertext (a, b) ∈ R2Y encrypting m(Y ) = n                     i
+                                                                          P
+                                                                           i=0 mi Y
+             under a key s with noise e. For 0 ≤ i < n, ai , bi ∈ Z2N and ai is odd
+   Input : GSW ciphertexts encrypting the binary decomposition of
+             d := diff(s), as required by MPmul, P i.e.,   Ci,j ∈ Rq GSWℓz (di,j ) for
+             0 ≤ i ≤ h, 0 ≤ j < log B, where log       B−1
+                                                     j=0   di,j 2j = d[i]
+                                                βksk     i
+   Input : key-switching keys kski ∈ Rq KS (z(X )  z, Eksk ) for the
+             automorphism X 7→ X i for i ∈ {1, 3, 5, ..., 2N − 1}
+   Input : test vectors t0 , ..., tn−1 encoding LUTs as polynomials ti (X)
+                                                                                      s
+   Input : coefficients of s encrypted in the exponent, i.e., Vi ∈ Rq GSWℓz (X j̃i )
+             for 0 ≤ i ≤ h − 1
+   Output: a list ci ∈ Rq LWEz (ti (X) · X mi +ei ) for 0 ≤ i < n.
+                                                             b
+ 1 Let c := (c0 , ..., cn−1 ) where ci = FHE.MultPtxt(ti , X i )
+ 2 for 0 ≤ i ≤ h − 1 do
+       /* Multiply by X d[i]                                                            */
+ 3     Let C = (Ci,1 , ..., Ci,log n−1 )
+ 4     c ← MPmul(c, C, ksk)
+       /* Subtract a(Y ) · sj̃i                                                         */
+ 5     for 0 ≤ k ≤ n − 1 do
+ 6         y ← FHE.Automorphism(ck , −a−1    k )
+ 7         w ← y  Vi
+ 8         ck ← FHE.Automorphism(w, −ak )
+ 9     c ← (c0 , ..., cn−1 )
+10 Let C = (Ch,1 , ..., Ch,log n−1 )
+11 c ← MPmul(c, C, ksk)
+12 return c
+
+
+
+
+   As a technicality, the automorphisms X 7→ X k are only defined for odd k.
+Therefore, in Algorithm 4, we assume that all input coefficients ai are odd. This
+can be achieved with little noise growth using modulus switching [LMK+ 23].
+
+Lemma 4.3 (Correctness, noise growth and complexity of ρ-SAB).
+Consider Algorithm 4 with the following input: (a(Y ), b(Y )) ∈ R2Y , kski ∈
+Rq KSβksk (z(X i )  z, Eksk ), Ci,j ∈ Rq GSWℓz (di,j , EG ), Vi ∈ Rq GSWℓz (X sj̃i , EG ),
+and ti ∈ Rq LWEz (ti (X), ET ), where ti are possibly trivial RLWE samples,
+b(Y ) = a(Y ) · s(Y ) + e(Y ) + m(Y ) mod ⟨Y n + 1, 2N ⟩ for some secret key s
+with Hamming weight h and coefficients in J−ρ, ρK, and the coefficients of a(Y )
+are odd numbers.
+   Then, ci ∈ Rq LWEs (ti (X) · X mi +ei , Eout ) for the output (c0 , ..., cn−1 ), where
+                   q
+          Eout ≤                                2 + Nℓ
+                    (h + 1)(log B + 2) (ℓN β 2 EG          2    2        2
+                                                      ksk βksk Eksk ) + ET
+
+
+Moreover, the time complexity is O(h · n · log B) external products.
+
+Proof. Essentially the same as Lemma 4.1 and Lemma 4.3.
+18      Antonio Guimarães     and Hilder V. L. Pereira
+
+5    Packing Key Switching
+Exploiting a somewhat similar idea to our sparse multiplication algorithm, we
+introduce a new approach to perform packing key switching that introduces
+lower noise at the cost of more multiplications. Let ci = (ai , bi ) ∈ ZN × Z for
+i ∈ [0, n) be a list of n LWE ciphertexts, the first step of a packing key switching
+consists of arranging the coefficients of LWE ciphertexts into a matrix:
+                                                         
+               a0,0 , a0,1 , . . . , a0,N −1            b0
+          . . .        ... ...           . . .  ,  . . .  ∈ Zn×N
+                                                                   q   × Zn×1
+                                                                          q
+              an−1,0 , an−1,1 , . . . , an−1,N −1     bn−1
+                                                                                    ′
+Let N ′ ≥ n be the dimension of the output RLWE and let f : Znq 7→ Zq [X]/(X N +
+                                    Pn−1
+1), given by f (x0 , ..., xn−1 ) 7→ i=0 xi X i be a function defining a coefficient em-
+bedding, one can produce a module-LWE ciphertext of dimension N ′ and rank
+N by applying f to every column of the matrices:
+                         Pn−1           Pn−1                  Pn−1
+          (a′ , b′ ) =               i             i                        i
+                                                                              
+                           i=0 ai,0 X ,  i=0 ai,1 X , . . . ,  i=0 ai,N −1 X ,
+                                                   Pn−1         i ∈ RN × R
+                                                                 
+                                                      i=0 bi X         q        q
+
+Usual RLWE key switching algorithms can now be used to switch this cipher-
+text to different parameters and keys. Traditional techniques [CGGI16, MS18,
+GPvL23] compute b′ − ⟨a′ , s⟩ for some secret key s ∈ ZN    q by performing O(N )
+                                                ′
+multiplications between the polynomials
+                                      √     in a  and key switching keys encrypting
+s. This process introduces noise O( N n) and requires O(N N ′ ) evaluation key
+size. We introduce anp algorithm √ that requires O(hN ) multiplications, but only
+introduces noise O( h log(N ) N ′ ) and requires O(h log(N )N ′ ) evaluation key
+size. Algorithm 5 presents our solution.
+     The basic idea behind it is to use a CMUX tree [CGGI17] to select only the
+elements of a′ corresponding to the nonzero positions of s. Naively, we could run
+a CMUX tree h times (one per nonzero position) over the entire a′ , which leads
+to the asymptotic costs mentioned above. However, this process can be accel-
+erated by assuming some structure in the key (which happens with very high
+probability), similarly as we do with our amortized bootstrapping algorithm.
+Let s ∈ ZN q be a vector of Hamming Weight h such that idx(s) is uniformly
+distributed
+            in ZhN . We choose parameters B ≤ N and k ∈ [1, h], such that
+Pr HW(sBi,...,B(i+1)−1 ) > k is small for all i ∈ [0, N/B). Based on this, we
+divide a′ into N/B blocks of size B, and we use a CMUX tree to select k po-
+sitions from each block (Lines 8 to 11 of Algorithm 5). The selected positions
+of a′ are then multiplied by their respective values in the key (Line 13 of Algo-
+rithm 5). The goal is to select all positions corresponding to nonzero elements
+of key, which we call “relevant positions”. If a block has less than k relevant
+positions, we select any other element, as it will be multiplied by an encryp-
+tion of 0 in Line 13. Conversely, if a block has more than k relevant positions,
+the algorithm would fail, which we avoid by choosing (B, k) that would lead to
+negligible probability of failure. We detail the key generation in Algorithm 7 (Ap-
+pendix A). To further improve performance, we can also select (B, k) such that
+Fast amortized bootstrapping with small keys and polynomial noise overhead            19
+
+
+ Algorithm 5: Packing key switching for sparse secrets
+   Input : a list of n ≤ N ′ LWE ciphertexts
+               ci = (ai , bi ) ∈ LWEqs (mi ) ⊂ ZN
+                                                q × Zq , for i ∈ [0, n).
+   Input : parameters k ∈ [1, h] and B ≤ N s.t. B|N
+   Input : two vectors (V ′ , C ′ ) containing, respectively, GSW encryptions of V
+               and of the binary decomposition of C, where (V, C) are produced by
+               Algorithm 7                      Pn−1
+                                  ′
+ 1 . Output: a ciphertext c ∈ Rq LWEs′ ( i=0 mi )
+   /* Pack LWE ciphertexts into an MLWE of rank N                                */
+         n                                        Pn−1        i
+ 2 f : Zq 7→ Rq , given by f (x0 , ..., xn−1 ) 7→   i=0  xi X
+    ′
+ 3 c ← (0, f ([bi ]i=0,...,n−1 ))
+ 4 for i ← 0 to N do
+ 5     âi ← f ([ai,j ]j=0,...,n−1 )
+   /* Key switching                                                              */
+ 6 for j ← 0 to N/B do
+ 7     for i ← 0 to k do
+            /* CMUX tree: select a coeff. in block j                             */
+ 8          ã ← â
+ 9          for t ← 0 to log B do
+10               z ← 2log B−t−1
+11               for r ← 0 to z do
+12                   ãjB+r ← (ãjB+r+z − ãjB+r )  Cjk+i,log(B)−t−1 + ãjB+r
+            /* Subtract selected position times V                                */
+13          c′ ← c′ − ãjB  Vjk+i
+               ′
+14 Return c
+
+
+
+
+Table 2. Comparison between packing methods. Cost measured in the number of
+RLWE multiplications; Key size is given in the number of Zq elements. The parameter
+ℓ is the gadget decomposition degree. We assume n = N ′ = N .
+
+           Method         Cost    Noise overhead            Key size
+                                         √
+           Traditional    ℓN           N√ ℓ                   2ℓN 2
+            [CDKS21]      ℓN      p N ℓN                  2ℓN log(N )
+                         2hN ℓ    p 2ℓhN log(N )         4ℓhN log(N )
+           This work
+                         2kN ℓ   N 2ℓ(k/B) log(B)      4ℓN 2 (k/B) log(B)
+
+
+
+                            
+Pr HW(sBi,...,B(i+1)−1 ) > k is not negligible and perform rejection sampling
+(the impacts on security will be addressed  p in Section 6.2).
+                                                            √ The final cost is
+O(N k) GSW multiplications with noise O( k(N/B) log B N ′ ) and evaluation
+key size O(k(N/B) log(B)N ′ ). Table 2 compares with alternative approaches.
+Generally, we see our new method as an interesting theoretical result, but of
+limited practical applicability
+                  √             due to its increased cost. Specifically, it enables
+noise overhead Õ( hN ) instead of the typical O(N ) of existing methods, which
+may become relevant as the understanding of LWE sparsity advances.
+20       Antonio Guimarães           and Hilder V. L. Pereira
+
+6     Our amortized functional bootstrapping
+
+Once we have the established our main tools, namely, the LWE-to-RLWE pack-
+ing and the homomorphic evaluations of the first step of the RLWE decryption,
+we can proceed to presenting our bootstrapping algorithm. As illustrated in
+Figure 2, we have a function bootstrapping, thus, n arbitrary functions can be
+chosen. If they are private, one generate the corresponding test vectors as actual
+RLWE encryptions, otherwise, the test vectors are trivial and noiseless RLWE
+samples with the polynomial corresponding to the function presented in clear.
+    The bootstrapping starts with n LWE ciphertexts, which are packed, and
+modulus-switched, and key-switched into a single RLWE ciphertext (a, b) where
+b(Y ) = a(Y ) · s(Y ) + e(Y ) + m(Y ) mod ⟨Y n + 1, 2N ⟩, where s is a secret key
+with Hamming weight h. Then, depending if the coefficients of s are binary,
+ternary, or between −ρ and ρ, we use either bin-SAB, tern-SAB, or ρ-SAB to
+homomorphically compute u(Y ) := b(Y ) − a · s(Y ) = e(Y ) + m(Y ) mod ⟨Y n +
+1, 2N ⟩. The result is a set of RLWE ciphertexts encrypting
+
+                  ti (X)X ui = ti (X)X ei +mi = fi (mi ) + X · gi (X)
+
+where gi (X) is some polynomial with degree less than N −1. Finally, the constant
+term, i.e., fi (mi ) is extracted into an LWE ciphertext. We show this thoroughly
+in Algorithm 6.
+    As a practical optimization, since the noise overhead and the running time
+of the bootstrapping are linear in the Hamming weight of the secret key, be-
+fore the main part of the bootstrapping, we run a key switching to obtain
+an RLWE ciphertext under a low Hamming-weight key. This is denoted by
+HW-ReducingKeySwitching in our algorithm, and we discuss it in more detail
+in Section 7.1.
+
+
+    Algorithm 6: Amortized functional bootstrapping
+   Input : ci ∈ LWEqs (mi ) s.t. mi ∈ Zp/2 for 1 ≤ i ≤ N
+   Input : a set of N functions fi : Zp/2 7→ Zp/2 for 1 ≤ i ≤ N
+   Input : bootstrapping key BSK required by bin-SAB, tern-SAB, or
+               ρ-SAB
+   Input : packing and key-switching keys PCK and KSK
+                 (out)
+   Output: ci          ∈ LWEqs (fi (mi )) for 1 ≤ i ≤ N
+                                                 2
+ 1 For each fi , define a test vector ti ∈ R
+ 2 t ← (t1 , ..., tN )
+ 3 cpck ← PackingKeySwitching(c1 , ..., cn , PCK)
+ 4 c ← HW-ReducingKeySwitching(cpck , KSK)
+
+ 5 ĉ ← SAB(c, t, BSK) // Call bin-, tern-, or ρ-SAB
+ 6 for 1 ≤ i ≤ N do
+        (out)
+ 7     ci     ← LWE.Extract(ĉi )
+              (out)          (out)
+ 8   Return c1        , ..., cN
+Fast amortized bootstrapping with small keys and polynomial noise overhead         21
+
+   Since extraction does not increase the noise, at the end, we obtain n LWE
+ciphertexts encrypting fi (mi ) with the same noise output by the chosen SAB
+algorithm. This gives us Lemma 6.1
+Lemma 6.1 (Noise overhead of amortized functional bootstrapping).
+Consider the same notation used in Lemma 4.2. Algorithm 6 runs in time
+O(nh log B) external products and outputs LWE ciphertexts with E-subgaussian
+noise where
+                     q                                           
+              E∈O                     2 2         2    2        2
+                         N h log B (ℓβ EG + ℓksk βksk Eksk ) + ET
+
+Proof. The proof follows trivially from the time complexity and noise overhead
+of bin-SAB, tern-SAB, and ρ-SAB, and also from the fact that they dominate
+the running time of the bootstrapping and their output is basically the output
+of the bootstrapping (except by the extraction procedure, but it does not change
+the noise).
+Corollary 6.2. Assuming β, βksk , EG , Eksk ∈ O(1), Algorithm 6 has amortized
+time          of O(h log B) external products per message and noise overhead
+   √complexity
+Õ N h log B .
+Proof. Since β, βksk ∈ O(1), we have
+                                √ ℓ, ℓksk ∈ (log q) = O(log λ). Then, the pa-
+rameter E from Lemma 6.1 is Õ( N h log B). Also, as we refresh n messages per
+bootstrapping, from Lemma 6.1, the amortized complexity is O((nh log B)/n) =
+O(h log B) external products.
+
+6.1   The choice of the parameter B and efficiency
+Recall that the main step of our bootstrapping process an RLWE ciphertext
+(a, b) ∈ Z2N [Y ]/⟨Y n + 1⟩ using some key s(Y ) with Hamming weight h. We
+define j̃ = idx(s) as the sequence of exponents of the nonzero coefficients of s.
+For instance, if s(Y ) = 3 · Y − 1 · Y 3 + 3 · Y 8 , then j̃ = (1, 3, 8). Also, define
+d := diff(s) ∈ J−n, nKh as d[0] = −j̃0 , d[h] = −j̃h−1 , and d[i] = j̃i−1 − j̃i
+for 1 ≤ i ≤ h − 1. Then, the algorithms presented in Section 4 require us to
+encrypt the bits corresponding to the binary decomposition of each d[i]. Thus, we
+introduced a parameter B representing an upper bound to |d[i]| for 1 ≤ i ≤ h−1,
+and both the time complexity and the noise overhead of our bootstrappping
+depend on log B.
+    A trivial and over pessimist choice for B is n, since each j̃i ∈ J0, n − 1K and
+j̃i+1 > j̃i , implying that |d[i]| = |j̃i − j̃i+1 | ≤ n − 1.
+    However, we expect the h nonzero coefficients of s to be well spread over
+the n possible positions, in other words, we expect |d[i]| ∈ O(n/h) for 1 ≤ i ≤
+h − 1. Hence, by choosing B ∈ O(n/h), we obtain from Corollary 6.2 that our
+bootstrapping  p requires O(h log(n/h)) external products per refreshed message
+and has Õ( N h log(n/h)) noise overhead.
+    Moreover, a typical choice of parameters for FHE is N, n, h ∈ O(λ), which
+gives us O(log(n/λ)) = O(1), implying that our amortized time complexity, in
+22      Antonio Guimarães    and Hilder V. L. Pereira
+
+terms of external products, is only O(h) = O(λ) while our noise overhead is
+Õ(λ). But if one were willing to choose n ∈ O(λ logk λ) and h ∈ O(λ/ log λ), the
+required number of external products per refreshed message would be
+                                                            
+                                         λ(k + 1) log(log λ)
+                  O(h log(n/h)) = O                            = o(λ)
+                                               log λ
+                                                                    p
+that is, sublinear in λ, while the noise overhead would still be Õ( N h log(n/h)) =
+Õ(λ), i.e., quasilinear in λ.
+
+6.2    The choice of the parameter B and security
+In practice, we fix a concrete value for B ≈ N/h and, during the key generation,
+we apply rejection sampling if the sampled key s does not satisfy |d[i]| < B
+for 1 ≤ i ≤ h − 1, where d := diff(s). We argue that if the probability of a
+random key s satisfy |d[i]| < B is upper bounded by 1/2δ ∈ R, then, any at-
+tacker A against the original scheme, without rejection sampling, would already
+have probability 1/2δ of interacting with a key that is accepted by our rejection
+sampling. Therefore, if A could break the CPA-security of our scheme with re-
+jection sampling with non-negligible probability a(λ), A would essentially have
+probability a(λ)/2δ of breaking the CPA-security of the same scheme without
+rejection sampling. But a(λ)/2δ would still be non-negligible if δ ∈ ω(λ).
+    By contrapositive, if no attacker can break the CPA-security of the original
+scheme with probability less than some a(λ), then no attacker can break the
+CPA-security of the modified scheme (with rejection sampling) with probability
+less than a(λ) · 2δ .
+    Hence, in order to adjust the concrete parameters we pick, we estimate
+the probability 1/2δ and subtract δ from the security level the original scheme
+achieves. In discuss this in detail in Section 7.1.
+
+
+7     Practical results
+7.1    Parameter selection
+Our bootstrapping requires 3 sets of evaluation keys, two for key switchings
+and one for the bootstrapping itself. Table 3 shows the parameters we select for
+them. In addition to the parameters described in the previous sections, each key
+has also its associated values ℓA and β corresponding to the degree and base of
+the approximate gadget decomposition [CGGI16] they are used with. These de-
+compositions are standard in TFHE-related literature [CGGI16, CGGI17], but,
+for completeness, we present the full equations for their noise analysis in Ap-
+pendix B. Parameters are selected as follows.
+
+– Repacking key: There are no specific requirements to its distribution, but we
+  choose sparse ternary for convenience. We benchmark it for N ∈ {211 , 212 , 213 },
+  as this corresponds to the number of messages to be bootstrapped at once.
+Fast amortized bootstrapping with small keys and polynomial noise overhead       23
+
+Table 3. Parameters for repacking and bootstrapping. All keys are sparse ternary and
+q = 264 .
+
+       Key         Key use        N       h     ℓA    log2 (β)   q/σ      λ
+                                                                  44
+      RPC1                       2048    256     2      14       2      143.1
+      RPC2        Repacking      4096    256     2      14       244    277.2
+      RPC3                       8192    256     2      14       244    454.1
+      FBS1                       2048    512     1      23       250    128.9
+                Bootstrapping
+      FBS2                       8192    512     1      22       251    511.8
+
+
+
+  We do not optimize parameters such as Hamming Weight or security level, as
+  the repacking takes only 1 to 5% of the execution time of our approach, and,
+  hence, there’s little to no incentive to optimize it.
+– Bootstrapping key: If generic repacking methods are used, there is also
+  no requirements to its distribution, and, again, we choose sparse ternary for
+  convenience. For our new packing KS method (Section 5), a higher level of
+  sparsity in the bootstrapping key would improve performance and noise. In
+  practice, however, we estimate our new method would only reduce the noise
+  overhead of the repacking by a factor of at most 4, which would have no
+  impact in the overall protocol. Therefore, we choose to use generic keys for
+  bootstrapping and let the choice of repacking method arbitrary. We define
+  keys for dimensions N ∈ {211 , 213 } to allow the bootstrapping of small (up to
+  6 bits) and large (8 bits) messages, respectively. The keys for automorphisms
+  are generated using the same parameters as the bootstrapping keys.
+– Hamming-weight-reducing key switching key: Our bootstrapping algo-
+  rithms could work directly over ciphertexts encrypted under RPC and, given
+  our parameters, they would likely already be faster than non-amortized ver-
+  sions of the bootstrapping. This, however, would be far from optimal. Once the
+  LWE ciphertexts are packed in a single RLWE, we can significantly reduce the
+  Hamming Weight by applying another key switching. This process follows a
+  similar idea to the sparse-secret encapsulation technique from [BTH22], which
+  key-switches the ciphertext to a key of much smaller Hamming Weight (but
+  also much smaller modulus to keep the security level). This leads us to the
+  Parameters presented in Table 4. Since we need to minimize noise as much as
+  possible, all HW-reducing key switching use binary decomposition with degree
+  ℓA indicated by Table 4.
+
+
+
+Security Level For all keys in Tables 3 and 4, the security level is defined by
+the smallest result of the Lattice Estimator [APS15] using the default reduction
+model. We only use parameters for which the Estimator is able to estimate
+security under all available attacks without errors, and for which it gives results
+that are consistent with adjacent parameters (e.g., parameters for which slightly
+increasing or decreasing the values of q, N , or σ results in the expected impact
+24      Antonio Guimarães     and Hilder V. L. Pereira
+
+Table 4. Parameters for Binary and Ternary keys. For all keys, log2 (β) = 1 and
+q = 264 . Parameters B and δ are chosen as detailed in Section 6.2, and the security
+level (λ) is already adjusted accordingly.
+
+        Key       Type        N      h    ℓA    q/σ      B      δ       λ
+                                                  15      7
+         B1                 2048     39   12     2       2     7.37   128.9
+         B2                 2048     42   14     217     27    6.16   129.9
+         B3       Binary    4096     33   17     221     29    0.66   128.1
+         B4        Key      8192     27   20     221     210   1.30   127.9
+         B5                 4096     34   17     224     29    0.58   129.1
+         B6                 8192     28   20     224     210   1.15   130.6
+         T1                 2048     35   12     215     27    9.34   128.3
+         T2                 2048     38   14     217     27    7.81   129.9
+         T3      Ternary    4096     30   17     221     29    0.92   127.8
+         T4       Key       8192     25   19     221     210   1.63   129.0
+         T5                 4096     32   17     224     29    0.73   127.9
+         T6                 8192     26   19     223     210   1.46   129.8
+
+
+
+on security). In addition to the usual attacks tested by the Lattice Estimator,
+we also consider the dual hybrid attack with meet-in-the-middle optimizations
+from [CHHS19], which often achieves better results against sparse secrets. The
+results of Table 4 are also already adjusted based on the loss (δ) imposed by
+the rejection sampling (Section 6.2). See Appendix C for details on how δ is
+computed.
+
+Probability of failure Consider an RLWE ciphertextP      with Gaussian-distributed
+                                                           N −1       i
+noise e with standard deviation σ encrypting m =           i=0 ∆mi X , such that
+                          k+1
+mi ∈ Z2k and ∆ = q/2          . Notice that we are leaving one bit of padding for
+the message, which is detailed in Remark 7.1. A message  k+2mi∈ Z2k is correctly
+                                             k+2         q/2
+bootstrapped with probability Pr[ei < q/2        ] = erf σ√2     [DM15, CGGI16,
+BST20, GBA21, GPvL23], where erf is Gauss error function. We implemented a
+script to estimate the input σ for our bootstrapping based on our average case
+noise analysis (Appendix B), which we validated by measuring the error variance
+at different steps of our implementation.
+Remark 7.1 (Negacyclicity). Our work is the first to present an amortized boot-
+strapping method with polynomial noise overhead that can operate strictly
+over rings defined by power-of-two cyclotomics, without requiring other rings.
+Performance-wise, this is a major advantage, as it enables the use of standard
+libraries featuring highly-optimized NTT or FFT-based arithmetic. On the other
+hand, this brings the usual problems related to power-of-two cyclotomics, such
+as negacyclicity. In short, an AP-style functional bootstrapping defined over
+X N + 1 evaluates only negacyclic functions, i.e. functions f : Z2N 7→ Z2N such
+that f (x + N ) = −f (x). To overcome this limitation, one evaluates a so called
+“half-domain” functional bootstrapping, where one bit of padding is added at
+Fast amortized bootstrapping with small keys and polynomial noise overhead                          25
+
+the beginning of the message. Methods to enable full-domain bootstrapping are
+broadly available in the literature [GBA24]. All the results presented in this pa-
+per already consider limitation. To give a concrete example, a level of precision
+of 4 bits means that one can evaluate an arbitrary function farbitrary : Z24 7→ Z24
+or a negacyclic function fnegacyclic : Z25 7→ Z25 . This is also true for the results
+from TFHE-rs [Zam22], but not for [GPvL23], which avoids negacyclicity by
+working over circulant rings.
+
+
+7.2       Main results
+
+We implemented our solution in C using the MOSFHET library [GBA24], com-
+piled it with Intel(R) DPC++ compiler v2025.0.4, and benchmarked it on an
+r7i.metal-24xl instance on AWS with an Intel Xeon Platinum 8488C at 2.4GHz
+(3.8GHz boost) and 768GB of memory. All results are for single-threaded exe-
+cution and each value is the average of 10 executions. We measured the results
+for TFHE-rs [Zam22] and GPV23 [GPvL23] (Table 1) in the same environment
+using the benchmarking tools they provided. Table 5 shows our main results.
+
+
+Table 5. Sparse amortized bootstrapping for binary (B) and ternary (T) keys. We
+use FBS2 for 8-bit messages and FBS1 for all others. RPC is chosen according to the
+number of messages.
+
+            Precision     Number of      Bootstrapping         Failure        Total     Amortized
+     Key
+             (bits)       Messages         Key Sizea         probability      Time       Time
+     B1          2           2048           17.09MB             2−120          8.2s      4.01ms
+     B2          4           2048           18.41MB             2−94           8.8s      4.28ms
+     B3          6           4096           18.59MB             2−64          19.6s      4.79ms
+     B4          6           8192           16.91MB             2−69          36.2s      4.42ms
+     B5          8           4096           76.63MB             2−62          2m7s       31.24ms
+     B6          8           8192           70.13MB             2−72         3m53s       28.52ms
+     T1          2           2048           17.53MB             2−120         8.2s       3.99ms
+     T2          4           2048           19.03MB             2−95          9.0s       4.37ms
+     T3          6           4096           18.78MB             2−70          19.4s      4.73ms
+     T4          6           8192           17.22MB             2−74          35.8s      4.38ms
+     T5          8           4096           80.13MB             2−65         2m10s       31.86ms
+     T6          8           8192           71.63MB             2−65         3m53s       28.48ms
+ a
+     Includes all keys required inside the bootstrapping itself, including the ones for automorphisms.
+ See Section 7.2 for external procedures, such as the repacking key switching.
+
+
+
+    Compared to TFHE-rs, which is a state-of-the-art implementation for non-
+amortized polynomial-noise bootstrapping, we achieve gains of up to 38.7 times
+whiles using bootstrapping keys that are up to 47.5 times smaller. A complete
+comparison is presented in Table 1 (in the Introduction). Interestingly, con-
+trary to other GINX-style bootstrapping methods, our approach is almost not
+26      Antonio Guimarães     and Hilder V. L. Pereira
+
+     Table 6. Bootstrapping of 2-bit messages using intra-coefficient batching.
+
+                        Number of      Total     Amortized
+                                                               Speedup
+                        Messages       Time       Time
+                             1         9.8ms       9.8ms          1.0
+             TFHE-rs
+                             2        13.6ms       6.8ms          1.4
+                             2048       8.2s       4.01ms         2.5
+                             4096       8.8s       2.15ms         4.6
+            This work
+                            12288      19.4s       1.57ms         6.2
+                            24576      35.8s       1.46ms         6.7
+
+
+
+impacted by the change from binary to ternary secrets. In fact, ternary secrets
+generally present better probability of failure and are even slightly faster in some
+cases. The bootstrapping keys are also only marginally bigger (less than 10%)
+than binary ones. This is achieved thanks to the fact that ternary secrets en-
+able a slightly smaller Hamming Weight while the performance of our MPMul
+algorithm does not depend on the distribution of the non-zero positions.
+
+
+Intra-coefficient batching The most common methods for batched compu-
+tation in RLWE schemes are based on encoding (or packing) different messages
+into different coefficients of some encrypted polynomial or in different “slots”
+provided by some isomorphism of the plaintext ring. It is also possible, however,
+to pack multiple messages inside the same coefficient of a polynomial. Specif-
+ically, each k-bit coefficient of a polynomial can be used to pack up to k/n
+messages with n bits each. For example, a coefficient in Z15 could pack two
+messages m0 ∈ Z3 and m1 ∈ Z5 using the Chinese Remainder Theorem. Ex-
+ploiting radix-based encoding, a coefficient in Z24 could also pack m0 , m1 ∈ Z22
+as given by f (m0 , m1 ) 7→ m0 + m1 22 . This restricts the use of some arithmetic
+operations, but works generically for bootstrapped-based computation by rely-
+ing on techniques such as the BML [CLOT21] multi-value bootstrapping, which
+allows a k-bit functional bootstrapping to evaluate n different k/n-bit functions
+at once. We refer to this type of packing as “intra-coefficient batching”. Notice
+that LWE-based bootstrapping techniques, such as [CGGI16], can also exploit
+it. Considering that, we present Table 6, which shows the optimal times for our
+method and TFHE-rs considering this type of batching.
+
+
+Packing Key Switching Our methods enable different choices of packing al-
+gorithms, as discussed in Section 5. Performance-wise, however, this choice has
+little impact in the overall protocol, and, therefore, our implementation and all
+numbers reported in Table 5 consider the use of the traditional packing key
+switching. Conversely, this choice may become relevant if the goal is, for ex-
+ample, to minimize the size of evaluation keys. For the traditional packing KS,
+our repacking key takes from 128MB to 2GB, depending on the precision and
+Fast amortized bootstrapping with small keys and polynomial noise overhead          27
+
+number of bootstrapped messages. We estimate our new packing algorithm (Sec-
+tion 5) could reduce these numbers in up to 4 times, but the additional cost for
+computing it makes it unlikely to be a practical choice. Instead, one could con-
+sider methods such as RLWE Conversion [CDKS21] and Partial LWE [BCL+ 24],
+which could reduce the packing key switching key to just a few megabytes. For
+comparison, key switching keys in TFHE-rs, which are used to reduce the dimen-
+sion of the ciphertext, take 36.7, 65.2, 366.8, and 3055.3 MB, respectively, for
+2, 4, 6, and 8-bit messages. Using the FFT-KS from [BCL+ 24] (based on those
+techniques), KS keys can be reduced to just 0.1, 2.8, 2.0, and 9.0MB, respec-
+tively. These gains cannot be directly mapped to the packing KS, but applying
+the equations from Table 2 to our parameters leads to key sizes of similar order
+of magnitude. Notwithstanding, one also needs to consider the impacts of the
+increased noise overhead introduced by RLWE conversion and other possible
+improvements from Partial LWE. We leave this assessment for future work.
+
+
+7.3   Results for arbitrary sparse secrets
+
+Our method requires sparsity, but it has no requirements for the distribution
+of the non-zero positions. Therefore, in addition to the parameters for sparse
+binary and ternary secrets, we also test it for balanced arbitrary secrets in Z8 ,
+i.e., keys with h non-zero positions, such that each non-zero position is uniformly
+sampled from [−4, 4). In this case, since the Lattice Estimator does not support
+such secrets, we estimate security supposing they are sparse ternary. As we can’t
+further optimize the Hamming weight, we choose h = 32 in all cases, as this value
+is broadly used in related literature [BKSS25]. Table 7 shows our results.
+
+
+Table 7. Sparse amortized bootstrapping for arbitrary keys in Z8 . The parameters
+(h, ℓA , q/σ) = (32, 19, 224 ) are the same for all cases.
+
+   Number of                  Bootstrap.   Prec.    Failure   Total     Amortized
+                   Keys
+    messages                   Key Size    (bits)    prob.    Time       Time
+      4096     RPC2 +FBS1      84.00MB       4       2−73     23.71s      5.79ms
+      8192     RPC3 +FBS1      86.00MB       4       2−73     51.37s      6.27ms
+      4096     RPC2 +FBS2       1.08GB       6       2−72     169.02s    41.26ms
+      8192     RPC3 +FBS2       1.09GB       6       2−73     360.34s    43.99ms
+
+
+
+    Compared to sparse binary and ternary secrets, these results show notice-
+able slowdowns, loss of precision, and increase in the size of the keys. Those
+are explained by three main factors. Firstly, the Galois automorphisms required
+by Algorithm 4 rely on large key switching keys and is two times more expen-
+sive than the CMUX required by the ternary keys. Secondly, we don’t have
+ways of optimizing parameters for these keys (as the Lattice Estimator doesn’t
+support their distributions), which leads us to work on a security level that is
+(likely) much higher than needed. Finally, their increased norm increases the
+28     Antonio Guimarães     and Hilder V. L. Pereira
+
+noise generated by the mod switching that precedes the bootstrapping, reducing
+the bootstrapping precision
+                   p        by the same amount. Notice that since the key is
+balanced, we loose 8/2 = 2 bits of precision for Z8 .
+
+
+7.4   Comparison with other works
+
+Table 1, in the introduction, compares our solution with state-of-the-art works on
+bootstrapping with polynomial noise overhead. Besides them, we also compare
+with other approaches, remarking that different aspects must be considered for
+each of them.
+
+
+Partial LWE Partial LWE [BCL+ 24] is a recently-introduced assumption (with
+direct reductions with standard ones) that is used to improve bootstrapping and
+KS performance in (non-amortized) TFHE. In [BCL+ 24], the 8-bit bootstrap-
+ping of TFHE-rs is improved from 415ms to 306ms. This result, however, is
+optimized for a failure probability (FP) of < 2−13.9 , which hinders a direct
+comparison with our work, since we focus on FP between 2−120 and 2−62 . By
+increasing our FP to 2−18 , we can bootstrap 8-bit messages in just 10.4ms (amor-
+tized), which represents an improvement of 29.4 times over their result. These,
+however, should not be seen as alternative approaches, as Partial LWE could
+also be employed to accelerate our results. Specifically, notice that our FBS2 key
+has 511.8 bits of security, which, with the use of Partial LWE, could be lowered
+to 128 bits in exchange for improving performance.
+
+
+Methods with superpolynomial noise overhead Avoiding superpolynomial
+noise overhead is one of the main points of our work and, more generally, of
+the amortized bootstrapping line of research [MS18, GPvL23, LW23a, LW23b,
+DKMS24]. Nonetheless, it’s unavoidable to wonder how the performance of these
+techniques compare in practice. The state of the art for superpolynomial methods
+is given by [BKSS25], which bootstraps 2, 4, 6, and 8-bit messages in 0.78, 1.57,
+2.67, and 3.75ms, respectively. As one would expect, their results are better
+than ours, but we significantly narrow the gap compared to previous literature.
+In fact, for the first time, we have those methods at the same order of magnitude
+in terms of amortized time (for messages of up to 6 bits), with the difference
+being smaller than a factor of 2 for 6-bit messages.
+
+
+Acknowledgments
+
+We thank Anamaria Costache, Guillaume Hanrot, and Damien Stehlé for point-
+ing out additional attacks we should consider when selecting parameters for
+sparse secrets. This work was partly supported by the São Paulo Research Foun-
+dation (FAPESP), Brazil. Process Number 2023/12755-8, by the Smart Net-
+works and Services Joint Undertaking (SNS JU) under the European Union’s
+Fast amortized bootstrapping with small keys and polynomial noise overhead       29
+
+Horizon Europe research and innovation programme in the scope of the CON-
+FIDENTIAL6G project under Grant Agreement 101096435, by Teaching, Re-
+search and Extension Support Fund (FAEPEX) under the Incentive Program
+for New Professors (PIND), process number 3389/23, and by the PICOCRYPT
+project, funded by the European Research Council (ERC) under the European
+Unions Horizon 2020 research and innovation programme (Grant agreement No.
+101001283). Views and opinions expressed are however those of the author(s)
+only and do not necessarily reflect those of the European Union or the Euro-
+pean Commission. Neither the European Union nor the European Commission
+can be held responsible for them.
+
+
+References
+ABD16.   Martin R. Albrecht, Shi Bai, and Léo Ducas. A subfield lattice attack
+         on overstretched NTRU assumptions - cryptanalysis of some FHE and
+         graded encoding schemes. In Matthew Robshaw and Jonathan Katz, edi-
+         tors, CRYPTO 2016, Part I, volume 9814 of LNCS, pages 153–178. Springer,
+         Berlin, Heidelberg, August 2016.
+AP14.    Jacob Alperin-Sheriff and Chris Peikert. Faster bootstrapping with polyno-
+         mial error. In Juan A. Garay and Rosario Gennaro, editors, CRYPTO 2014,
+         Part I, volume 8616 of LNCS, pages 297–314. Springer, Berlin, Heidelberg,
+         August 2014.
+APS15.   Martin R. Albrecht, Rachel Player, and Sam Scott. On the concrete hardness
+         of Learning with Errors. Journal of Mathematical Cryptology, 9(3):169 –
+         203, October 2015. Place: Berlin, Boston Publisher: De Gruyter.
+BBL17.   Daniel Benarroch, Zvika Brakerski, and Tancrède Lepoint. FHE over the
+         integers: Decomposed and batched in the post-quantum regime. In Serge
+         Fehr, editor, PKC 2017, Part II, volume 10175 of LNCS, pages 271–301.
+         Springer, Berlin, Heidelberg, March 2017.
+BCL+ 24. Loris Bergerat, Ilaria Chillotti, Damien Ligier, Jean-Baptiste Orfila, Ade-
+         line Roux-Langlois, and Samuel Tap. New Secret Keys for Enhanced Perfor-
+         mance in (T)FHE. In Proceedings of the 2024 on ACM SIGSAC Conference
+         on Computer and Communications Security, CCS ’24, pages 2547–2561,
+         New York, NY, USA, December 2024. Association for Computing Machin-
+         ery.
+BDF18. Guillaume Bonnoron, Léo Ducas, and Max Fillinger. Large FHE gates
+         from tensored homomorphic accumulator. In Antoine Joux, Abderrahmane
+         Nitaj, and Tajjeeddine Rachidi, editors, AFRICACRYPT 18, volume 10831
+         of LNCS, pages 217–251. Springer, Cham, May 2018.
+BGV14. Zvika Brakerski, Craig Gentry, and Vinod Vaikuntanathan. (leveled) fully
+         homomorphic encryption without bootstrapping. ACM Trans. Comput.
+         Theory, 6(3), July 2014.
+BIP+ 22. Charlotte Bonte, Ilia Iliashenko, Jeongeun Park, Hilder V. L. Pereira, and
+         Nigel P. Smart. FINAL: Faster FHE instantiated with NTRU and LWE.
+         In Shweta Agrawal and Dongdai Lin, editors, ASIACRYPT 2022, Part II,
+         volume 13792 of LNCS, pages 188–215. Springer, Cham, December 2022.
+BKSS25. Youngjin Bae, Jaehyung Kim, Damien Stehlé, and Elias Suvanto. Boot-
+         strapping Small Integers With CKKS. In Kai-Min Chung and Yu Sasaki,
+30      Antonio Guimarães     and Hilder V. L. Pereira
+
+         editors, Advances in Cryptology – ASIACRYPT 2024, pages 330–360, Sin-
+         gapore, 2025. Springer Nature.
+BLP+ 13. Zvika Brakerski, Adeline Langlois, Chris Peikert, Oded Regev, and Damien
+         Stehlé. Classical hardness of learning with errors. In Dan Boneh, Tim
+         Roughgarden, and Joan Feigenbaum, editors, 45th ACM STOC, pages 575–
+         584. ACM Press, June 2013.
+BST20.   Florian Bourse, Olivier Sanders, and Jacques Traoré. Improved secure inte-
+         ger comparison via homomorphic encryption. In Stanislaw Jarecki, editor,
+         CT-RSA 2020, volume 12006 of LNCS, pages 391–416. Springer, Cham,
+         February 2020.
+BTH22. Jean-Philippe Bossuat, Juan Ramón Troncoso-Pastoriza, and Jean-Pierre
+         Hubaux. Bootstrapping for approximate homomorphic encryption with neg-
+         ligible failure-probability by using sparse-secret encapsulation. In Giuseppe
+         Ateniese and Daniele Venturi, editors, ACNS 22International Conference on
+         Applied Cryptography and Network Security, volume 13269 of LNCS, pages
+         521–541. Springer, Cham, June 2022.
+CCP+ 24. Jung Hee Cheon, Hyeongmin Choe, Alain Passelègue, Damien Stehlé, and
+         Elias Suvanto. Attacks Against the IND-CPAd Security of Exact FHE
+         Schemes. In Proceedings of the 2024 on ACM SIGSAC Conference on Com-
+         puter and Communications Security, pages 2505–2519, Salt Lake City UT
+         USA, December 2024. ACM.
+CDKS21. Hao Chen, Wei Dai, Miran Kim, and Yongsoo Song. Efficient homomorphic
+         conversion between (ring) LWE ciphertexts. In Kazue Sako and Nils Ole
+         Tippenhauer, editors, ACNS 21International Conference on Applied Cryp-
+         tography and Network Security, Part I, volume 12726 of LNCS, pages 460–
+         479. Springer, Cham, June 2021.
+CGGI16. Ilaria Chillotti, Nicolas Gama, Mariya Georgieva, and Malika Izabachène.
+         Faster fully homomorphic encryption: Bootstrapping in less than 0.1 sec-
+         onds. In Jung Hee Cheon and Tsuyoshi Takagi, editors, ASIACRYPT 2016,
+         Part I, volume 10031 of LNCS, pages 3–33. Springer, Berlin, Heidelberg,
+         December 2016.
+CGGI17. Ilaria Chillotti, Nicolas Gama, Mariya Georgieva, and Malika Izabachène.
+         Faster packed homomorphic operations and efficient circuit bootstrap-
+         ping for TFHE. In Tsuyoshi Takagi and Thomas Peyrin, editors, ASI-
+         ACRYPT 2017, Part I, volume 10624 of LNCS, pages 377–408. Springer,
+         Cham, December 2017.
+CHHS19. Jung Hee Cheon, Minki Hhan, Seungwan Hong, and Yongha Son. A Hybrid
+         of Dual and Meet-in-the-Middle Attack on Sparse and Ternary Secret LWE.
+         IEEE Access, 7:89497–89506, 2019.
+CHK+ 17. Jung Hee Cheon, Kyoohyung Han, Jinsu Kim, Changmin Lee, and Yongha
+         Son. A practical post-quantum public-key cryptosystem based on spLWE.
+         In Seokhie Hong and Jong Hwan Park, editors, ICISC 16, volume 10157 of
+         LNCS, pages 51–74. Springer, Cham, November / December 2017.
+CIM19.   Sergiu Carpov, Malika Izabachène, and Victor Mollimard. New techniques
+         for multi-value input homomorphic evaluation and applications. In Mit-
+         suru Matsui, editor, CT-RSA 2019, volume 11405 of LNCS, pages 106–126.
+         Springer, Cham, March 2019.
+CKKS17. Jung Hee Cheon, Andrey Kim, Miran Kim, and Yong Soo Song. Homomor-
+         phic encryption for arithmetic of approximate numbers. In Tsuyoshi Takagi
+         and Thomas Peyrin, editors, ASIACRYPT 2017, Part I, volume 10624 of
+         LNCS, pages 409–437. Springer, Cham, December 2017.
+Fast amortized bootstrapping with small keys and polynomial noise overhead        31
+
+CLOT21. Ilaria Chillotti, Damien Ligier, Jean-Baptiste Orfila, and Samuel Tap. Im-
+         proved programmable bootstrapping with larger precision and efficient
+         arithmetic circuits for TFHE. In Mehdi Tibouchi and Huaxiong Wang, ed-
+         itors, ASIACRYPT 2021, Part III, volume 13092 of LNCS, pages 670–699.
+         Springer, Cham, December 2021.
+DKMS24. Gabrielle De Micheli, Duhyeong Kim, Daniele Micciancio, and Adam Suhl.
+         Faster amortized FHEW bootstrapping using ring automorphisms. In Qiang
+         Tang and Vanessa Teague, editors, PKC 2024, Part II, volume 14604 of
+         LNCS, pages 322–353. Springer, Cham, April 2024.
+DM15.    Léo Ducas and Daniele Micciancio. FHEW: Bootstrapping homomorphic
+         encryption in less than a second. In Elisabeth Oswald and Marc Fischlin,
+         editors, EUROCRYPT 2015, Part I, volume 9056 of LNCS, pages 617–640.
+         Springer, Berlin, Heidelberg, April 2015.
+DvW21. Léo Ducas and Wessel P. J. van Woerden. NTRU fatigue: How stretched
+         is overstretched? In Mehdi Tibouchi and Huaxiong Wang, editors, ASI-
+         ACRYPT 2021, Part IV, volume 13093 of LNCS, pages 3–32. Springer,
+         Cham, December 2021.
+GBA21. Antonio Guimarães, Edson Borin, and Diego F. Aranha. Revisiting the
+         functional bootstrap in TFHE. IACR TCHES, 2021(2):229–253, 2021.
+GBA24. Antonio Guimarães, Edson Borin, and Diego F. Aranha. MOSFHET: Op-
+         timized Software for FHE over the Torus. Journal of Cryptographic Engi-
+         neering, July 2024.
+Gen09.   Craig Gentry. A fully homomorphic encryption scheme. PhD thesis, Stan-
+         ford University, 2009. crypto.stanford.edu/craig.
+GPvL23. Antonio Guimarães, Hilder V. L. Pereira, and Barry van Leeuwen. Amor-
+         tized bootstrapping revisited: Simpler, asymptotically-faster, implemented.
+         In Jian Guo and Ron Steinfeld, editors, ASIACRYPT 2023, Part VI, volume
+         14443 of LNCS, pages 3–35. Springer, Singapore, December 2023.
+GSW13. Craig Gentry, Amit Sahai, and Brent Waters. Homomorphic encryp-
+         tion from learning with errors: Conceptually-simpler, asymptotically-faster,
+         attribute-based. In Ran Canetti and Juan A. Garay, editors, CRYPTO 2013,
+         Part I, volume 8042 of LNCS, pages 75–92. Springer, Berlin, Heidelberg,
+         August 2013.
+KF17.    Paul Kirchner and Pierre-Alain Fouque. Revisiting lattice attacks on over-
+         stretched NTRU parameters. In Jean-Sébastien Coron and Jesper Buus
+         Nielsen, editors, EUROCRYPT 2017, Part I, volume 10210 of LNCS, pages
+         3–26. Springer, Cham, April / May 2017.
+LMK+ 23. Yongwoo Lee, Daniele Micciancio, Andrey Kim, Rakyong Choi, Maxim
+         Deryabin, Jieun Eom, and Donghoon Yoo. Efficient FHEW bootstrapping
+         with small evaluation keys, and applications to threshold homomorphic en-
+         cryption. In Carmit Hazay and Martijn Stam, editors, EUROCRYPT 2023,
+         Part III, volume 14006 of LNCS, pages 227–256. Springer, Cham, April
+         2023.
+LPR10.   Vadim Lyubashevsky, Chris Peikert, and Oded Regev. On ideal lattices
+         and learning with errors over rings. In Henri Gilbert, editor, EURO-
+         CRYPT 2010, volume 6110 of LNCS, pages 1–23. Springer, Berlin, Hei-
+         delberg, May / June 2010.
+LW23a.   Feng-Hao Liu and Han Wang. Batch bootstrapping I: A new framework for
+         SIMD bootstrapping in polynomial modulus. In Carmit Hazay and Martijn
+         Stam, editors, EUROCRYPT 2023, Part III, volume 14006 of LNCS, pages
+         321–352. Springer, Cham, April 2023.
+32       Antonio Guimarães      and Hilder V. L. Pereira
+
+LW23b.     Feng-Hao Liu and Han Wang. Batch bootstrapping II: Bootstrapping in
+           polynomial modulus only requires Õ(1) FHE multiplications in amortiza-
+           tion. In Carmit Hazay and Martijn Stam, editors, EUROCRYPT 2023,
+           Part III, volume 14006 of LNCS, pages 353–384. Springer, Cham, April
+           2023.
+LW23c.     Zeyu Liu and Yunhao Wang. Amortized functional bootstrapping in less
+           than 7 ms, with Õ(1) polynomial multiplications. In Jian Guo and Ron
+           Steinfeld, editors, ASIACRYPT 2023, Part VI, volume 14443 of LNCS,
+           pages 101–132. Springer, Singapore, December 2023.
+MS18.      Daniele Micciancio and Jessica Sorrell. Ring packing and amortized FHEW
+           bootstrapping. In Ioannis Chatzigiannakis, Christos Kaklamanis, Dániel
+           Marx, and Donald Sannella, editors, ICALP 2018, volume 107 of LIPIcs,
+           pages 100:1–100:14. Schloss Dagstuhl, July 2018.
+Reg05.     Oded Regev. On lattices, learning with errors, random linear codes, and
+           cryptography. In Harold N. Gabow and Ronald Fagin, editors, 37th ACM
+           STOC, pages 84–93. ACM Press, May 2005.
+SV14.      Nigel P. Smart and Frederik Vercauteren. Fully homomorphic SIMD oper-
+           ations. DCC, 71(1):57–81, 2014.
+Zam22.     Zama.       TFHE-rs: A Pure Rust Implementation of the TFHE
+           Scheme for Boolean and Integer Arithmetics Over Encrypted
+           Data, 2022.          https://github.com/zama-ai/tfhe-rs - commit
+           b7d33e6b3f45b432af82637042214fa72bc7036c (Fri Mar 7 08:34:42 2025
+           +0100).
+
+
+A    Additional algorithms for packing key switching
+
+
+
+ Algorithm 7: Sparse packing key switching - key generation
+   Input : an LWE secret key s ∈ ZN           q with Hamming weight h and its index set
+               s̃ = idx(s)
+   Input : noise-performance trade-off parameters k ∈ [1, h] and B ≤ N s.t.
+               B|N
+   Output: two vectors V and C, s.t. s̃ ⊂ {(iB mod N ) + Ci : i ∈ [0, kN/B)},
+               Vi = s(iB mod N )+Ci , and Ci < B, for all i ∈ [0, kN/B), or ⊥ if s
+               cannot be represented in this format
+ 1 V ← {0}; C ← {0}
+ 2 for j ← 0 to N/B do
+ 3     i←0
+ 4     for t ← 0 to B do
+ 5          if sjB+t ̸= 0 then
+ 6                (Vjk+i , Cjk+i , sjB+t , i) ← (sjB+t , t, 0, i + 1)
+ 7     if i > k then
+ 8          Return ⊥
+ 9 if s ̸= {0} then
+10     Return ⊥
+11 Return (V, C)
+Fast amortized bootstrapping with small keys and polynomial noise overhead    33
+
+B    Average-case noise analysis
+To improve parameters in practice, we consider approximate gadget decomposi-
+tions [CGGI16] and performance an average case noise analysis of our method.
+Most of this analysis comes straightforwardly from applying previous litera-
+ture [CGGI16, CGGI16, BST20, GBA21] to the equations of Sections 3 to 6. In
+particular, our constructions requires three main building blocks: GSW exter-
+nal products, key switchings (for the automorphisms), and CMUX’s. We have
+average-case noise analysis for all of them directly from [CGGI16,CGGI17]. They
+do not consider the impact of sparse secrets in their analysis, but several other
+follow-up works have extended their analysis to consider it [GBA21, CCP+ 24].
+Based on them, we obtain the following equations. For all of them, consider:
+ – ℓA and β are parameters of the approximate gadget decomposition of the
+   RGSW or ksk input.
+ – N is the RLWE dimension and k is the MLWE rank (k = 1 for us in all
+   cases)
+ – σa and µa are, respectively, the noise standard deviation and the encrypted
+   message of some ciphertext “a”
+ – h is the hamming weight of the key of the RGSW or ksk input.
+
+RGSW external product. Given an RGSW ciphertext A and a RLWE ciphertext
+b, it produces an RLWE ciphertext c with the following noise variance:
+                          2                             2
+     2                    β    2                 2 1   q             2
+    σout < (k + 1)ℓA N        σA + (1 + kh) ∥µA ∥2            + ∥µA ∥2 σb2    (5)
+                          2                        12 β ℓA
+
+CMUX Given an RGSW ciphertext C and two RLWE ciphertexts a and b, it
+produces an RLWE ciphertext c with the following noise variance:
+                             2                      2
+        2                    β    2             1   q
+       σout < (k + 1)ℓA N        σC + (1 + kh)            + max(σa2 , σb2 )   (6)
+                             2                 12 β ℓA
+
+Key switching. Given an RLWE ciphertext a and a set of RLWE ciphertexts
+ksk, it produces an RLWE ciphertext b with the following noise variance:
+                                2                    2
+                 2              β    2           1   q
+                σout < kℓA N        σksk + (kh)            + σa2              (7)
+                                2               12 β ℓA
+
+C    Estimating δ
+We estimate the value of δ by generating a large number of random keys and
+measuring the value of B that would be required for each of them. Specifically,
+for each pair of parameters (N, h), we generated 100 thousand keys, computed
+the required value of B for each, and built a histogram. From the histogram, we
+computed the cumulative distribution and generated Table 8. To give a concrete
+34    Antonio Guimarães      and Hilder V. L. Pereira
+
+example, for N = 2048, h = 17, from the 100 thousand keys: None of them
+would work with B = 27 ; 1/24.21 = 5.4% of them would work with B = 28 ;
+1/20.19 = 87.6% of them would work with B = 29 ; and all would work with
+B = 210 .
+
+
+             Table 8. Estimated loss of security (δ) for N = 2048
+
+              h     B = 27        B = 28      B = 29    B = 210
+              17        -           4.21        0.19       0
+              18        -           3.71        0.15       0
+              19        -           3.29        0.12       0
+              20     16.61          2.95        0.09       0
+              21        -           2.62        0.07       0
+              22     16.61          2.32        0.06       0
+              23        -           2.05        0.05       0
+              24     16.61          1.83        0.03       0
+              25     16.61          1.64        0.03       0
+              26     16.61          1.45        0.02       0
+              27     15.61          1.29        0.02       0
+              28     14.29          1.16        0.01       0
+              29     13.61          1.02        0.01       0
+              30     13.02          0.91        0.01       0
+              31      12.7          0.81        0.01       0
+              32     11.44          0.72         0         0
+              33     10.68          0.64         0         0
+

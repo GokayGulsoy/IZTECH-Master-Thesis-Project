@@ -12,7 +12,6 @@
 
 #include <heongpu/heongpu.hpp>
 
-#include <complex>
 #include <memory>
 #include <vector>
 #include <stdexcept>
@@ -196,24 +195,6 @@ struct Operator {
         *out = ops.regular_bootstrapping(*a.ct, *g.gk, *rk.rk);
         return Ciphertext{out};
     }
-
-    // Evaluate a monomial polynomial p(x) = c0 + c1 x + ... + cd x^d on a
-    // ciphertext. Uses HEonGPU's native Paterson-Stockmeyer (`evaluate_poly`).
-    // The output ciphertext is at the depth dictated by the chain (one
-    // multiplicative consumption per polynomial-multiplication round).
-    Ciphertext polyval(Ciphertext& a, std::vector<double> power_coeffs,
-                       double target_scale, RelinKey& rk) {
-        std::vector<heongpu::Complex64> cc;
-        cc.reserve(power_coeffs.size());
-        for (double c : power_coeffs) cc.emplace_back(c, 0.0);
-        int max_deg = static_cast<int>(power_coeffs.size()) - 1;
-        heongpu::Polynomial pol(max_deg, cc, /*lead=*/false,
-                                heongpu::PolyType::MONOMIAL, 0.0, 0.0);
-        auto out = std::make_shared<heongpu::Ciphertext<SCHEME>>();
-        *out = ops.evaluate_poly(*a.ct, target_scale, pol, *rk.rk,
-                                 heongpu::ExecutionOptions());
-        return Ciphertext{out};
-    }
 };
 
 // -----------------------------------------------------------------------------
@@ -291,8 +272,5 @@ PYBIND11_MODULE(_heongpu, m) {
              py::arg("less_key_mode") = true)
         .def("bootstrapping_key_indexs", &Operator::bootstrapping_key_indexs)
         .def("regular_bootstrapping",    &Operator::regular_bootstrapping,
-             py::arg("ct"), py::arg("galois_key"), py::arg("relin_key"))
-        .def("polyval",                  &Operator::polyval,
-             py::arg("ct"), py::arg("power_coeffs"),
-             py::arg("target_scale"), py::arg("relin_key"));
+             py::arg("ct"), py::arg("galois_key"), py::arg("relin_key"));
 }

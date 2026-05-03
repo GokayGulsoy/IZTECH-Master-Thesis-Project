@@ -1,0 +1,881 @@
+                Iron: Private Inference on Transformers
+
+
+    Meng Hao1∗ Hongwei Li1† Hanxiao Chen1 Pengzhi Xing1 Guowen Xu2 Tianwei Zhang2
+                         1
+                         University of Electronic Science and Technology of China
+                                   2
+                                     Nanyang Technological University
+                        {menghao,hanxiao.chen,p.xing}@std.uestc.edu.cn
+                                       hongweili@uestc.edu.cn
+                             {guowen.xu,tianwei.zhang}@ntu.edu.sg
+
+
+
+                                                   Abstract
+             We initiate the study of private inference on Transformer-based models in the
+             client-server setting, where clients have private inputs and servers hold proprietary
+             models. Our main contribution is to provide several new secure protocols for matrix
+             multiplication and complex non-linear functions like Softmax, GELU activations,
+             and LayerNorm, which are critical components of Transformers. Specifically, we
+             first propose a customized homomorphic encryption-based protocol for matrix
+             multiplication that
+                               √ crucially relies on a novel compact packing technique. This
+             design achieves m× less communication (m is the number of rows of the output
+             matrix) over the most efficient work. Second, we design efficient protocols for three
+             non-linear functions via integrating advanced underlying protocols and specialized
+             optimizations. Compared to the state-of-the-art protocols, our recipes reduce about
+             half of the communication and computation overhead. Furthermore, all protocols
+             are numerically precise, which preserve the model accuracy of plaintext. These
+             techniques together allow us to implement Iron, an efficient Transformer-based
+             private inference framework. Experiments conducted on several real-world datasets
+             and models demonstrate that Iron achieves 3 ∼ 14× less communication and
+             3 ∼ 11× less runtime compared to the prior art.
+
+
+1       Introduction
+Transformer-based models [1–5] have realized tremendous success in the fields of natural language
+processing (NLP) and computer vision (CV) due to their strong representation capabilities. As a
+new neural network architecture, the Transformer [1] mainly utilizes the self-attention mechanism
+to compute representations without sequence-aligned recurrence or convolution. Following this
+work, a number of Transformer variants, such as BERT [2] and GPT [3] in NLP, ViT [4] and Swin
+Transformer [5] in CV, have achieved state-of-the-art performance on lots of real-world tasks.
+The success of Transformers and other big models facilitates emerging inference services and
+applications [6, 7]. In particular, a service provider trains a complex model based on the Transformer,
+and deploys it as a paid inference service, e.g., machine translation and question answering. A
+client queries this service with his input samples and obtains the desired responses. Unfortunately,
+current inference systems suffer from serious privacy concerns [8]. On the one hand, clients need
+to send confidential inputs to the service provider, which could compromise the data privacy of
+these clients if the provider is untrusted. On the other hand, it is undesirable for the provider to
+distribute the proprietary Transformer-based model to clients, since he needs a large amount of
+data and computation resources to construct the model [9]. Therefore, there exists a gap between
+    ∗
+        This work was done at NTU as a visiting student.
+    †
+        Corresponding author
+
+
+36th Conference on Neural Information Processing Systems (NeurIPS 2022).
+unprecedented performance and privacy constraints, which motivates our study of private Transformer
+inference.
+Private inference aims to protect server’s model weights from clients, while guaranteeing that the
+server learns no information about clients’ private inputs. Recently, private inference on traditional
+neural networks (e.g., convolutional neural networks) have been approached by using secure 2-party
+computation (2PC) techniques [10–14]. However, due to essentially different structures, private
+Transformer inference brings several new challenges. First, Transformer-based models use lots of
+high-dimensional matrix multiplications, rather than matrix-vector multiplications widely studied in
+prior works. While we can straightforwardly extend prior matrix-vector multiplication protocols to
+our setting, unfortunately, even the most efficient design [14] incurs heavy communication because
+of interacting a large amount of ciphertexts. Second, Transformer-based models use complex math
+functions like Softmax, GELU activations [15], and LayerNorm, in each block, rather than crypto-
+friendly non-linear functions such as ReLU and Maxpool. Existing methods either use precision-
+impaired high-order polynomial approximations [16, 11] or only support limited math functions for
+specific scenarios [17]. Even worse, all of these approaches are computationally intensive and often
+require a large amount of communication (for more related works, please refer to Appendix A.5).
+To facilitate the widespread adoption of Transformer-based inference services in privacy-critical
+scenarios, designing efficient protocols for the above complex operations is of paramount importance.
+In this paper, we design Iron, an efficient hybrid cryptographic framework for private Transformer in-
+ference without revealing any sensitive information about the server’s model weights or clients’ inputs.
+Iron contributes several new specialized protocols for the complicated operations in Transformers
+to alleviate the performance overhead. Specifically, we first propose a customized homomorphic
+encryption-based protocol for matrix multiplications. Our insight is to pack more plaintext inputs into
+a single ciphertext by devising a compact packing method, while preserving the functionality of ma-
+trix multiplication. Compared to √the most efficient matrix-vector multiplication solution implemented
+in Cheetah [14], we can achieve m× (m is the number of rows of the output matrix) improvement
+in terms of communication overhead, which is about 8× reduction for various Transformer models.
+Second, we carefully design efficient protocols for Softmax, GELU, and LayerNorm. These protocols
+are built upon SIRNN [17], the state-of-the-art cryptographic framework for private inference on
+recurrent neural networks, and make several customized optimizations, such as reducing the overhead
+of exponentiation in Softmax and simplifying GELU and LayerNorm. These optimizations achieve
+1.3 ∼ 1.8× less runtime and 1.4 ∼ 1.8× less communication on three non-linear functions. Further-
+more, these protocols are numerically precise, which preserve the model accuracy of plaintext. We
+also give a formal security proof for our designed protocols to demonstrate the security guarantee.
+Based on the above efficient components, we implement a private Transformer inference framework,
+Iron, and conduct end-to-end experiments with various BERT architectures [2] (BERT-Tiny, BERT-
+Medium, BERT-Base, and BERT-Large) on GLUE benchmarks [18]. Note that Iron is readily
+extended to other Transformer-based models (e.g., ViT) since they share very similar architectures
+and same operations. Experimental results show that Iron achieves 3 ∼ 14× less communication
+and 3 ∼ 11× less runtime costs over SIRNN on four BERT models. Moreover, compared with the
+general-purpose state-of-the-art framework MP-SPDZ [16], Iron has up to two orders of magnitude
+improvement in terms of both communication and computation efficiency.
+A concurrent work [19] proposed a privacy-preserving Transformer inference with homomorphic
+encryption, called THE-X. Below, we illustrate some important differences in terms of protocol
+design and security. (1) Protocol design. Our work aims to design new efficient protocols for the
+complex operations of Transformer-based models, while orthogonal to ours, THE-X replaces them
+with crypto-friendly operations. For example, THE-X replaces GELUs with simpler operations,
+i.e., ReLUs, and Softmax with the combination of ReLU and polynomials. (2) Security. Our work
+achieves more rigorous privacy protection than THE-X. Specifically, our work uses homomorphic
+encryption and secret sharing techniques to hide private information (including intermediate results)
+of all layers. Such rigorous privacy guarantee is in line with recent state-of-the-art private inference
+works [14, 17]. However, in THE-X, the inputs of each non-linear layer are leaked to the client,
+which may causes severe privacy leakages in real-world applications [13]. Therefore, our work may
+be used to enhance the security of THE-X.
+
+
+
+
+                                                   2
+2         Preliminaries
+2.1       Threat Model
+
+As shown in the left part of Figure 1, Iron works in a general private inference scenario, where the
+server P0 holds a Transformer-based model M with private weights w, while the client P1 holds a
+private input x. Our framework enables the client to query the server’s inference service and learn
+the output of the model on its input, i.e., M (w, x). Same as prior works [14, 17], we consider an
+honest-but-curious adversary that passively corrupts either the server or the client, but not both. Such
+an adversary follows the protocol specification exactly, but may try to learn more information3 than
+allowed (e.g., the model’s weights or inference inputs) via analyzing the data it receives. In Appendix
+A.1.2, we give a more formal description of the threat model for security analysis.
+
+2.2       Cryptographic Primitives
+
+All our protocols are built on the 2-out-of-2 additive secret sharing (ASS) technique [21, 22] over
+the ring Z2ℓ , in which an ℓ-bit input x is split into two random shares ⟨x⟩0 , ⟨x⟩1 , held by P0 and P1 ,
+respectively, such that x = ⟨x⟩0 + ⟨x⟩1 mod Z2ℓ . When ℓ = 1, i.e., over Z2 , we use ⟨x⟩B to denote
+boolean shares. In our protocols, we use ⟨x⟩ to denote that Pb holds ⟨x⟩b for b ∈ {0, 1}. The security
+[21] guarantees that given a share ⟨x⟩0 or ⟨x⟩1 , the value of x is perfectly hidden. This secret-sharing
+property is maintained throughout our private inference scheme. ASS naturally supports linear
+operations without communication. For instance, to compute cx + y with the constant c and secret
+shares ⟨x⟩ and ⟨y⟩, Pb can locally compute ⟨z⟩b = c⟨x⟩b + ⟨y⟩b , where ⟨z⟩0 + ⟨z⟩1 = cx + y mod 2ℓ .
+To achieve more functionalities under shared inputs, we require to invoke advanced homomorphic
+encryption or oblivious transfer techniques [22].
+Notations. Let x ∤ y means x is not a divisor of y. We use bold lower-case letters (e.g., x) to represent
+vectors, and bold upper-case letters (e.g., X) to denote matrices. Like prior works [17, 14], we encode
+inputs with the fixed-point representation denoted by Fix (refer to Appendix         A.1.1 for details). Let
+AN,p denote the set of integer polynomials AN,p = Zp [x]/ xN + 1 . We use the circumflex of
+lower-case letters (e.g., â) to represent a polynomial, and â[i] to denote the i-th coefficient of â. Given
+polynomials x̂, ŷ ∈ AN,p , the product ẑ = x̂ · ŷ over AN,p is defined as
+                                X                     X
+                     ẑ[i] =         x̂[j]ŷ[i − j] −      x̂[j]ŷ[N − j + i] mod p.                       (1)
+                              0≤j≤i                    i<j<N
+
+Additively Homomorphic Encryption (AHE) [23, 24]. This encryption scheme additionally
+enables linearly homomorphic operations on ciphertexts. Specifically, an AHE scheme is a tuple of
+algorithms AHE   = (KeyGen; Enc; Dec; Eval) with the parameter {N, q, p} and the following syntax:
+1) KeyGen 1k → (pk, sk): on input a security parameter κ, KeyGen is a randomized algorithm
+that outputs a public key pk ∈ AN,q and a secret key sk ∈ AN,q . 2) Enc(pk, m̂) → ĉ: the encryption
+algorithm Enc takes a plaintext polynomial m̂ ∈ AN,p and encrypts it using pk into a ciphertext
+polynomial ĉ ∈ AN,q . 3) Dec(sk, ĉ) → m̂: on input sk and a ciphertext ĉ, the (deterministic)
+decryption algorithm Dec recovers the plaintext message m̂. 4) Eval(pk, ĉ1 , ĉ2 , func) → ĉ: on
+input pk, two ciphertexts ĉ1 , ĉ2 containing m̂1 , m̂2 , and a linear function func, Eval outputs a new
+ciphertext ĉ encrypting func (m̂1 , m̂2 ). Let ⊞, ⊟, ⊠ denote homomorphic addition, homomorphic
+subtraction and homomorphic multiplication with a plaintext, respectively. Iron builds the matrix
+multiplication protocol on the Brakerski-Fan-Vercauteren (BFV) scheme [25, 26], which is one of
+the state-of-the-art lattice-based homomorphic encryption solutions.
+Oblivious Transfer. The 1-out-of-k oblivious transfer (OT) [27] is denoted by k-OTℓ , where one
+party is the sender with k messages x0 , . . . , xk−1 ∈ {0, 1}ℓ and the other party is the receiver with
+an index i ∈ [k]. The receiver learns xi as the output, and the sender learns nothing. Additionally,
+we also use the 1-out-of-2 correlated OT, denoted by 2-COTℓ [28], which is defined as follows: the
+sender inputs a correlation x ∈ Z2ℓ , the receiver inputs a choice bit i ∈ {0, 1}, and the protocol
+outputs a random element r ∈ Z2ℓ to the sender and r + i · x to the receiver. k-OTℓ and 2-COTℓ
+require 2λ + kℓ and λ + ℓ bits of communication, respectively, and are executed in 2 rounds. The OT
+protocols are widely used to build the underlying protocols [13, 17] in Figure 3 we rely on.
+      3
+     Like prior works [17, 14], Iron does not hide the information that can be indirectly extracted from the
+inference results. Study of mitigation solutions (e.g., differential privacy [20]) is beyond the scope of this work.
+
+
+                                                         3
+               Server
+                                     Pos&seg
+                                     Encoding          𝑄𝑄
+           Proprietary model
+                                                                                                         Linear
+             Transformer                        Linear 𝐾𝐾   MatMul       Softmax   MatMul   LayerNorm             LayerNorm
+                                                                                                         GELU
+                                    Embedding          𝑉𝑉
+                                                                                                                   Outputs
+               Private                                                                                   Feed
+                                                                     Attention
+              Inference                                                                                 Forward
+                                      Inputs
+
+                                    Cryptographic                                     ΠSoftmax      ΠLayerNorm     ΠGELU
+             Input   Output                           ΠMatMul            ΠMatMul
+                                      Protocols
+               Client
+                               Figure 1: Overview of private Transformer inference
+
+3     Overview
+3.1   Transformer Architecture
+
+The Transformer is an encoder-decoder architecture, where both parts have a similar structure. Hence,
+we mainly focus on the encoder below. The encoder is composed of a stack of identical blocks,
+each with two sub-layers, i.e., a multi-head self-attention mechanism and a feed-forward network, as
+shown in Figure 1. Besides, residual connection and layer normalization (LayerNorm) are employed
+around each of the two sub-layers. We describe a block of the encoder as follows.
+Attention layer. An attention function can be described as mapping a query XQ and a set of key-
+value pairs (XK , XV ) to a weighted sum of the values, where the weight is computed by a metric of
+the query with the corresponding key [1]. This function can be formalized as below:
+                                                                    √ 
+                     Attention(XQ , XK , XV ) = Softmax XQ XTK / d XV ,                         (2)
+
+where XQ , XK , XV are different linear projections of the input X, i.e., XQ = XWQ , XK =
+XWK , XV = XWV , and d is the dimension of representations. Multi-head attention extends the
+above mechanism to H parallel attention layers and is illustrated in Appendix A.1.3.
+Feed-forward layer. A fully connected feed-forward layer consists of two linear transformations
+with a GELU activation in between, where GELU is the Gaussian Error Linear Unit function [15].
+This layer can be represented as follows:
+                               FeedForward(X) = GELU(XW1 + b1 )W2 + b2 .                                                      (3)
+
+In addition to the above encoder-decoder blocks, an embedding layer is employed at the beginning
+of the model to convert input tokens Xinput to continuous feature vector representations. This is
+formulated as X = Xinput WE , where WE is the embedding lookup table.
+
+3.2   Private Transformer Inference
+
+According to the required crypographic operations, the layers of Transformers can be broken into
+two categories - linear and non-linear.
+   1) Linear layers: these include embedding, matrix multiplication in Attention, and fully-connected
+layer. All protocols of these operations rely crucially on the matrix multiplication protocol ΠMatMul
+in Section 4.1. It lies in the setting where P0 and P1 take as input the matrices X and Y, and learn
+the sharings ⟨Z⟩0 and ⟨Z⟩1 , respectively, such that Z = XY.
+  2) Non-linear layers: these consist of Softmax, GELU and LayerNorm. The non-linear operations
+are directly evaluated by exploiting our proposed protocols in Section 4.2, i.e., ΠGELU , ΠSoftmax ,
+ΠLayerNorm . All of these take the additive shares ⟨X⟩ as input, and output the additive shares
+⟨Y⟩ = ΠFunc (⟨X⟩), where Func ∈ {GELU, Softmax, LayerNorm}.
+Overview of private inference. In the entire private inference process, we maintain the following
+invariant: P0 and P1 begin with additive shares of the input to the layer, and end with additive shares
+(over the same ring Z2ℓ ) of the output of the layer after the protocol. This allows us to stitch protocols
+for arbitrary layers sequentially to obtain a secure computation scheme for any Transformer-based
+models. To clearly understand our scheme, we take an example of private inference between P0
+and P1 on the embedding layer and the first encoder block, as shown in the right part of Figure 1.
+Here, our example uses the designed protocols as a black box, i.e., ΠMatMul , ΠGELU , ΠSoftmax , and
+ΠLayerNorm , and we discuss how to efficiently implement these protocols in Section 4.
+
+
+                                                                     4
+                An example over ℤ25
+                                              𝑥𝑥� = 2𝑥𝑥 0 + 1𝑥𝑥 1 + 4𝑥𝑥 6 + 3𝑥𝑥 7                       Evaluation in ΠMatMul
+                1 2              5 7 9
+         𝐗𝐗 =             𝐘𝐘 =                𝑦𝑦� = 5𝑥𝑥 0 +6𝑥𝑥 1 + 7𝑥𝑥 2 + 8𝑥𝑥 3 + 9𝑥𝑥 4 + 10𝑥𝑥 5
+                3 4              6 8 10
+                                                                       𝑥𝑥� � 𝑦𝑦� mod (𝑥𝑥 16 + 1, 25 )
+
+                        17 23    29           𝑧𝑧̂ ≡ 10𝑥𝑥 +17𝑥𝑥 + 20𝑥𝑥 2 + 23𝑥𝑥 3 + 26𝑥𝑥 4 + 29𝑥𝑥 5 + 30𝑥𝑥 6
+                                                        0         1
+       𝒁𝒁 = 𝐗𝐗 � 𝐘𝐘 ≡               mod 25          + 7𝑥𝑥 7 + 14𝑥𝑥 8 + 21𝑥𝑥 9 + 28𝑥𝑥 10 + 3𝑥𝑥 11 + 30𝑥𝑥 12 mod (𝑥𝑥 16 + 1, 25 )
+                        7 21      3
+
+                          Figure 2: A toy example of our matrix multiplication protocol.
+
+In the embedding layer, P0 and P1 take as inputs WE and Xinput , and invoke the matrix mul-
+tiplication protocol ΠMatMul to compute the input embedding X. This is represented as ⟨X⟩ =
+ΠMatMul (Xinput , WE ). In the attention layer, ΠMatMul is also invoked to generate the query, key
+and value matrices. For instance, ⟨XQ ⟩ = ΠMatMul (⟨X⟩1 , WQ ) + ⟨X⟩0 WQ , where ⟨X⟩0 WQ
+can be computed locally by P0 . The same idea is used in the generation of ⟨XK ⟩ and ⟨XV ⟩.
+Then, we compute XQK = XQ XTK that requires two invocations of ΠMatMul . The formulation is
+⟨XQK ⟩ = ΠMatMul (⟨XQ ⟩0 , ⟨XK ⟩1 ) + ΠMatMul (⟨XQ ⟩1 , ⟨XK ⟩0 ) + ⟨XQ ⟩0 ⟨XK ⟩T0 + ⟨XQ ⟩1 ⟨XK ⟩T1 ,
+where the last two terms can √ be evaluated by P0 and P1 locally. After that, we evaluate
+⟨XQK ⟩ = ΠSoftmax (⟨XQK ⟩/ d), followed by computing ⟨Z⟩
+  e                                                          e = ⟨X e QK XV ⟩ by two invocations of
+ΠMatMul . Then, the two parties invoke the LayerNorm protocol to evaluate ⟨Z⟩ = ΠLayerNorm (⟨Z⟩).
+                                                                                               e
+In the feed-forward layer, they compute ⟨Y   e 1 ⟩ = ΠMatMul (⟨Z⟩1 , W1 ) + ⟨Z⟩0 W1 , followed by
+⟨Y⟩ = ΠGELU (⟨Y1 ⟩). After that, they compute ⟨Y
+  e               e                                 e 2 ⟩ = ΠMatMul (⟨Y⟩
+                                                                      e 1 , W1 ) + ⟨Y⟩
+                                                                                    e 0 W1 , where
+⟨Y⟩0 W1 can be computed locally by P0 . Finally, the evaluation of the encoder completes after
+  e
+computing ⟨Y⟩ = ΠLayerNorm (⟨Y  e 2 ⟩).
+
+
+4     Supporting Protocols
+4.1   Protocol for Matrix Multiplication
+
+As shown in Section 1, naively extending well-studied matrix-vector multiplication protocols [29,
+13, 14] to our matrix multiplication setting results in a significant communication overhead, mainly
+due to frequently interacting ciphertexts. In this work, we build a specialized matrix multiplication
+protocol on top of the most efficient protocol, Cheetah [14]. Recall that the plaintext of an AHE
+scheme is a polynomial, which can pack a large number of inputs to amortize the overhead [29, 13].
+The key contribution of our proposed protocol is a more compact input packing approach.
+Our starting point is that polynomial multiplication implies vector inner product, if we arrange
+the coefficients properly [14]. As shown in Equation 1, when multiplying two polynomials of
+degree-(N -1), the (N -1)-th coefficient of the resulting polynomial is the inner product of the two
+coefficient vectors in opposite orders. By using an appropriate arrangement of coefficients, this idea
+can be extended to matrix multiplications, since they consist of a set of inner products. We give the
+definitions of two input packing functions πL : Zm×n
+                                                  2ℓ
+                                                        → AN,2ℓ and πR : Zn×k2ℓ
+                                                                                 → AN,2ℓ as follows:
+                 x̂ = πL (X), s.t., x̂ [i · n · k + (n − 1) − j] = X[i, j], for i ∈ [m], j ∈ [n]
+                 ŷ = πR (Y), s.t., ŷ [j · n + i] = Y[i, j], for i ∈ [n], j ∈ [k]
+
+where all other coefficients of x̂ and ŷ are set to 0. Multiplication of polynomials ẑ = x̂ · ŷ directly
+gives the result of matrix multiplication Z = XY mod 2ℓ in some of ẑ’s coefficients. We formalize
+this process as below, and give a toy example in Figure 2.
+Theorem 4.1. Assuming mnk ≤ N and given two polynomials x̂ = πL (X) and ŷ = πR (Y), the
+matrix multiplication Z = XY mod 2ℓ can be evaluated via the product ẑ = x̂ · ŷ, where Z[i, j] is
+computed in ẑ [i · n · k + (j + 1) · n − 1] for i ∈ [m] and j ∈ [k].
+We defer the proof to Appendix A.2.1. When mnk > N , we first partition the matrices X, Y
+into sub-matrices of mw × nw and nw × kw elements, respectively, such that mw nw kw ≤ N .
+Zero-padding is required when mw ∤ m, nw ∤ n or kw ∤ k. The protocol is shown in Algorithm 1.
+Complexity and security analysis. For complexity, totally, two parties interact kkw ( mmw + nnw )
+ciphertexts, and operate with O(mnk/N ) homomorphic additions and multiplications. We formalize
+the selection of parameters mw , nw , kw as an optimization problem, to minimize the communication
+
+
+                                                              5
+cost.
+√ Through our analysis in Appendix A.2.2, in general scenarios, our method theoretically achieves
+  m communication improvement over Cheetah [14]. Notably, when mnk ≤ N , we reduce the
+communcation cost by a factor of m, since Cheetah encodes each row of the matrix into a ciphertext.
+Besides, the security proof is shown in Appendix A.2.3.
+
+Algorithm 1 Secure Matrix Multiplication Protocol
+Input: P0 holds X ∈ Zm×n  2ℓ
+                               , and P1 holds Y ∈ Zn×k  2ℓ
+                                                            .
+Output: P0 and P1 get ⟨Z⟩0 , ⟨Z⟩1 ∈ Zm×k    2ℓ
+                                                 , respectively, where Z = XY.
+ 1: P0 , P1 compute the partition window size 0 < mw ≤ m, 0 < nw ≤ n and 0 < kw ≤ k such that
+    mw nw kw ≤ N , and set n′ = ⌈n/nw ⌉, m′ = ⌈m/mw ⌉, and k ′ = ⌈k/kw ⌉.
+                                                                   w ×kw
+ 2: P1 partitions the matrix Y into block matrices Yβ,γ ∈ Zn      2ℓ
+                                                                          for β ∈ [n′ ] and γ ∈ [k ′ ].
+ 3: P1 encodes the matrices to polynomials ŷβ,γ = πR (Yβ,γ ) for β ∈ [n′ ] and γ ∈ [k ′ ]. Then P1
+    sends to P0 the ciphertexts {CTβ,γ = Enc(ŷβ,γ )}.
+                                                                      w ×nw
+ 4: P0 partitions the matrix X into block matrices Xα,β ∈ Zm       2ℓ
+                                                                            for α ∈ [m′ ] and β ∈ [n′ ]. P0
+    encodes the matrices to polynomials x̂α,β = πL (Xα,β ).
+ 5: P0 uniformly at random samples plaintext polynomials r̂α,γ for α ∈ [m′ ] and γ ∈ [k ′ ]. P0
+    decodes these polynomials to a random mask R ∈ Zm×k       2ℓ
+                                                                   according to Theorem 4.14 .
+ 6: On receiving the ciphertexts {CTβ,γ } from P1 , P0 operates CT′α,γ = ⊞β∈[n′ ] (x̂α,β ⊠ CTβ,γ ) ⊟
+    r̂α,γ for α ∈ [m′ ] and γ ∈ [k ′ ]. Then P0 sends to P1 the ciphertexts CT′α,γ .
+                                                                               
+
+ 7: P0 outputs R mod 2ℓ as the share      ⟨Z⟩0 .
+ 8: On receiving the ciphertexts CT′α,γ from P0 , P1 computes ⟨ẑα,γ ⟩1 = Dec(CT′α,γ ) that are
+                                    
+
+    decoded to ⟨Z⟩1 using the method in Theorem 4.1.
+
+
+4.2       Protocols for Non-linear Functions
+
+Our non-linear protocols rely on several underlying protocols from the state-of-the-art works [13, 17].
+In Figure 3, we enumerate the inputs and outputs of these protocols and then use them as a black box
+(See Appendix A.3.2 for details). On this basis, we provide efficient protocols for Softmax, GELU,
+and LayerNorm with specific optimizations. Additional details and security analysis are shown in
+Appendices A.3.3 and A.3.4.
+              Multiply ΠMulOT Compare ΠCMP NegExp ΠnExp RecipSqrt ΠrSqrt Recip ΠRecip
+              Input:                  Input:                 Input:                Input:               Input:
+                • 𝑃𝑃𝑏𝑏 : 𝑥𝑥 𝑏𝑏 , 𝑦𝑦 𝑏𝑏 • 𝑃𝑃𝑏𝑏 : 𝑥𝑥 𝑏𝑏          • 𝑃𝑃𝑏𝑏 : 𝑥𝑥 𝑏𝑏        • 𝑃𝑃𝑏𝑏 : 𝑥𝑥 𝑏𝑏        • 𝑃𝑃𝑏𝑏 : 𝑥𝑥 𝑏𝑏
+              Output:                 Output:                Output:               Output:              Output:
+                • 𝑃𝑃𝑏𝑏 : 𝑧𝑧 𝑏𝑏           • 𝑃𝑃𝑏𝑏 : 𝑧𝑧 𝐵𝐵𝑏𝑏      • 𝑃𝑃𝑏𝑏 : 𝑧𝑧 𝑏𝑏        • 𝑃𝑃𝑏𝑏 : 𝑧𝑧 𝑏𝑏        • 𝑃𝑃𝑏𝑏 : 𝑧𝑧 𝑏𝑏
+                                                                                             𝟏𝟏
+                  s.t. 𝒛𝒛 = 𝒙𝒙𝒙𝒙       s.t. 𝒛𝒛 = 𝟏𝟏{𝒙𝒙 > 𝟎𝟎} s.t. 𝒛𝒛 = 𝒆𝒆𝒙𝒙 , 𝒙𝒙<0 s.t. 𝒛𝒛 = 𝒙𝒙 , 𝒙𝒙>𝝐𝝐  s.t. 𝒛𝒛 = 𝟏𝟏/𝒙𝒙
+
+                                     Figure 3: Underlying protocols from [13, 17]
+4.2.1      Softmax
+To evaluate attention layers, we need an efficient protocol to compute Softmax on secret-shared
+                                            d
+     P In particular, for a vector x ∈ Z2ℓ , the Softmax function is denoted as Softmaxi (x) =
+values.
+exi / j∈[d] exj for i ∈ [d]. The main challenge is to efficiently compute the underlying exponential
+function. Following the idea from [11, 30], we first normalize the input vector by x − maxi∈[d] xi ,
+which is always negative, and then invoke the existing exponential protocol ΠnExp in Figure 3 that only
+evaluates exponentiation on negative inputs. A simple analysis shows softmax(x − maxi∈[d] xi ) is
+equal to softmax(x). We evaluate max using a tree-reduction protocol, denoted by Πmax . Specifically,
+we arrange the vector x ∈ Zd2ℓ into a 2-ary tree with the depth of log d, and evaluate the tree in a
+top-down fashion [31]. In each comparison of two secret-shared elements xi and xj , we reduce it
+to the invocations of ΠCMP and ΠMulOT , i.e., max(xi , xj ) = ΠMulOT (xi − xj , ΠCMP (xi − xj )) + xj .
+With the above insight, the Softmax protocol is detailed in Algorithm 2.
+SIRNN [17] also provides a solution for the generic exponential protocol by extending ΠnExp . The
+                                             1
+idea is that the exponential of x equals nExp(−x) if x ≥ 0, and nExp(x) otherwise, where nExp is the
+      4
+    This operation aims to avoid extra information leakage from the output polynomial’s coefficients. The
+details refer to [14] and their implementations.
+
+
+                                                                   6
+same as the exponential function except for negative inputs. Compared to our solution, realizing the
+softmax function with this generic exponential protocol additionally requires d calls to the reciprocal
+protocol ΠRecip and multiplication protocol ΠMUTOT . Besides, compared with the generic library
+MP-SPDZ [16] that provides native support for exponentiation, our protocols achieve orders of
+magnitude improvement as shown in Section 5.2.
+
+Algorithm 2 Secure Softmax Protocol
+Input: P0 , P1 hold ⟨x⟩0 ∈ Zd2ℓ , ⟨x⟩1 ∈ Zd2ℓ , respectively.
+Output: P0 , P1 get ⟨y⟩0 ∈ Zd2ℓ , ⟨y⟩1 ∈ Zd2ℓ , respectively, where y = Softmax(x).
+ 1: P0 , P1 invoke Πmax (x) to compute ⟨max(x)⟩, where max(x) = maxi∈[d] xi .
+                                                                     x̄i
+ 2: For i ∈ [d], P0 , P1 invoke ΠnExp on
+                                       Pinput ⟨x̄   i ⟩, and learn ⟨e P  ⟩, where x̄i = xi − max(x).
+ 3: P0 , P1 invoke ΠRecip with inputs ⟨ i∈[d] e ⟩ and learn ⟨1/ i∈[d] ex̄i ⟩.
+                                                 x̄i
+
+ 4: For i ∈ [d], P0 , P1 invoke ΠMulOT with inputs ⟨1/ i∈[d] ex̄i ⟩ and ⟨ex̄i ⟩, and set outputs as ⟨yi ⟩.
+                                                           P
+
+
+4.2.2   GELU
+Rather than crypto-friendly ReLU [13], Transformer-based
+                                                              models utilize GELU activations
+                                                              hp                                  [15],
+                                                                                      3
+                                                                                        i
+which can be represented as GELU(x) = 0.5x 1 + Tanh              2/π x + 0.044715x         . The com-
+plete protocol is shown in Algorithm 3, in which we provide two insights to reduce the cost of GELU.
+First, we present an optimized protocol for the square of a secret-shared input ⟨x⟩. This relies on the
+observation: x2 = ⟨x⟩20 + ⟨x⟩21 + 2⟨x⟩0 ⟨x⟩1 , where the first two terms can be locally computed by
+P0 and P1 . We only invoke OT protocols to compute the cross term 2⟨x⟩0 ⟨x⟩1 , and the optimized
+overhead is half that of the multiplication protocol ΠMulOT .
+                                                                2x
+Second, we further optimize the evaluation of Tanh(x) = ee2x −1  +1 . We observe that the sign of x is
+equal to the sign of Tanh(x), which allows us to leverage the negative exponential protocol ΠnExp
+almost for free. At a high level, our Tanh protocol first learns the sign of the input x, and then
+evaluates Tanh on the negative input x̄ with the constraint |x̄| = |x|. Finally, the protocol generates
+the real output Tanh(x) that equals Tanh(x̄) if x ≤ 0, and −Tanh(x̄) otherwise. Our leaner Tanh
+protocol is given in Algorithm 5 of Appendix A.3.1. SIRNN [17] recently proposed the most efficient
+Tanh protocol with the insight of Tanh(x) = 2Sigmoid(2x) − 1, where Sigmoid(x) = 1+e1−x .
+However, the evaluation of Sigmoid uses the same idea as the general exponential protocol, as shown
+in Section 4.2.1. Compared with the protocol in SIRNN, our recipe for Tanh saves one invocation of
+the reciprocal protocol ΠRecip and multiplication protocol ΠMulOT .
+
+Algorithm 3 Secure GELU Protocol
+Input: P0 , P1 hold ⟨x⟩0 ∈ Z2ℓ , ⟨x⟩1 ∈ Z2ℓ , respectively.
+Output: P0 , P1 get ⟨y⟩0 ∈ Z2ℓ , ⟨y⟩1 ∈ Z2ℓ , respectively, where y = GELU(x).    p
+ 1: P0 , P1 invoke ΠMulOT with inputs ⟨x⟩, and set their outputs as ⟨z⟩ = Fix( 2/π)(⟨x⟩ +
+    Fix(0.044715)⟨x⟩3 )
+ 2: P0 , P1 invoke ΠTanh with inputs ⟨z⟩, and set their outputs as ⟨Tanh(z)⟩.
+ 3: P0 , P1 invoke ΠMulOT with inputs ⟨Fix(0.5)x⟩ and ⟨Fix(1) + Tanh(z)⟩, and output ⟨y⟩.
+
+
+4.2.3   LayerNorm
+For a vector x ∈ Zd2ℓ , the LayerNorm function is denoted by LayerNormi (x) = γ(xi − µ)/σ + β
+                        P                    qP
+for i ∈ [d], where µ = i∈[d] xi /d and σ =                     2
+                                                 i∈[d] (xi − µ) . In contrast to batch normalization
+(BN) in CNNs that is evaluated for free [14], LayerNorm requires multiplication and reciprocal
+square root operations. In our implementation, we observe that the multiplication dominates the
+overhead of LayerNorm. To address this issue, we adopt the same idea in GELU to compute the
+square of xi − µ, which saves half of the communication and computation costs.
+Besides, inspired by the optimization in BN [14], we apply a LayerNorm merge technique to further
+reduce the overhead. Specifically, we make the observation that the weights γ and β of the LayerNorm
+layer are already known by P0 . As a result, P0 first multiplies the scale factor γ with the weights of
+
+
+                                                   7
+Table 1: Comparing the runtime (sec) and communication (MB) costs of our matrix multiplication
+and non-linear protocols with SOTA
+                         Matrix Multiplication                                            Non-Linear Protocols
+                Dims=(32, 8, 16)   (128, 64, 128)   (128, 768, 768)                 Softmax          LayerNorm             GELU
+      Methods                                                         Methods
+                Time    Comm.      Time Comm.       Time    Comm.                Time     Comm.     Time     Comm.     Time     Comm.
+
+       Ours     0.006    0.11      0.066   1.74      1.71    15.45        Ours    4.78    206.265    2.34    102.435    0.30     10.07
+                0.16     2.79      0.77    14.78     6.10   134.37                7.95    347.71     4.16    184.42     0.38     14.07
+      Cheetah                                                          SIRNN
+                (26×)   (25×)      (11×)   (8×)     (3×)     (8×)                (1.7×)   (1.7×)    (1.8×)   (1.8×)    (1.3×)   (1.4×)
+                0.04     1.34      1.59    70.08    110.33 4920.08               297.75 172,837 202.75 101,642         15.34    7,908.69
+      SIRNN                                                           MP-SPDZ
+                (6×)    (12×)      (23×)   (40×)    (64×)   (318×)               (62×)    (837×)    (86×)    (992×)    (51×)    (785×)
+
+
+the next linear layer. After invoking the linear layer protocol on the scaled weights, P0 adds the shift
+weight σ to his additive share. The optimized protocol for LayerNorm is presented in Algorithm 4.
+
+Algorithm 4 Secure LayerNorm Protocol
+Input: P0 , P1 hold ⟨x⟩0 ∈ Zd2ℓ , ⟨x⟩1 ∈ Zd2ℓ , respectively.
+Output: P0 , P1 get ⟨y⟩0 , ⟨y⟩1 , respectively, where y = LayerNorm(x). P
+ 1: For i ∈ [d], P0 , P1 invoke ΠMulOT to compute ⟨(xi − µ)2 ⟩, where µ = i∈[d] xi /d.
+ 2: P0 , P1 invoke ΠrSqrt with inputs ⟨ i∈[d] (xi − µ)2 ⟩ to learn output ⟨ σ1 ⟩.
+                                       P
+
+ 3: For i ∈ [d], P0 , P1 invoke ΠMulOT with inputs ⟨ σ1 ⟩ and ⟨xi − µ⟩, and set outputs as ⟨yi ⟩.
+
+
+
+5      Evaluation
+5.1     Experimental Setup
+
+Implementation. Iron is built on top of the SEAL library [32] and the EMP toolkit [33] in C++. We
+also use the EzPC framework [34]. This framework compiles a high-level TensorFlow code to secure
+computation protocols, which are then executed by our designed cryptographic backends. Like [17],
+we simulate a LAN network setting, where the bandwidth is 377 MBps and the echo latency is 0.8ms.
+All the following experiments are performed on AWS c5.9xlarge instances with Intel Xeon 8000
+series CPUs at 3.6GHz.
+Datasets and Models. We evaluate Iron on four NLP models from [35, 36]: BERT-Tiny, BERT-
+Medium, BERT-Base and BERT-Large. These models are parameterized by three hyper-parameters:
+the number of blocks, the dimension of representations and the number of input tokens (refer to
+Appendix A.4.1 for the hyper-parameters of these models). We train the models for four NLP tasks
+over the datasets of the Stanford Sentiment Treebank (SST-2), the Microsoft Research Paraphrase
+Corpus (MRPC), the Multi-Genre Natural Language Inference Corpus (MNLI) and the Stanford
+Question Answering Dataset (QNLI) from GLUE benchmarks [18].
+
+5.2     Microbenchmark Evaluation
+
+Matrix multiplication. In the left part of Table 1, we compare the performance of the proposed
+matrix multiplication protocol with the state-of-the-art counterparts of Cheetah [14] and SIRNN [17].
+For fairness, we follow Cheetah for the parameter setup of homomorphic encryption. Compared with
+Cheetah, our rumtime is 3 ∼ 26× faster, and our communication cost is 8 ∼ 25× lower, depending
+on the input size. Notably, for small-size matrices (e.g., ones with 32 × 8 and 8 × 16 elements),
+our protocol only requires 0.11 MB communication and 6 ms runtime, while Cheetah achieves the
+computation with 2.79 MB and 160 ms. The reason is that our protocol encrypts the whole matrix
+into a single ciphertext, while Cheetah could only encrypt each row into a ciphertext, totally m
+ciphertexts (m is the number of rows of the output matrix). Moreover, compared with SIRNN that
+implements the most efficient OT-based matrix multiplication protocol, our protocol incurs up to two
+orders of magnitude less communication and an order of magnitude less runtime.
+Non-linear functions. The right part of Table 1 shows the comparison of our Softmax, GELU and
+LayerNorm protocols with the generic MP-SPDZ framework [16] and the state-of-the-art SIRNN
+library [17] for math functions. It is worth noting that we implement some functions that these
+
+
+                                                                      8
+            104                                                         104                                                    105
+                          Our work                                                    Our work            ×14.11                            Our work                                106          Ours
+
+
+
+
+                                                       Communication (GB)
+
+
+
+
+                                                                                                                                                                   Communication (GB)
+            103           SIRNN               ×11.83                                  SIRNN      ×10.99                        104          MP-SPDZ          ×65
+                                                                                                                                                                                    105          MP-SPDZ          ×652
+                                                                        103                                                                                                                                ×646
+
+
+
+
+Runtime (min)
+
+
+
+
+                                                                                                                   Runtime (min)
+                                     ×9.56                                                                                                             ×67
+                                                                                                                                               ×77                                                 ×650
+                                                                                         ×8.02
+                             ×7.19                                                                                             103                                                  104
+            102                                                         102                                                                                                               ×642
+                                                                                                                               102   ×107                                           103
+            101                                                                                                                101                                                  102
+                  ×3.30                                                 101   ×3.47
+                                                                                                                                                                                    101
+            100                                                                                                                100
+                  Tiny Medium Base Large                                      Tiny Medium Base Large                                 Tiny Medium Base Large                               Tiny Medium Base Large
+                  Model architectures of BERT                                 Model architectures of BERT                            Model architectures of BERT                          Model architectures of BERT
+
+                                             Figure 4: End-to-end comparisons with SIRNN and MP-SPDZ
+
+frameworks did not provide before. In particular, GELU and LayerNorm are implemented in MP-
+SPDZ by calling its built-in functions for tanh, square root, and reciprocal, while we add Softmax
+and GELU protocols in SIRNN utilizing sigmoid and exponent functions. As shown in this table,
+our protocols are orders of magnitude better than those of MP-SPDZ, in terms of both runtime
+and communication. In particular, for the communication cost, our protocols achieve 785 ∼ 993×
+improvement. Moreover, while our protocols are built upon the underlying protocols from SIRNN, we
+also achieve 1.3 ∼ 1.8× lower runtime and 1.4 ∼ 1.8× lower communication due to our customized
+optimizations. Such an improvement gives us significant savings in communication complexity, since
+the non-linear layer protocols dominate the overall overhead, as described below.
+
+5.3               End-to-end Inference Evaluation
+
+Comparison with prior methods. In the left part of Figure 4, we evaluate our protocols on 4 BERT
+models compared with SIRNN [17]. It is observed that our rumtime is 3.3 ∼ 11.83× faster than that
+of SIRNN, and our communication cost is 3.47 ∼ 14.11× lower over four models. Moreover, our
+performance gains scale up as the model size grows. This is because our protocols achieve better
+amortized overhead when processing large-scale evaluations. We also compare the end-to-end private
+inference with MP-SPDZ in Figure 4. The results show that our protocols are orders of magnitude
+better, in terms of both time and communication costs. This is because specialized protocols are more
+communication efficient than generic alternatives, which is also observed by SIRNN.
+Performance breakdown. In Figure 5, we present the runtime and communication breakdown of
+Iron on four BERT models. For clarity, we just report the result of one encoder. Recall that our
+private inference can be divided into linear protocols and non-linear protocols. For linear protocols,
+we observe that as the model size increases, the proportion of communication overhead remains
+approximately constant, accounting for 12 ∼ 13%. This shows that our compact ciphertext encoding
+method effectively reduces the size of communication. For non-linear functions, as the model size
+increases, the proportion of computation overhead gradually decreases, from 84% in BERT-Tiny
+to 76% in BERT-Large. The savings come from amortizing the communication and computation
+costs by packing data from large tensors. Despite such advantages, the main bottleneck of our work
+is the communication overhead of non-linear layers. However, it is an open problem to solve the
+communication issue while maintaining the model accuracy.
+Accuracy comparison with plaintext. In the left part of Figure 6, we show the accuacy of plaintext
+(float-point) and Iron (fixed-point) on the BERT-Tiny model. We observe that the accuracy achieved
+by Iron matches the accuracy of the plaintext TensorFlow code. Specifically, the accuracy loss does
+not exceed 0.3% over all datasets, and surprisingly, Iron exceeds the plaintext baseline on MNLI
+by 0.85%. Similar results also appear in private CNN inference [13]. Such accuracy advantages
+experimentally validate that our protocols are numerically precise. Moreover, in the right part of
+Figure 6, we also compare the accuracy with the plaintext baseline, as the fractional scale varies
+on MRPC. We observe that Iron with the scale of 12 exactly matches the accuracy of the plaintext
+model. The accuracy loss is lower than 1% when the scale ≥ 6. This conclusion is in line with the
+prior work [13], namely that neural networks can tolerate stochastic fault behavior [37].
+
+6               Discussion
+We discuss possible solutions to further improve the efficiency of private inference on Transformers.
+They are compatible with our proposed protocols and hence can be directly integrated into our
+framework.
+
+
+                                                                                                                   9
+            200                                                                 8
+                                                                                    1e3
+                                                                                                                        88%                                             0.27%             72
+                                 Linear                  76%                                     Linear                                  80         Ours
+
+
+
+
+                                                               Communication (MB)
+                                 Non-Linear                                                      Non-Linear                                         Plaintext   0.11%                     71
+            150                                                                                                                                                                           70
+
+Runtime (sec)
+                                                                                6                               87%
+
+
+
+
+                                                                                                                               Accuracy(%)
+                                                 78%
+                                                                                                                                         75
+
+
+
+
+                                                                                                                                                                                Accuracy(%)
+                                                                                                                                                                                          69
+            100                          81%                                    4                     88%
+                                                                                                                                         70 0.85%
+                                                                                                                                                        0%
+                                                                                                                                                                                          68
+                                                       24%                                                                                                                                67
+                50                             22%                              2                                                        65                                               66     Ours
+                           84%     19%                                                     87%                        12%
+                     16%                                                             13%
+                                                                                                   12%
+                                                                                                              13%
+                                                                                                                                                                                          65     Plaintext
+                 0 Tiny Medium Base Large                                       0 Tiny Medium Base Large                                 60 MNLI MRPC QNLI                                64 4
+                                                                                                                                                                        SST2                     6   8 10 12 14 16
+                     Model architectures of BERT                                     Model architectures of BERT                                         Datasets                                       Scale
+           Figure 5: Performance breakdown on BERT.                                                                                 Figure 6: Accuracy comparison with plaintext
+
+
+Pushing expensive operations into an offline phase. Our framework is readily extended to the pre-
+processing model, including an offline client-input independent phase and an online input-dependent
+phase. This paradigm has been instantiated in private CNN inference [38, 8], and the results show that
+about 99% of the cryptographic overhead can be moved to the offline phase. We briefly outline how
+to build our protocols with this paradigm. For linear operations, we can generate in advance Beaver’s
+triple in the matrix form [22, 38] using our matrix multiplication protocol. In the online phase,
+these triples are consumed, and it additionally requires non-cryptographic operations and plaintext
+communication. For non-linear layers, almost all operations crucially rely on the OT protocols, which
+can be pre-generated in the offline phase [39, 14]. Like linear protocols, the online phase is cheap.
+Using mixed-bitwidths in private inference. Iron works with a uniform bitwidth, which is required
+to be large enough to accommodate all intermediate values. While effectively avoiding integer
+overflows, our protocols may cause intensive communication, since the performance of non-linear
+operators depends critically on bitwidths. Taking inspiration from [17, 40], one possible optimization
+is to employ non-uniform (mixed) bitwidths, operate in low bitwidths and switch to high bitwidths
+only when necessary. To this end, the mixed-precision model should be generated with proper
+compilers by using techiniques like quantization [41, 42]. With mixed-bitwidths fixed-point models,
+our protocols can be integrated seamlessly.
+Applying orthogonal model optimizations. We can improve performance by simplifying the model
+architecture such as model pruning and advanced neural architecture search [43, 44], which have
+been commonly adopted in private CNN inference [12, 45, 37]. Like prior works [12, 45, 37] that
+find and tailor models to the requirements of private inference, we can define a proper search space
+with the goal of decreasing the overhead, e.g., substituting costly Softmax and GELU functions, or
+reducing the matrices’ dimension in matrix multiplication. As mentioned in Section 1, the concurrent
+work, THE-X [19], has explored replacing complex math functions with HE-friendly alternatives
+while achieving comparable accuracy.
+
+
+7                Conclusion
+
+We propose Iron, an efficient cryptographic framework for private Tramsformer inference. Specifi-
+cally, we carefully design a new encoding method for optimizing homomorphic encryption-based
+matrix multiplication. Further, we devise several communication-efficient non-linear protocols like
+Softmax, LayerNorm and GELU by integrating advanced secret-sharing primitives. Experimental
+results show that Iron outperforms prior art by up to one order of magnitude in terms of computation
+and communication overheads. We believe that our novel protocols would help advance the practical
+instantiations of private Transformer inference.
+
+
+Acknowledgment
+
+The authors would like to thank the anonymous reviewers for their insightful comments. This work
+is supported by the Key-Area Research and Development Program of Guangdong Province under
+Grant 2020B0101360001, National Natural Science Foundation of China under Grants 62020106013,
+61972454, and 61802051, Sichuan Science and Technology Program under Grants 2020JDTD0007
+and 2020YFG0298, the Fundamental Research Funds for Chinese Central Universities under Grant
+ZYGX2020ZB027, and Singapore Ministry of Education (MOE) AcRF Tier 2 MOE-T2EP20121-
+0006.
+
+
+                                                                                                                              10
+References
+ [1] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez,
+     Łukasz Kaiser, and Illia Polosukhin. Attention is all you need. In Proceedings of NeurIPS,
+     2017.
+ [2] Jacob Devlin, Ming-Wei Chang, Kenton Lee, and Kristina Toutanova. Bert: Pre-training of
+     deep bidirectional transformers for language understanding. In Proceedings of NeurIPS, 2018.
+ [3] Alec Radford, Karthik Narasimhan, Tim Salimans, and Ilya Sutskever. Improving language
+     understanding by generative pre-training. 2018.
+ [4] Alexey Dosovitskiy, Lucas Beyer, Alexander Kolesnikov, Dirk Weissenborn, Xiaohua Zhai,
+     Thomas Unterthiner, Mostafa Dehghani, Matthias Minderer, Georg Heigold, Sylvain Gelly, et al.
+     An image is worth 16x16 words: Transformers for image recognition at scale. In Proceedings
+     of ICLR, 2020.
+ [5] Ze Liu, Yutong Lin, Yue Cao, Han Hu, Yixuan Wei, Zheng Zhang, Stephen Lin, and Baining
+     Guo. Swin transformer: Hierarchical vision transformer using shifted windows. In Proceedings
+     of ICCV, pages 10012–10022, 2021.
+ [6] Clarifai general image embedding model. URL https://www.clarifai.com/models/
+     general-image-embedding.
+ [7] Openai api. URL https://openai.com/blog/openai-api.
+ [8] Ryan Lehmkuhl, Pratyush Mishra, Akshayaram Srinivasan, and Raluca Ada Popa. Muse:
+     Secure inference resilient to malicious clients. In Proceedings of USENIX Security, pages
+     2201–2218, 2021.
+ [9] Yupei Liu, Jinyuan Jia, Hongbin Liu, and Neil Zhenqiang Gong. Stolenencoder: Stealing
+     pre-trained encoders. arXiv:2201.05889, 2022.
+[10] Ran Gilad-Bachrach, Nathan Dowlin, Kim Laine, Kristin Lauter, Michael Naehrig, and John
+     Wernsing. Cryptonets: Applying neural networks to encrypted data with high throughput and
+     accuracy. In Proceedings of ICML, pages 201–210, 2016.
+[11] Brian Knott, Shobha Venkataraman, Awni Hannun, Shubho Sengupta, Mark Ibrahim, and
+     Laurens van der Maaten. Crypten: Secure multi-party computation meets machine learning. In
+     Proceedings of NeurIPS, 2021.
+[12] Zahra Ghodsi, Akshaj Kumar Veldanda, Brandon Reagen, and Siddharth Garg. Cryptonas:
+     Private inference on a relu budget. In Proceedings of NeurIPS, pages 16961–16971, 2020.
+[13] Deevashwer Rathee, Mayank Rathee, Nishant Kumar, Nishanth Chandran, Divya Gupta, Aseem
+     Rastogi, and Rahul Sharma. Cryptflow2: Practical 2-party secure inference. In Proceedings of
+     ACM CCS, pages 325–342, 2020.
+[14] Zhicong Huang, Wen-jie Lu, Cheng Hong, and Jiansheng Ding. Cheetah: Lean and fast secure
+     two-party deep neural network inference. In Proceedings of USENIX Security, 2022.
+[15] Dan Hendrycks and Kevin Gimpel. Gaussian error linear units (gelus). arXiv preprint
+     arXiv:1606.08415, 2016.
+[16] Marcel Keller. Mp-spdz: A versatile framework for multi-party computation. In Proceedings of
+     ACM CCS, pages 1575–1590, 2020.
+[17] Deevashwer Rathee, Mayank Rathee, Rahul Kranti Kiran Goli, Divya Gupta, Rahul Sharma,
+     Nishanth Chandran, and Aseem Rastogi. Sirnn: A math library for secure rnn inference. In
+     Proceedings of IEEE S&P, pages 1003–1020, 2021.
+[18] Alex Wang, Amanpreet Singh, Julian Michael, Felix Hill, Omer Levy, and Samuel R Bowman.
+     Glue: A multi-task benchmark and analysis platform for natural language understanding. In
+     Proceedings of ICLR, pages 535–548, 2018.
+
+
+                                               11
+[19] Tianyu Chen, Hangbo Bao, Shaohan Huang, Li Dong, Binxing Jiao, Daxin Jiang, Haoyi Zhou,
+     Jianxin Li, and Furu Wei. The-x: Privacy-preserving transformer inference with homomorphic
+     encryption. In Findings of ACL, pages 3510–3520, 2022.
+[20] Martin Abadi, Andy Chu, Ian Goodfellow, H Brendan McMahan, Ilya Mironov, Kunal Talwar,
+     and Li Zhang. Deep learning with differential privacy. In Proceedings of ACM CCS, pages
+     308–318, 2016.
+[21] Ronald Cramer, Ivan Bjerre Damgård, et al. Secure multiparty computation. Cambridge
+     University Press, 2015.
+[22] Daniel Demmler, Thomas Schneider, and Michael Zohner. Aby-a framework for efficient
+     mixed-protocol secure two-party computation. In Proceedings of NDSS, 2015.
+[23] Taher ElGamal. A public key cryptosystem and a signature scheme based on discrete logarithms.
+     IEEE transactions on information theory, 31(4):469–472, 1985.
+[24] Pascal Paillier. Public-key cryptosystems based on composite degree residuosity classes. In
+     Proceedings of Eurocrypt, pages 223–238, 1999.
+[25] Zvika Brakerski. Fully homomorphic encryption without modulus switching from classical
+     gapsvp. In Proceedings of Crypto, pages 868–886, 2012.
+[26] Junfeng Fan and Frederik Vercauteren. Somewhat practical fully homomorphic encryption.
+     Cryptology ePrint Archive, 2012.
+[27] Vladimir Kolesnikov and Ranjit Kumaresan. Improved ot extension for transferring short secrets.
+     In Proceedings of Crypto, pages 54–70, 2013.
+[28] Gilad Asharov, Yehuda Lindell, Thomas Schneider, and Michael Zohner. More efficient
+     oblivious transfer and extensions for faster secure computation. In Proceedings of ACM CCS,
+     pages 535–548, 2013.
+[29] Chiraag Juvekar, Vinod Vaikuntanathan, and Anantha Chandrakasan. Gazelle: A low latency
+     framework for secure neural network inference. In Proceedings of USENIX Security, pages
+     1651–1669, 2018.
+[30] Sijun Tan, Brian Knott, Yuan Tian, and David J Wu. Cryptgpu: Fast privacy-preserving machine
+     learning on the gpu. In Proceedings of IEEE S&P, 2021.
+[31] Théo Ryffel, Pierre Tholoniat, David Pointcheval, and Francis Bach. Ariann: Low-interaction
+     privacy-preserving deep learning via function secret sharing. In Proceedings of PETS, pages
+     291–316, 2022.
+[32] Seal. URL https://github.com/microsoft/SEAL.
+[33] emp-toolkit. URL https://github.com/emp-toolkit.
+[34] Ezpc. URL https://github.com/mpc-msri/EzPC.
+[35] Bert. URL https://github.com/google-research/bert.
+[36] Iulia Turc, Ming-Wei Chang, Kenton Lee, and Kristina Toutanova. Well-read students learn
+     better: On the importance of pre-training compact models. arXiv:1908.08962, 2019.
+[37] Zahra Ghodsi, Nandan Kumar Jha, Brandon Reagen, and Siddharth Garg. Circa: Stochastic
+     relus for private deep learning. In Proceedings of NeurIPS, 2021.
+[38] Pratyush Mishra, Ryan Lehmkuhl, Akshayaram Srinivasan, Wenting Zheng, and Raluca Ada
+     Popa. Delphi: A cryptographic inference service for neural networks. In Proceedings of
+     USENIX Security, pages 2505–2522, 2020.
+[39] M Sadegh Riazi, Christian Weinert, Oleksandr Tkachenko, Ebrahim M Songhori, Thomas
+     Schneider, and Farinaz Koushanfar. Chameleon: A hybrid secure computation framework for
+     machine learning applications. In Proceedings of AsiaCCS, pages 707–721, 2018.
+
+
+                                                12
+[40] Siam Umar Hussain, Mojan Javaheripi, Mohammad Samragh, and Farinaz Koushanfar. Coinn:
+     Crypto/ml codesign for oblivious inference via neural networks. In Proceedings of ACM CCS,
+     pages 3266–3281, 2021.
+[41] Sehoon Kim, Amir Gholami, Zhewei Yao, Michael W Mahoney, and Kurt Keutzer. I-bert:
+     Integer-only bert quantization. In Proceedings of ICML, pages 5506–5518, 2021.
+[42] Sheng Shen, Zhen Dong, Jiayu Ye, Linjian Ma, Zhewei Yao, Amir Gholami, Michael W
+     Mahoney, and Kurt Keutzer. Q-bert: Hessian based ultra low precision quantization of bert. In
+     Proceedings of AAAI, pages 8815–8821, 2020.
+[43] François Lagunas, Ella Charlaix, Victor Sanh, and Alexander M Rush. Block pruning for faster
+     transformers. In Proceedings of EMNLP, 2021.
+[44] Paul Michel, Omer Levy, and Graham Neubig. Are sixteen heads really better than one? In
+     Proceedings of NeurIPS, 2019.
+[45] Nandan Kumar Jha, Zahra Ghodsi, Siddharth Garg, and Brandon Reagen. Deepreduce: Relu
+     reduction for fast private inference. In Proceedings of ICML, pages 4839–4849, 2021.
+[46] Payman Mohassel and Yupeng Zhang. Secureml: A system for scalable privacy-preserving
+     machine learning. In Proceedings of IEEE S&P, pages 19–38, 2017.
+[47] Ran Canetti. Universally composable security: A new paradigm for cryptographic protocols. In
+     Proceedings of FOCS, pages 136–145, 2001.
+[48] Robert E Goldschmidt. Applications of division by convergence. PhD thesis, MIT, 1964.
+[49] Xiaoqian Jiang, Miran Kim, Kristin Lauter, and Yongsoo Song. Secure outsourced matrix
+     computation and application to neural networks. In Proceedings ACM CCS, pages 1209–1222,
+     2018.
+[50] Fabian Boemer, Anamaria Costache, Rosario Cammarota, and Casimir Wierzynski. ngraph-he2:
+     A high-throughput framework for neural network inference on encrypted data. In Proceedings
+     of the 7th ACM Workshop on Encrypted Computing & Applied Homomorphic Cryptography,
+     pages 45–56, 2019.
+
+
+
+
+                                               13
+Checklist
+    1. For all authors...
+        (a) Do the main claims made in the abstract and introduction accurately reflect the paper’s
+            contributions and scope? [Yes]
+        (b) Did you describe the limitations of your work? [Yes]
+        (c) Did you discuss any potential negative societal impacts of your work? [No]
+        (d) Have you read the ethics review guidelines and ensured that your paper conforms to
+            them? [Yes]
+    2. If you are including theoretical results...
+        (a) Did you state the full set of assumptions of all theoretical results? [Yes]
+        (b) Did you include complete proofs of all theoretical results? [Yes]
+    3. If you ran experiments...
+        (a) Did you include the code, data, and instructions needed to reproduce the main experi-
+            mental results (either in the supplemental material or as a URL)? [No]
+        (b) Did you specify all the training details (e.g., data splits, hyperparameters, how they
+            were chosen)? [Yes]
+        (c) Did you report error bars (e.g., with respect to the random seed after running experi-
+            ments multiple times)? [No]
+        (d) Did you include the total amount of compute and the type of resources used (e.g., type
+            of GPUs, internal cluster, or cloud provider)? [Yes]
+    4. If you are using existing assets (e.g., code, data, models) or curating/releasing new assets...
+        (a) If your work uses existing assets, did you cite the creators? [Yes]
+        (b) Did you mention the license of the assets? [No]
+        (c) Did you include any new assets either in the supplemental material or as a URL? [No]
+        (d) Did you discuss whether and how consent was obtained from people whose data you’re
+            using/curating? [N/A]
+        (e) Did you discuss whether the data you are using/curating contains personally identifiable
+            information or offensive content? [N/A]
+    5. If you used crowdsourcing or conducted research with human subjects...
+        (a) Did you include the full text of instructions given to participants and screenshots, if
+            applicable? [N/A]
+        (b) Did you describe any potential participant risks, with links to Institutional Review
+            Board (IRB) approvals, if applicable? [N/A]
+        (c) Did you include the estimated hourly wage paid to participants and the total amount
+            spent on participant compensation? [N/A]
+
+
+
+
+                                                14
+

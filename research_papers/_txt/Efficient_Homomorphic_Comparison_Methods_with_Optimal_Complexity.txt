@@ -1,0 +1,1874 @@
+    Efficient Homomorphic Comparison Methods
+              with Optimal Complexity
+
+              Jung Hee Cheon, Dongwoo Kim and Duhyeong Kim
+
+          Department of Mathematical Sciences, Seoul National University
+                  {jhcheon,dwkim606,doodoo1204}@snu.ac.kr
+
+
+
+      Abstract. Comparison of two numbers is one of the most frequently
+      used operations, but it has been a challenging task to efficiently compute
+      the comparison function in homomorphic encryption (HE) which basi-
+      cally support addition and multiplication. Recently, Cheon et al. (Asi-
+      acrypt 2019) introduced a new approximate representation of the com-
+      parison function with a rational function, and showed that this rational
+      function can be evaluated by an iterative algorithm. Due to this iterative
+      feature, their method achieves a logarithmic computational complexity
+      compared to previous polynomial approximation methods; however, the
+      computational complexity is still not optimal, and the algorithm is quite
+      slow for large-bit inputs in HE implementation.
+      In this work, we propose new comparison methods with optimal asymp-
+      totic complexity based on composite polynomial approximation. The
+      main idea is to systematically design a constant-degree polynomial f
+      by identifying the core properties to make a composite polynomial f ◦
+      f ◦ · · · ◦ f get close to the sign function (equivalent to the comparison
+      function) as the number of compositions increases. We additionally intro-
+      duce an acceleration method applying a mixed polynomial composition
+      f ◦ · · · ◦ f ◦ g ◦ · · · ◦ g for some other polynomial g with different prop-
+      erties instead of f ◦ f ◦ · · · ◦ f . Utilizing the devised polynomials f and
+      g, our new comparison algorithms only require Θ(log(1/)) + Θ(log α)
+      computational complexity to obtain an approximate comparison result
+      of a, b ∈ [0, 1] satisfying |a − b| ≥  within 2−α error.
+      The asymptotic optimality results in substantial performance enhance-
+      ment: our comparison algorithm on encrypted 20-bit integers for α = 20
+      takes 1.43 milliseconds in amortized running time, which is 30 times
+      faster than the previous work.
+
+
+1   Introduction
+Homomorphic Encryption (HE) is a primitive of cryptographic computing, which
+allows computations over encrypted data without any decryption process. With
+HE, clients who sent encrypted data to an untrusted server are guaranteed data
+privacy, and the server can perform any operations over the encrypted data. In
+recent years, HE has gained worldwide interest from various fields related to data
+privacy issues including genomics [36, 37, 38] and finances [4, 30]. In particular,
+HE is emerging as one of the key tools to protect data privacy in machine learning
+tasks, which now became a necessary consideration due to public awareness of
+data breaches and privacy violation.
+     The comparison function comp(a, b), which outputs 1 if a > b, 0 if a < b and
+1/2 if a = b, is one of the most prevalent operations along with addition and mul-
+tiplication in various real-world applications. For example, many of the machine
+learning algorithms such as cluster analysis [18, 32], gradient boosting [24, 25],
+and support-vector machine [20, 39] require a number of comparison operations.
+Therefore, it is indispensable to find an efficient method to compute the com-
+parison function in an encrypted state for HE applications.
+     Since HE schemes [8, 12, 23] basically support homomorphic addition and
+multiplication, to compute non-polynomial operations including the comparison
+function in an encrypted state, we need to exploit polynomial approximations
+on them. The usual polynomial approximation methods such as minimax find
+approximate polynomials with minimal degree on a target function for given a
+certain error bound. However, the computational complexity to evaluate these
+polynomials is so large that it is quite inefficient to obtain approximate results
+with high-precision by these methods. Recently, to resolve this problem, Cheon
+et al. [13] introduced a new identity comp(a, b) = limk→∞ ak /(ak + bk ), and
+showed that the identity can be computed by an iterative algorithm. Due to
+this iterative feature, their algorithm achieves a logarithmic computational com-
+plexity compared to usual polynomial approximation methods. However, the
+algorithm only achieves quasi-optimal computational complexity, and it is quite
+slow in HE implementation; more than 20 minutes is required to compute a
+single homomorphic comparison of 16-bit integers.
+     In this work, we propose new comparison methods using composite polyno-
+mial approximation on the sign function, which is equivalent to the comparison
+function. Starting from the analysis on the behavior of a composite polynomial
+f (d) := f ◦ f ◦ · · · ◦ f , we identify the core properties of f that make f (d) get close
+to the sign function as d increases. We additionally introduce a novel accelera-
+tion method by applying a mixed composition of f and some other polynomial
+g with different properties instead of a simple composition of f . Applying these
+systematically devised polynomials f and g, we construct new comparison al-
+gorithms which firstly achieve the optimal computational complexity among all
+polynomial evaluations to obtain an approximate value of the comparison result
+within a certain error bound.
+     Our composite polynomial methods can be directly applied to evalute piece-
+wise polynomials with two sub-polynomials including the absolute function: For
+example, the function p such that p(x) = p1 (x) if x ∈ [0, 1] and p(x) = p2 (x) if
+x ∈ [−1, 0) for polynomials p1 and p2 can be represented by p1 (x)·(1+sgn(x))/2+
+p2 (x) · (1 − sgn(x))/2. Furthermore, our method is potentially applicable to more
+general piecewise polynomials including step functions (see Remark 1).
+
+1.1   Our Idea and Technical Overview
+Our key idea to identify several core properties of the basic function f essentially
+comes from a new interpretation of the previous work [13]. To be precise, [13]
+
+
+                                            2
+exploits the following identity to construct a comparison algorithm:
+
+                                         if a > b 
+                                                 
+                         k
+                                  1
+                        a                        
+                  lim k       =    1/2   if a = b   = comp(a, b)
+                 k→∞ a + bk
+                                         if a < b
+                                                 
+                                   0
+                                                 
+
+for positive numbers a, b ∈ [1/2, 3/2]. Since very large exponent k = 2d is re-
+quired to obtain a comparison result within small error, they suggest to it-
+eratively compute a ← a2 /(a2 + b2 ) and b ← b2 /(a2 + b2 ), which results in
+  d     d    d
+a2 /(a2 + b2 ) ≃ comp(a, b) after d iterations. The inverse operation 1/(a2 + b2 )
+in each iteration is computed by Goldschmidt’s division algorithm [29].
+    The computational inefficiency of the comparison algorithm in [13] mainly
+comes from the inverse operation which should be done at least d times. Then,
+the natural question would be
+
+           “How can we construct an efficient comparison algorithm
+                        without inverse operation?”
+
+To do this, we analyze the comparison algorithm in [13] with a new perspective.
+Let f0 (x) = x2 /(x2 + (1 − x)2 ), then each iteration a ← a2 /(a2 + b2 ) and
+b ← b2 /(a2 +b2 ) can be interpreted as an evaluation of f0 (a) and f0 (b) = 1−f0 (a)
+for 0 ≤ a, b ≤ 1, respectively. Indeed, the d iterations correspond to the d-time
+                                                    (d)
+composition of the basic function f0 denoted by f0 := f0 ◦ f0 ◦ · · · ◦ f0 , and the
+comparison algorithm can be interpreted as approximating (sgn(2x − 1) + 1)/2
+                               (d)
+by a composite polynomial f0 .
+
+
+                     1
+                                                                    f0
+                                                                     (2)
+                                                                    f0
+                    0.8                                              (3)
+                                                                    f0
+
+                    0.6
+
+
+                    0.4
+
+
+                    0.2
+
+
+                     0
+                          0            0.5                    1
+
+                                                 (d)
+                     Fig. 1: Illustration of f0        for d = 1, 2, 3
+
+
+   Our key observation on the basic function f0 is that we actually do not
+need the exact formula of f0 (x) = x2 /(x2 + (1 − x)2 ). Instead, it suffices to use
+other polynomials with similar shape to f0 : convex in [0, 0.5], concave in [0.5, 1],
+symmetric to the point (0.5, 0.5), and have a value 1 at x = 1. For example,
+
+
+                                             3
+                   (d)
+the composition h1 of our devised polynomial h1 (x) = −2x3 + 3x2 , which has
+similar shape to f0 , gets close to (sgn(2x − 1) + 1)/2 as d increases. As a result,
+we can approximate the comparison function by a composite polynomial f (d) for
+some constant-degree polynomial f with several core properties, and identifying
+these core properties is the most important step in our algorithm construction.
+Core Properties of f . Since the sign function is equivalent to the comparison
+function, via sgn(x) = 2 · comp(x, 0) − 1 and comp(a, b) = (sgn(a − b) + 1)/2,
+it is enough to find a polynomial f such that f (d) (x) gets close to sgn(x) over
+[−1, 1] for some proper d. The core properties of f are as following:
+
+Prop I.   f (−x) = −f (x)
+Prop II. f (1) = 1, f (−1) = −1
+Prop III. f 0 (x) = c(1 − x)n (1 + x)n for some constant c > 0
+
+The first property is necessary from the origin symmetry of the sign function,
+and the second property is required to achieve limd→∞ f (d) (x) = 1 for 0 < x ≤ 1.
+The last property makes f to be concave in [0, 1] and convex in [−1, 0], and the
+multiplicity n of ±1 in f 0 (x) accelerates the convergence of f (d) to the sign
+function. Interestingly, for each n ≥ 1, a polynomial fn satisfying above three
+properties is uniquely determined as
+                                    n           
+                                    X 1         2i
+                         fn (x) =          ·       · x(1 − x2 )i .
+                                    i=0
+                                        4i      i
+
+    Since sgn(x) is a discontinuous function at x = 0, the closeness of a polyno-
+mial f (x) to sgn(x) should be considered carefully. Namely, we do not consider a
+small neighborhood (−, ) of zero when measuring the difference between f (x)
+                                                                  (d)
+and sgn(x). In Section 3.2, we prove that the infinite norm of fn (x) − sgn(x)
+over [−1, −] ∪ [, 1] is smaller than 2−α if d ≥ dn for some dn > 0. Then,
+  (d )
+(fn n (a − b) + 1)/2 outputs an approximate value of comp(a, b) within 2−α error
+for a, b ∈ [0, 1] satisfying |a − b| ≥ .
+Acceleration Method. Along with {fn }n≥1 , we provide another family of odd
+polynomials {gn }n≥1 which reduces the required number of polynomial compo-
+sitions dn . At a high-level, we can interpret dn as dn := d + dα where each of
+the terms d and dα has distinct aim as following: The first term d is a required
+number of compositions to map the interval [, 1] into the interval [1 − τ, 1] for
+some fixed constant 0 < τ < 1 (typically, τ = 1/4), and the second term dα is a
+required number of compositions to map [1 − τ, 1] into [1 − 2−α , 1], i.e.,
+
+                               fn(d ) ([, 1]) ⊆ [1 − τ, 1],
+                          fn(dα ) ([1 − τ, 1]) ⊆ [1 − 2−α , 1].
+                                                                     (d +d )   (d )
+In this perspective, our idea is to reduce d by substituting fn  α with fn α ◦
+ (d )
+gn  for some other (2n + 1)-degree polynomial gn with weaker properties than
+
+
+                                               4
+the core properties of fn . Since the first d compositions only needs to map [, 1]
+into [1 − τ, 1], Prop II & III are unnecessary in this part. Instead, the following
+property along with Prop I is required:
+
+Prop IV. ∃ 0 < δ < 1 s.t. x < gn (x) ≤ 1 for x ∈ (0, δ] and gn ([δ, 1]) ⊆ [1 − τ, 1]
+                                                          (d)
+    For gn satisfying Prop I & IV, the composition gn does not get close to
+                                                                      (d )
+the sign function as d increases; however, we can guarantee that gn  ([, 1]) ⊆
+[1 − τ, 1] for some d > 0 which is exactly the aim of first d compositions. With
+some heuristic properties on gn obtained by Algorithm 2, the required number
+of the first-part compositions d is reduced by nearly half (see Section 3.5).
+
+1.2   Our Results
+New Comparison Methods with Optimal Complexity. We first propose
+                                                           (d)
+a family of polynomials {fn }n≥1 whose composition fn gets close to the sign
+function (in terms of (α, )-closeness) as d increases. Based on the approximation
+                   (d)
+                 fn (a − b) + 1   sgn(a − b) + 1
+                                ≃                = comp(a, b),
+                       2                2
+we construct a new comparison algorithm NewComp(a, b; n, d) which achieves op-
+timal asymptotic complexity among the polynomial evaluations obtaining an ap-
+proximate value of comparison within a certain level of error. The following
+theorem is the first main result of our work:
+
+Theorem 1. If d ≥ 2+o(1)                      1
+                         log n · log(1/) + log n · log α + O(1), the comparison algo-
+rithm NewComp(a, b; n, d) outputs an approximate value of comp(a, b) within 2−α
+error for a, b ∈ [0, 1] satisfying |a − b| ≥ .
+
+The theorem implies that one can obtain an approximate value of comp(a, b)
+within 2−α error for a, b ∈ [0, 1] satisfying |a−b| ≥  with Θ(log(1/))+Θ(log α)+
+O(1) complexity and depth with NewComp.
+    We also provide another family of polynomials {gn }n≥1 , which enables to
+                                                                     (d)      (d )
+reduce the number of polynomial compositions by substituting fn with fn f ◦
+ (dg )
+gn . From the mixed polynomial composition, we construct another comparison
+algorithm NewCompG with the following result:
+Theorem 2 (Heuristic). If dg ≥ 1+o(1)                                     1
+                                    log n ·log(1/)+O(1) and df ≥ log n ·log α+
+O(1), the comparison algorithm NewCompG(a, b; n, df , dg ) outputs an approximate
+value of comp(a, b) within 2−α error for a, b ∈ [0, 1] satisfying |a − b| ≥ .
+Since gn and fn have the same degree, the total depth and computational com-
+plexity of NewCompG are strictly smaller than those of NewComp.
+    The variety on choosing n in our comparison algorithms provides flexibility
+in complexity-depth tradeoff. For instance, one can choose n = 4 to achieve the
+minimal computational complexity (see Section 3.4). On the other hand, if one
+
+
+                                          5
+wants to obtain comparison results with larger complexity but smaller depth,
+one can choose n larger than 4. Assuming some heuristic properties of gn , the
+total depth of NewCompG(·, ·; n, df , dg ) gets close to the theoretical minimal depth
+as n increases (see Section 3.5).
+Improved Performance. For two 8-bit integers which are encrypted by an
+approximate HE scheme HEAAN [12], the comparison algorithm NewComp (for
+ = 2−8 and α = 8) takes 0.9 milliseconds in amortized running time, and the
+performance is twice accelerated by applying the other comparison algorithm
+NewCompG. The implementation result on NewCompG is about 8 times faster than
+that on the comparison algorithm of the previous work [13] based on HEAAN.
+Note that this performance gap grows up as the bit-length of input integers
+increases: For two encrypted 20-bit integers, our algorithm NewCompG is about
+30 times faster than the previous work.
+Application to Max. Since the max function is expressed by the sign function
+                 2 + 2 ·sgn(a−b), we can directly obtain max algorithms from
+as max(a, b) = a+b     a−b
+
+the family of polynomials {fn }n≥1 (and hence {gn }n≥1 ). Our max algorithms
+NewMax and NewMaxG outperform the max algorithm in the previous work [13]
+in terms of both computational complexity and depth. To be precise, the max
+algorithm in [13] requires 4α + O(1) depth and 6α + O(1) complexity to obtain
+an approximate value of min/max of two numbers in [0, 1] within 2−α error. In
+our case, the max algorithm NewMax applying f4 only require 3.08α + O(1) depth
+and complexity, and it can be even reduced to 1.54α + 1.72 log α + O(1) by using
+the other max algorithm NewMaxG. In practice, for encrypted 20-bit integers our
+NewMaxG algorithm is 4.5 times faster than the max algorithm in [13].
+    Moreover, our max algorithms fundamentally solve a potential problem of the
+max algorithm in [13] when inputs are encrypted by HEAAN. When two input
+numbers are too close so that the difference is even smaller than approximate
+errors of HEAAN, then the max algorithm in [13] may output a totally wrong
+result; in contrast, our max algorithms works well for any inputs from [0, 1].
+
+1.3   Related Works
+Numerical Analysis on the Sign Function. In the literature of numerical
+analysis, to the best of our knowledge, there exist two main approaches on the
+polynomial approximation of the sign function. One is to naively apply general
+polynomial approximation methods (Taylor, least squares, minimax, etc.), and
+the other is to apply Newton’s root-finding algorithm on a function which has
+±1 as roots.
+    General polynomial approximation methods provide an approximate poly-
+nomial with minimal degree under a certain upper bound of the approximate
+error.
+   √ However, the evaluation of such approximate polynomial requires at least
+Θ( degree) multiplications, which yields super-large computational complexity
+when we aim to obtain a high-precision approximation. For example, when we
+want to obtain an approximate polynomial of the sign function with α-bit preci-
+sion over [−1, −2−α ] ∪ [2−α , 1] via general polynomial approximation methods,
+
+
+                                          6
+                                                      √
+the required computational complexity is at least Θ( α·2α/2 ) which is exponen-
+tial to α (see Section 2.2 for more details). There have been recent works [9, 31]
+applying Chebyshev polynomial approximation (on the sine function) instead
+of the minimax polynomial approximation for better efficiency. However, the
+Chebyshev polynomial approximation method still requires exponential compu-
+tational complexity with respect to α when it is applied to the sign function.
+    Newton’s root-finding algorithm outputs an approximate value of roots of a
+function r(x) by iteratively computing xn+1 = xn − rr(x      n)
+                                                         0 (x ) for an initial point
+                                                             n
+
+x0 . That is, an iterative computation of the function f (x) = x − rr(x) 0 (x) gives
+
+an approximate value to one of the roots of r. The most simple choice of r to
+compute the sign function is r(x) = 1 − x2 which derives f (x) = 21 · x + x1
+so-called Newton’s method [33, 35]. There have also been several attempts to
+improve the convergence rate of this iterative method to the sign function by
+                           3
+                                                             5x+10x3 +x5
+                       1+3x2 (Halley’s method [41]), f (x) = 1+10x2 +5x4 [19], and
+changing f to f (x) = 3x+x
+                 3      5    7
+               2 +140x4 +70x6 +3x8 [45].  However, all these methods commonly re-
+          10x+98x +126x +22x            a
+f (x) = 1+42x
+quire the inverse operation, and additional polynomial approximation on inverse
+is required to apply these methods in HE as the previous work [13]. Consequently,
+these methods are much less efficient than our methods for the evaluation of the
+sign function in HE due to a number of expensive inverse operations.
+    There has been proposed another choice of r that makes f a polynomial as
+in this paper, so-called Newton-Schulz method [33, 35]. When we take r(x) =
+1 − 1/x2 , the function f is expressed as f (x) = x2 · (3 − x2 ) and we can obtain
+an approximate value of the sign function by the iterative computation of f .
+Interestingly, this function is one of our devised polynomials f1 . However, we
+note that the design rationale of our methods, setting core properties of f that
+makes f (d) get close to the sign function as d increases, is totally different from
+that of the Newton’s root-finding method. With Newton’s method it is not clear
+at all how to generalize f1 to fn for n > 1 or how to obtain the intuition for
+devising other polynomials {gn }n≥1 for convergence acceleration. Our methods
+applying {fn }n>1 and {gn }n≥1 achieve much less computational complexity and
+depth than the previous numerical method (see Section 3.4 and Section 3.5).
+HE-based Comparison Methods. There have been several works on com-
+parison algorithms for HE schemes [8, 12, 23] basically supporting addition and
+multiplication. The most recent work was proposed by Cheon et al. [13] which
+                                                  k
+exploits the identity comp(a, b) = limk→∞ aka+bk for a, b > 0 with an iterative
+inverse algorithm. Their comparison algorithm requires Θ(α log α) complexity,
+which is quasi-optimal, to obtain an approximate value of comp(a, b) within 2−α
+error for a, b ∈ [1/2, 3/2] satisfying max(a, b)/ min(a, b) ≥ 1 + 2−α .
+
+   a
+     In fact, this line of work in numerical analysis aims to compute the matrix sign
+function [35] which is a more general object than the sign function in our context. An
+inverse operation is not much more costly than a multiplication in their (asymptotic)
+cost analysis and experiments, which is a crucial difference from HE which requires an
+additional costly polynomial approximation for inverse [13].
+
+
+                                          7
+    There have been several approaches to approximate the sign function by
+polynomials to obtain a comparison algorithm. In 2018, Boura et al. [6] pro-
+posed an analytic method to compute the sign function by approximating it
+via Fourier series over a target interval which has an advantage on numerical
+stability. In this method, one should additionally consider the error induced by
+the polynomial approximation on eix . Another approach is to approximate the
+                                    kx   −kx
+sign function by tanh(kx) = eekx −e    +e−kx
+                                             for sufficiently large k > 0 [15]. In order
+to efficiently compute tanh(kx), they repeatedly apply the double-angle formula
+                2 tanh(x)
+                      2 (x) ≈ 1+x2 where the inverse operation is substituted by a
+                                 2x
+tanh(2x) = 1+tanh
+low-degree minimax approximate polynomial. This procedure can be interpreted
+as a composition of polynomial f which is the low-degree minimax approxima-
+tion polynomial of 1+x   2x
+                            2 . However, their method does not catch core properties
+
+of the basic polynomial f (e.g., f (1) = 1), so the error between f (d) and sgn(x)
+cannot be reduced below a certain bound even if we increase d to ∞. As an
+independent workb , Bajard et al. [5] recently proposed a new approach to ap-
+proximately compute the sign function by applying the Newton’s root-finding
+method on the function r(x) = 1−1/x2 , which corresponds to one of our devised
+polynomials f1 .
+    When each bit of message is encrypted separately [14, 17], one can perform a
+comparison operation of two α-bit integers with O(log α) depth and O(α) com-
+plexity. The bit-by-bit encryption method was     P recently     generalized to encrypt
+an integer a after decomposing it as a =              ai bi for a power of small prime
+b = pr [46]. However, since these encryption methods are quite inefficient for
+addition and multiplication, they are not desirable when comparison operations
+are mixed with a number of polynomials such as cluster analysis and gradient
+tree boosting.
+
+
+2     Preliminaries
+2.1   Notations
+
+All logarithms are of base 2 unless otherwise indicated, and e denotes the Euler’s
+constant. Z, R and C denote the integer ring, the real number field and complex
+number field, respectively. For a finite set X, we denote the uniform distribution
+over X by U (X). For a real-valued function f defined over R and a compact
+set I ⊂ R, we denote the infinity norm of f over the domain I by ||f ||∞,I :=
+maxx∈I |f (x)|. The d-times composition of f is denoted by f (d) := f ◦ f ◦ · · · ◦ f .
+We denote the sign function and the comparison function by
+                                                       
+                    1 if x > 0
+                                                        1
+                                                               if a > b
+         sgn(x) :=     0 if x = 0 ,        comp(a, b) := 1/2 if a = b ,
+                      −1 if x < 0                               if a < b
+                                                       
+                                                           0
+                                                       
+
+   b
+     Our paper was previously submitted to Eurocrypt 2020 prior to the publication
+of Bajard et al. [5] in 07 October 2019.
+
+
+                                           8
+which are in fact equivalent to each other by comp(a, b) = (sgn(a − b) + 1)/2.
+   For α > 0 and 0 <  < 1, we say a polynomial f is (α, )-close to sgn(x) over
+[−1, 1] if it satisfies
+
+                        ||f (x) − sgn(x)||∞,[−1,−]∪[,1] ≤ 2−α .
+
+For a, b ∈ R, we denote the complexity a·log(1/)+b·log α+O(1) by L(a, b). The
+O notation in this paper regards to α and 1/. In the rest of this paper, we only
+consider the (non-scalar) multiplicative depth and (non-scalar) multiplicative
+computational complexity, i.e., we do not count the number of additions nor
+scalar multiplications in computational complexity.
+
+
+2.2   Minimax Polynomial Approximation Method
+
+In this paper, we measure the accuracy of polynomial approximation methods
+by the maximal error between the target function and an approximate polyno-
+mial over a predetermined domain. In this respect, the minimax approximation
+method provides the best approximate polynomials among general polynomial
+approximation methods. For a positive odd integer k, let us denote by pk, the
+degree-k polynomial p which minimizes ||sgn(x) − p(x)||∞,[−1,−]∪[,1] . For the
+sign function sgn(x), there exists a tight lower bound on the approximation error:
+            r                      k−1
+                k−1                                                                1−
+                        
+                            1+      2
+      lim           ·                     · ||sgn(x) − pk, (x)||∞,[−1,−]∪[,1] = √
+      k→∞        2          1−                                                      π
+
+for 0 <  < 1, which was proved by Eremenko and Yuditskii [22]. More general
+works on minimax polynomial approximation of piecewise analytic function have
+been proposed [3, 43], but [22] provides more tight and accurate results on error
+analysis for the sign function.
+                                                             q              k−1
+                                                                               2
+    Assume that k is large enough so that the left-hand side k−1 2  ·   1+
+                                                                        1−       ·
+||sgn(x) − pk, (x)||∞,[−1,−]∪[,1] is sufficiently close to the limit value. To bound
+the approximation error by 2−α for sgn(x) over [−1, −] ∪ [, 1], the degree k
+should be chosen to satisfy
+                            r                      k−1       √
+                                k−1
+                                        
+                                            1+      2
+                                                               π
+                                    ·                     ·       > 2α ,
+                                 2          1−               1−
+                                                                        
+which implies that k should be at least Θ(α/) from the fact log 1− 1+
+                                                                           ≈
+2 for small . Then, the evaluation  of the
+                                           polynomial pk, requires at least
+ 
+                                    p
+log α + log(1/) + O(1) depth and Θ    α/ complexity applying the Paterson-
+Stockmeyer method [42] which is asymptotically optimal.
+    There exists a well-known theorem called the equioscillation theorem at-
+tributed to Chebychev, which specifies the shape of the minimax approximate
+polynomial pk, .
+
+
+                                                  9
+Lemma 1 (Equioscillation Theorem for sign function [22]). Let sgn(x)
+be the sign function (Section 2.1). For k ≥ 1 and 0 <  < 1, an odd polynomial
+pk, of degree (2k + 1) minimizes the infinity norm ||sgn − pk, ||∞,[−1,−]∪[,1] if
+and only if there are k + 2 points  = x0 < x1 < · · · < xk+1 = 1 such that
+sgn(xi ) − pk, (xi ) = (−1)i ||sgn − pk, ||∞ . Here, x1 , x2 ,..., xk are critical points.
+    Note that the if-and-only-if statement of the above lemma also implies the
+uniqueness of the minimax polynomial approximation of sgn(x) on [−1, −]∪[, 1]
+for given  and degree 2k + 1. In the rest of paper, we will use the fact that pk,
+is concave and increasing in the interval [0, x0 ] (in fact it holds for [0, x1 ]).
+
+
+2.3     Homomorphic Encryption
+
+HE is a cryptographic primitive which allows arithmetic operations including
+addition and multiplication over encrypted data without decryption process. HE
+is regarded as a promising solution which prevents leakage of private information
+during analyses on sensitive data (e.g., genomic data, financial data). A number
+of HE schemes [7, 8, 12, 16, 21, 23, 27] have been suggested following Gentry’s
+blueprint [26], and achieving successes in various applications [6, 10, 28, 36].
+    In this paper, we mainly focus on word-wise HE schemes, i.e., the HE schemes
+whose basic operations are addition and multiplication of encrypted message
+vectors over Z/pZ for p ≥ 2 [8, 23, 27] or the complex number field C [12]. An
+HE scheme consists of the following algorithms:
+
+    • KeyGen(params). For parameters params determined by a level parameter L
+      and a security parameter λ, output a public key pk, a secret key sk, and an
+      evaluation key evk.
+    • Encpk (m). For a message m, output the ciphertext ct of m.
+    • Decsk (ct). For a ciphertext ct of m, output the message m.
+    • Addevk (ct1 , ct2 ). For ciphertexts ct1 and ct2 of m1 and m2 , output the cipher-
+      text ctadd of m1 + m2 .
+    • Multevk (ct1 , ct2 ). For ciphertexts ct1 and ct2 of m1 and m2 , output the ci-
+      phertext ctmult of m1 · m2 .
+
+Though any arithmetic circuit can be computed by HE theoretically, the num-
+ber of multiplications and multiplicative depth of the circuit are major factors
+affecting the practical performance and feasibility in real-world applications.
+
+
+3      Our New Comparison Method
+
+Since the comparison function and the sign function are equivalent, it suffices
+to find a nice approximate polynomial (with one variable) of the sign function
+instead of the comparison function (with two variables). In this section, we will
+introduce new polynomial approximation methods for the sign function which
+we call composite polynomial approximation, and analyze their computational
+efficiency. As in [13], we assume that the input numbers are contained in the
+
+
+                                            10
+bounded interval [0, 1], since x ∈ [c1 , c2 ] for known constants c1 < c2 can be
+scaled down into [0, 1] via mapping x 7→ (x−c1 )/(c2 −c1 ). Therefore, the domain
+of sgn(x) we consider in this paper is [−1, 1].
+
+
+3.1     Composite Polynomial Approximation of Sign Function
+
+As described in [13], approximating a non-polynomial function by composite
+polynomials has an advantage in computational complexity: A composite func-
+tion F of a constant-degree polynomial f , i.e., F := f ◦f ◦· · ·◦f , can be computed
+within O(log(deg F )) √ complexity, while the evaluation of an arbitrary polynomial
+G requires at least Θ( deg G) [42]. However, even if this methodology achieves a
+log-degree computational complexity, it would be meaningless if the total degree
+of F is extremely large (e.g., deg F = 2deg G ). Therefore, it is very important
+to well-design a constant polynomial f so that it requires small d to make f (d)
+sufficiently close to sgn(x) over [−1, 1]. Since sgn(x) is discontinuous at x = 0,
+we are not able to obtain a nice polynomial approximation of sgn(x) over (−, )
+for any 0 <  < 1. As a result, we set our goal to find f whose composition f (d)
+is (α, )-close to the sign function for α > 0 and 0 <  < 1 with small d.
+     The key observation for designing such polynomial f is as follows: For x0 ∈
+[−1, 1], let xi be the i-time composition value f (i) (x0 ). Then, the behavior of
+xi ’s can be easily estimated with the graph of f . For example, given x0 on the
+x-coordinate, x1 can be identified by the x-coordinate of the intersection point of
+the graph y = x and the horizontal line y = f (x0 ). Note that we can iteratively
+estimate xi+1 with the previous point xi (see Figure 2).
+
+
+                                                                x
+                                                               f (x)
+                                            1
+
+
+
+                                   x2   x1 x0
+                              -1                x0 x1   x2 1
+
+
+
+
+                                          −1
+
+
+
+
+      Fig. 2: Behavior of xi = f (i) (x0 ) for f (x) = − 16
+                                                          5 7
+                                                            x + 21  5  35 3   35
+                                                                16 x − 16 x + 16 x
+
+
+
+    In this perspective, the basic polynomial f should be constructed so that xi
+gets close to 1 if x0 ∈ (0, 1] and −1 if x0 ∈ [−1, 0) as i increases. We can formally
+identify three properties of f as follows: Firstly, since the sign function is an odd
+function, we also set f to be an odd function. Secondly, we set f (1) = 1 and
+f (−1) = −1 to make f (d) (x) point-wise converge to sgn(x) whose value is ±1
+for x 6= 0. More precisely, if f (d) (x) for some x ∈ [−1, 1] converges to y as d
+
+
+                                                11
+increases, it must hold that f (y) = f limd→∞ f (d) (x) = limd→∞ f (d) (x) = y.
+                                                        
+
+Lastly, f should be considered as a better polynomial if it is more concave over
+[0, 1] (hence more convex over [−1, 0]), which will accelerate the convergence of
+f (d) to the sign function. In order to increase convexity, we set the derivative
+function f 0 of f to have maximal multiple roots at 1 and −1. These properties
+are summarized as following.
+Core Properties of f :
+Prop I.   f (−x) = −f (x)                                        (Origin Symmetry)
+Prop II. f (1) = 1, f (−1) = −1                                  (Convergence to ±1)
+Prop III. f (x) = c(1 − x) (1 + x)
+           0                 n       n
+                                         for some c > 0          (Fast convergence)
+    For a fixed n ≥ 1, a polynomial f of the degree (2n + 1) satisfying those
+three properties is uniquely determined, and we denote this polynomial by fn
+(and the uniquely
+             Rx     determined constant c by cn ): From Prop I and III, we get
+fn (x) = cn 0 (1 − t2 )n dt, and the constant cn is determined by Prop II. By
+applying the following identity
+         Z x                                            Z x
+                           1                      m−1
+              cosm t dt =    · cosm−1 x · sin x +     ·     cosm−2 t dt
+           0              m                        m     0
+
+which holds for any m ≥ 1, we obtain
+                                  n         
+                                  X 1       2i
+                         fn (x) =      i
+                                         ·     · x(1 − x2 )i .
+                                  i=0
+                                      4     i
+
+Hence, we can easily compute fn as following:
+ • f1 (x) = − 12 x3 + 32 x
+ • f2 (x) = 38 x5 − 10 3  15
+                    8 x + 8 x
+               5 7
+ • f3 (x) = − 16 x + 21  5  35 3   35
+                     16 x − 16 x + 16 x
+             35 9
+  • f4 (x) = 128 x − 180  7  378 5    420 3    315
+                     128 x + 128 x − 128 x + 128 x
+
+Since 2ii = 2 · 2i−1
+                  i−1 is divisible by 2 for i ≥ 1, every coefficient of fn can be
+                    
+
+represented as m/22n−1 for m ∈ Z.
+Size of the Constant cn . The constant cn takes an important role on the
+                 (d)
+convergence of fn (on d) to the sign function. Informally, since the coefficient
+of x term is exactly cn , we can regard fn as fn (x) ≃ cn · x for small x > 0, and
+then it holds that 1 − fn (x) ≃ 1 − cn · x ≃ (1 − x)cn . In the next subsection,
+we will present a rigorous proof of the inequality 1 − fn (x) ≤ (1 − x)cn for
+0 < x < 1. (see Section 3.2). From a simple computation, we obtain cn as a
+linear summation of binomial coefficients
+                                       n     
+                                      X   1 2i
+                                cn =              ,
+                                      i=0
+                                          4i i
+
+which is simplified by the following lemma.
+
+
+                                          12
+                                              f1                                                       (2)
+                                                                                                      f1
+                     1                        f2                                1                      (4)
+                                                                                                      f1
+                                              f3
+                                                                                                       (6)
+                                              f4                                                      f1
+
+
+
+
+        -1                         1                           -1                               1
+
+
+
+                   −1                                                      −1
+
+
+                                                                           (d)
+             (a) fn for n = 1, 2, 3, 4                              (b) f1          for d = 2, 4, 6
+
+
+                                                                    (d)
+                                 Fig. 3: Illustration of fn
+
+                                         Pn   1 2i                 2n
+                                                            = 2n+1
+                                                                     
+Lemma 2. It holds that cn =               i=0 4i i             4n   n .
+
+Proof. We prove the statement   by induction. It is easy to check for n = 1.
+                        2n
+Assume that cn = 2n+1   n for some n ≥ 1. Then, it holds that
+                           
+                   4n
+
+                                         2 · (2n + 2)!
+                                                                       
+                 1    2n + 2       1                        (2n + 2)!
+   cn+1 = cn + n+1             = n+1 ·                 +
+               4       n+1       4        (n + 1)!n!     (n + 1)!(n + 1)!
+                                               
+                                 2n + 3 2n + 2
+                               = n+1              .
+                                  4       n+1
+Therefore, the lemma is proved by induction.                                                                 t
+                                                                                                             u
+    To measure the size of cn , we apply Wallis’s formula [34] which gives us very
+tight lower and upper bound:
+                                           
+                  1    2n + 1       2n + 1 2n        1 2n + 1
+                 √ ·q            <     n
+                                                 <√ · √ .
+                   π     n+ 2  1      4    n          π      n
+
+                                              √
+From the inequality, we can check that cn = Θ( n), which diverges as n → ∞.
+Remark 1. Our method can be naturally generalized to the composite polyno-
+mial approximation on step functions. For example, if we substitute Prop III by
+f 0 (x) = cx2m (1 − x2 )n for m, n ≥ 1, then f (d) would get close to a step function
+F (as d increases) such that F (x) = −1 if x ∈ [−1, −t), F (x) = 0 if x ∈ [−t, t]
+and F (x) = 1 if x ∈ (t, 1], for some 0 < t < 1 as d increases.
+
+3.2   Analysis on the Convergence of fn(d)
+                                                                          (d)
+In this subsection, we analyze the convergence of fn to the sign function as
+                                                                    (d)
+d increases. To be precise, we give a lower bound of d which makes fn to be
+
+
+                                                   13
+(α, )-close to the sign function. The following lemma gives a nice upper bound
+on 1 − fn (x), which is even tighter than the Bernoulli’s inequality [40]: This
+well-known inequality implies 1 − cn x ≤ (1 − x)cn , but since 1 − cn x ≤ 1 − fn (x)
+we cannot directly obtain the upper bound of 1 − fn (x) from this inequality.
+Lemma 3. It holds that 0 ≤ 1 − fn (x) ≤ (1 − x)cn for x ∈ [0, 1].
+Proof. It is trivial that fn (x) ≤ fn (1) = 1 for x ∈ [0, 1]. We will prove G(x) :=
+(1 − x)cn − (1 − fn (x)) ≥ 0 for x ∈ [0, 1] by showing
+ 1. G(0) = G(1) = 0,
+ 2. there exists x0 ∈ (0, 1) s.t. G(x0 ) > 0,
+ 3. there exists a unique y0 ∈ (0, 1) s.t. G0 (y0 ) = 0.
+We first check why these three conditions derive the result G(x) ≥ 0. Assume
+that there exists x1 ∈ (0, 1) such that G(x1 ) < 0. Since G is continuous, there
+exists a root x2 of G between x0 and x1 . Then by the mean value theorem,
+there exist y1 ∈ (0, x2 ) and y2 ∈ (x2 , 1) satisfying G0 (y1 ) = G0 (y2 ) = 0, which
+contradicts to the third condition.
+    Now we prove the three conditions. The first condition is trivial. To show
+the second condition, we observe G(0) = 0, G0 (0) = 0 and G00 (0) > 0 which can
+be easily checked. Since G00 is continuous, G0 (0) = 0 and G00 (0) > 0 imply that
+G0 (x) > 0 for x ∈ (0, δ) for some δ > 0. Combining with G(0) = 0, we obtain
+G(x) > 0 for x ∈ (0, δ) which implies the second condition.
+    To show the uniqueness, let G0 (x) = cn (1 − x2 )n − cn (1 − x)cn −1 = 0. Then
+it holds that (1 − x)n−cn +1 · (1 + x)n = 1 for x ∈ (0, 1). Taking a logarithm, the
+equation is equivalent to
+                            log(1 + x)     n − cn + 1
+                                        =−            .
+                            log (1 − x)        n
+Since log(1 + x)/ log(1 − x) is a strictly increasing function, there should exist a
+unique y0 ∈ (0, 1) satisfying the equation which implies G0 (y0 ) = 0.            t
+                                                                                  u
+    We give another inequality on 1 − fn (x) which is tighter than the inequality
+in the previous lemma when x is close to 1.
+Lemma 4. It holds that 0 ≤ 1 − fn (x) ≤ 2n · (1 − x)n+1 for x ∈ [0, 1].
+Proof. Let y = 1 − x, and set
+                               cn · 2n n+1
+                     H(y) =           ·y   − (1 − fn (1 − y)).
+                               n+1
+Then H 0 (y) = cn · 2n · y n − fn0 (1 − y) = cn · 2n · y n − cn · y n (2 − y)n ≥ 0 for
+y ∈ [0, 1]. Since H(0) = 0, it holds that H(y) ≥ 0. Therefore, we obtain
+                               cn · 2n
+                1 − fn (x) ≤           · (1 − x)n+1 ≤ 2n · (1 − x)n+1
+                               n+1
+for x ∈ [0, 1], where the second inequality comes from cn < n + 1.                  t
+                                                                                    u
+
+
+                                          14
+                                                                   (d)
+      Now we obtain the theorem on the convergence of fn                 to the sign function.
+                                  (d)
+Theorem 3 (Convergence of fn ). If d ≥ log1cn · log(1/) + log(n+1)
+                                                                  1
+                                                                       · log(α −
+                 (d)
+1) + O(1), then fn (x) is an (α, )-close polynomial to sgn(x) over [−1, 1].
+Proof. Since fn is an odd function, it suffices to consider the case that the input
+                                                                                (d)
+x is non-negative. We analyze the lower bound of d for the convergence of fn by
+applying Lemma 3 and Lemma 4. Note that Lemma 3 is tighter than Lemma 4
+if x is close to 0 while the reverse holds if x is close to 1. To this end, to obtain
+a tight lower bound of d, our analysis is divided into two steps each of which
+applies Lemma 3 and Lemma 4, respectively.
+Step 1. Since fn is an odd function,  l it suffices to consider the case x ∈ [, 1]
+                                                             m
+instead of [−1, −] ∪ [, 1]. Let d = log(cn ) · log log τ / for some constant
+                                          1               1
+
+0 < τ < 1. Then applying Lemma 3, we obtain following inequality for x ∈ [, 1].
+                                           d
+                 1 − fn(d ) (x) ≤ (1 − x)cn
+                                                log( τ1 )
+                                                 1
+                               ≤ (1 − )log( τ )/ <
+                                                 1
+                                                            < τ.
+                                                 e
+                    l                                m
+Step 2. Now let dα = log(n+1)
+                         1
+                              · log (α − 1)/ log 2τ1
+                                                        . Applying previous re-
+sult and Lemma 4, we obtain following inequality for x ∈ [, 1].
+                                                 (n+1)dα
+       2 · 1 − fn(d +dα ) (x) ≤ 2 · 1 − fn(d ) (x)
+
+                                                      ≤ (2τ )(α−1)/ log( 2τ ) = 2−α+1 .
+                                               dα                         1
+                                ≤ (2τ )(n+1)
+                                                     (d)
+Therefore, if d ≥ d + dα , we obtain 1 − fn (x) ≤ 2−α for x ∈ [, 1].
+   Note that the choice of the constant τ is independent to  and α. When τ =
+1/4, then we get d + dα = log(c
+                               1
+                                 n)
+                                                      1
+                                    · log (1/) + log(n+1)                   1
+                                                           · log(α − 1) + log(cn)
+                                                                                  + O(1).
+Since log(cn ) ≤ 2, the theorem is finally proved.
+         1
+                                                                                       t
+                                                                                       u
+
+3.3     New Comparison Algorithm NewComp
+Now we introduce our new comparison algorithm based on the previous compos-
+ite function approximation (Theorem 3) of the sign function. From the identity
+                                                    (d)
+comp(a, b) = (sgn(a − b) + 1)/2 and approximation fn (x) ≃ sgn(x), we get
+                                                (d)
+                                        fn (a − b) + 1
+                            comp(a, b) ≃               ,
+                                               2
+which results in our new comparison algorithm denoted by NewComp described
+in Algorithm 1.
+   It is quite natural that the larger d gives more accurate result. Since the
+                                                                               (d)
+comparison algorithm NewComp(·, ·; n, d) is obtained from the evaluation of fn ,
+Theorem 3 is directly transformed into the context of NewComp as Corollary 1,
+which informs us how large d is sufficient to get the result in certain accuracy.
+
+
+                                           15
+Algorithm 1 NewComp(a, b; n, d)
+Input: a, b ∈ [0, 1], n, d ∈ N
+Output: An approximate value of 1 if a > b, 0 if a < b and 1/2 otherwise
+ 1: x ← a − b
+ 2: for i ← 1 to d do
+                                                                    (d)
+ 3:   x ← fn (x)                                       // compute fn (a − b)
+ 4: end for
+ 5: return (x + 1)/2
+
+
+
+Corollary 1. If d ≥ log1cn · log(1/) + log(n+1)
+                                              1
+                                                 · log(α − 2) + O(1), then the error
+of the output of NewComp(a, b; n, d) compared to the true value is bounded by 2−α
+for any a, b ∈ [0, 1] satisfying |a − b| ≥ .
+
+Remark 2. One can substitute scalar multiplications in the evaluation of fn with
+additions by linearly transforming fn to an integer-coefficient polynomial hn as
+                                     n
+                  fn (2x − 1) + 1 X 1
+                                               
+                                               2i
+        hn (x) :=                =       i
+                                            ·       · (2x − 1) · (4x − 4x2 )i
+                         2          i=0
+                                        4       i
+                                     n  
+                                    X     2i
+                                 =             · (2x − 1) · (x − x2 )i ,
+                                    i=0
+                                           i
+
+since multiplying m can be interpret as m additions for any positive integer m.
+                                             (d)
+                                    (d)
+Note that it is easily proved that hn (x) = f (2x−1)+1
+                                                 2     by induction, so we can
+express the comparison functions as
+                              (d)
+                           fn (a − b) + 1               (a − b) + 1
+                                                                     
+              comp(a, b) ≃                = h(d)
+                                             n                            .
+                                 2                           2
+
+Therefore, Algorithm 1 can be naturally converted into the context of hn which
+does not require scalar multiplications for the evaluation.
+
+3.4   Computational Complexity of NewComp and its Asymptotic
+      Optimality
+In this subsection, we analyze the computational complexity of our new compar-
+ison method, and compare the result with the previous methods. Note that the
+(multiplicative) computational complexity of NewComp(·, ·; n, d) equals to that of
+             (d)
+evaluating fn , so it suffices to focus on this composite polynomial.
+    For each n ≥ 1, let Cn be the required number of multiplications (hence the
+computational complexity) of fn using some polynomial evaluation algorithm,
+and denote the lower bound of d in Theorem 3 by dn := log1cn · log(1/) +
+                                                                          (dn )
+log(n+1) · log(α − 1) + O(1). Then the total computational complexity of fn
+    1
+
+is T Cn := dn · Cn which varies on the choice of n. When n becomes larger, then
+
+
+                                        16
+n           Dn        Cn               dn                T Dn                 T Cn
+
+1            2         2          L(1.71, 1)           L(3.42, 2)           L(3.42, 2)
+2            3         3         L(1.1, 0.63)         L(3.3, 1.89)         L(3.3, 1.89)
+3            3         4         L(0.89, 0.5)         L(2.67, 1.5)          L(3.56, 2)
+4            4         4         L(0.77, 0.43)       L(3.08, 1.72)       L(3.08, 1.72)
+5            4         5         L(0.7, 0.39)         L(2.8, 1.56)         L(3.5, 2.45)
+6            4         6         L(0.64, 0.36)       L(2.56, 1.44)        L(3.84, 2.16)
+7            4         7         L(0.61, 0.33)       L(2.44, 1.32)        L(4.27, 2.31)
+                                                                           (d )
+             Table 1: Depth / Computational Complexity of fn and fn n
+
+
+dn becomes smaller but Cn becomes larger. Namely, there is a trade-off between
+dn and Cn , so we need to find the best choice of n which minimizes the total
+                                   (d )
+computational complexity T Cn of fn n .
+    We assume that each polynomial fn is computed by the Paterson-Stockmeyer
+method [42] which achieves an optimal computational complexity upto constant.
+Then, the depth is Dn := log(deg fn ) + O(1) = log n + O(1), and the compu-
+                                √              √                           (d )
+tational complexity is Cn := Θ( deg fn ) = Θ( n)c . The total depth of fn n
+is T Dn := dn · Dn = L loglog
+                            n+O(1) log n+O(1)
+                               cn   , log(n+1) (see Section 2.1 for L notation).
+               √
+Since cn = Θ( n) by Lemma 2, the total depth T Dn gets close to L(2, 1) as n
+                                                                        (d )
+increasesd . On the other hand, the total computational complexity of fn n is
+                                             √                   √
+                                                                   
+                                    1                 1
+           T Cn := dn · Cn = L           · Θ( n),            · Θ( n) ,
+                                  log cn          log(n + 1)
+which diverges as n increases, contrary to the total depth T Dn . Therefore, the
+optimal choice of n which minimize the total complexity T Cn exists. The exact
+number of multiplications Cn of fn and the exact value of T Cn for small n’s are
+described in Table 1. From simple computations, we can check that n = 4 gives
+the minimal computational complexity T C4 .
+Asymptotic Optimality. As described in Section 2.2, the minimal degree of an
+(α, )-close approximate polynomial of the sign function over [−1, 1] is Θ(α/).
+Since the sign function and the comparison function are equivalent, this implies
+that any comparison algorithm on inputs a, b ∈ [0, 1] whose output is within
+2−α error when |a − b| ≥  requires at least Θ(log α) + Θ(log(1/)) complex-
+ity. As described above, the computational complexity of NewComp(·, ·; n, dn )
+    c
+        The complexity notations in Dn and Cn only depend on n, not α and .
+    d
+        It does
+              not mean the “convergence”
+                                           to L(2, 1) as n → ∞, since the equation
+              log n+O(1) log n+O(1)
+T Dn = L         log cn
+                        , log(n+1)    only holds when n = O(1) with respect to α and 1/.
+
+
+                                               17
+is Θ(log α) + Θ(log(1/)) for each n. Therefore, our new comparison method
+achieves an optimality in asymptotic computational complexity upto constant,
+while the previous method [13] only achieves quasi-optimality with an additional
+log α factor.
+    For several settings of α and , we compare the computational complexity of
+our method to the minimax approximation and the method in [13] as Table 2.
+
+
+
+        Parameters       Minimax Approx.         [13] Method       Our Method
+                                 √
+      log(1/) = Θ(1)         Θ( α)               Θ(log2 α)          Θ(log α)
+                              √
+      log(1/) = Θ(α)       Θ( α · 2α/2 )        Θ(α · log α)           Θ(α)
+                             √       α−1
+                                          
+      log(1/) = 2α        Θ    α · 22            Θ(α · 2α )           Θ (2α )
+Table 2: Asymptotic Computational Complexity for each Comparison Method
+
+
+
+3.5     Heuristic Methodology of Convergence Acceleration
+
+In the previous subsection, we dealt with the asymptotic optimality in computa-
+tional complexity of our comparison algorithm NewComp. In this subsection, we
+introduce a heuristic methodology to reduce the constants a and b in L(a, b) of
+the computational complexity T Cn , which accelerates NewComp in practice.
+     The intuition of our acceleration method can be found in the proof of The-
+                                                                        (d )
+orem 3. The proof is divided into two steps: Step 1 is to make fn  ([, 1]) ⊆
+[1 − τ, 1] for some constant 0 < τ < 1 (applying Lemma 3), and Step 2 is to
+         (d )
+make fn α ([1 − τ, 1]) ⊆ [1 − 2−α , 1] (applying Lemma 4). Our key observation is
+that we can accelerate Step 1 by using another function g rather than fn . The
+                  (d)
+convergence of fn (1 ≤ d ≤ d ) in Step 1 mainly depends on the constant cn ,
+the derivative of fn at zero. Therefore, we may expect that the required number
+of polynomial compositions d in Step 1 can be reduced if we substitute fn by
+some other odd polynomial g which satisfies g 0 (0) > fn0 (0).
+     However, we cannot take any g with large derivative at 0, since the range of
+g (d) over the domain [, 1] must be contained in [1 − τ, 1] when d is large enough.
+In particular, the polynomial g must satisfy following properties (compare it
+with the Core Properties of f in Section 3.1):
+
+Prop I.    g(−x) = −g(x)                                        (Origin Symmetry)
+Prop IV. ∃ 0 < δ < 1 s.t. x < g(x) ≤ 1 for all x ∈ (0, δ],      (Toward [1 − τ, 1])
+                           and g([δ, 1]) ⊆ [1 − τ, 1]           (Keep in [1 − τ, 1])
+
+For each g, we denote the minimal 0 < δ < 1 in Prop IV by δ0 in the rest of
+paper.
+
+
+                                         18
+    Note that Prop IV is necessary to make g (d) (x) ∈ [1 − τ, 1] for x ∈ [, 1]
+when d ≥ d0 for some sufficiently large d0 > 0. Intuitively, among all g of the
+same degree satisfying above properties, a smaller d is required for g (d) ([, 1]) ⊆
+[1−τ, 1] if g satisfies Prop IV with smaller δ0 and has bigger value on the interval
+(0, δ0 ) (hence g 0 (0) is bigger).
+    We introduce a novel algorithm (Algorithm 2) which outputs a degree-(2n+1)
+polynomial denoted by gn,τ having minimal δ0 of Prop IV among all degree-
+(2n + 1) polynomials satisfying Prop I & IV. In a certain condition, we can
+additionally show that gn,τ (x) > g(x) on x ∈ (0, δ) (hence larger derivative at
+zero) for any other polynomials g satisfying Prop I & IV (see Theorem 4 and
+Corollary 2). It implies that gn,τ is the best polynomial among all same-degree
+                                        (d)
+polynomials achieving our goal, i.e., gn,τ ([, 1]) ⊆ [1 − τ, 1] with minimal d.
+
+
+Algorithm 2 FindG(n, τ )
+Input: n ≥ 1, 0 < τ < 1
+Output: A degree-(2n+1) polynomial gn,τ satisfying Prop I & IV with minimal
+    δ of Prop IV.
+ 1: gn,τ ← x                                         // Initialize gn,τ (x) = x
+ 2: repeat
+ 3:   δ0 ← minimal δ s.t. gn,τ ([δ, 1]) ⊆ [1 − τ, 1]     // Initial δ0 is 1 − τ
+ 4:   gmin ← degree-(2n + 1) minimax approx. poly. of (1 − τ2 ) · sgn(x) over
+      [−1, −δ0 ] ∪ [δ0 , 1]
+ 5:   gn,τ ← gmin
+ 6:   S ← ||gn,τ − (1 − τ2 )||∞,[δ0 ,1]
+ 7: until S == τ2
+ 8: return gn,τ
+
+
+
+    In Algorithm 2, the equality check S == τ2 on line 7 is done with a certain
+precision in practice (e.g., 2−10 or 2−53 ). Note that S converges (increases) to
+2 , δ0 converges (decreases) to some δconv > 0, and hence gn,τ converges to
+τ
+
+some polynomial gn,τconv
+                          (see Appendix A). From this, we obtain two facts: First,
+Algorithm 2 terminates in finite iterations given a finite precision for the equality
+check. Second, the output of the algorithm satisfies Prop I & IVe .
+    We provide a theoretical analysis on gn,τ   conv
+                                                      to which gn,τ converges, which
+we call the ideal output polynomial of Algorithm 2. Note that the ideal ouput
+polynomial gn,τ
+              conv
+                   satisfies ||gn,τ
+                                conv
+                                     − (1 − τ2 )||∞,[δ0 ,1] = τ2 . The following theorem
+shows the optimality of gn,τ , which implies that the real output of Algorithm 2
+                            conv
+
+with a certain precision is nearly optimal.
+
+   e
+    In every iteration of Algorithm 2, the minimax approximate polynomial gmin of
+(1 − τ2 ) · sgn(x) over [−1, δ0 ] ∪ [δ0 , 1] satisfies Prop I & IV. Prop I is trivial, and
+gmin ([δ0 , 1]) ⊂ [1 − τ, 1] by Lemma 1. Since gmin (δ0 ) > 1 − τ ≥ δ0 and gmin is concave
+& increasing in [0, δ0 ], it holds that x < gmin (x) < 1 for x ∈ (0, δ0 ].
+
+
+                                           19
+                                   conv                                 conv
+Theorem 4 (Optimality of gn,τ           ). The ideal output polynomial gn,τ  of Al-
+gorithm 2 satisfies Prop I & IV with minimal δ0 among all degree-(2n + 1) poly-
+nomials satisfying Prop I & IV. Let x2 > 0 be the smallest positive x-coordinate
+of local minimum points of gn,τ following the notation in Lemma 1 (If local
+minimum does not exist, set x2 = 1). If x2 ≥ 1 − τ , then gn,τ (x) > g(x) for
+x ∈ (0, δ0 ) for any other degree-(2n + 1) polynomial g satisfying Prop I & IV.
+
+Proof. Let δconv be the minimal δ such that gn,τ         conv
+                                                              ([δ, 1]) ⊆ [1 − τ, 1]. Assume
+that there exists a degree-(2n + 1) polynomial g satisfying Prop I & IV with
+δ ≤ δconv . By Prop IV, we get ||g − (1 − τ2 )||∞,[δ,1] ≤ τ2 , and then it trivially
+holds that ||g − (1 − τ2 )||∞,[δconv ,1] ≤ τ2 = ||gn,τ
+                                                    conv
+                                                         − (1 − τ2 )||∞,[δconv ,1] . Therefore,
+g = gn,τ by Lemma 1 which implies the minimality of δconv .
+      conv
+
+    Now we prove the second statement. Let g be a degree-(2n + 1) polynomial
+satisfying Prop I & IV which is distinct from gn,τ    conv
+                                                           , and δg be the minimal δ such
+that g([δ, 1]) ⊆ [1 − τ, 1]. From the minimality of δconv and Prop IV, it holds that
+δconv < δg ≤ 1−τ ≤ x2 . By Lemma 1, gn,τ      conv
+                                                   oscillates on [δconv , 1] with 1 and 1−τ
+as maximum and minimum, respectively, and it has n critical points in (δconv , 1).
+Since g([δg , 1]) ⊆ [1 − τ, 1] and δg ≤ x2 , the polynomial g intersects with gn,τ           conv
+                                                                                     0
+on at least n points in [δg , 1]: when g(x) = gn,τ   conv
+                                                          (x) and g 0 (x) = gn,τ
+                                                                               conv
+                                                                                       (x), then
+x is counted as two points (see Figure 4). Now our second argument is proved as
+following: If g(x) ≥ gn,τconv
+                              (x)f on some x ∈ (0, δconv ) ⊂ (0, δg ), then g and gn,τ       conv
+
+intersect on at least one point in (0, δg ) by intermediate value theorem since there
+exists y ∈ (δconv , δg ) such that g(y) < 1 − τ ≤ gn,τ    conv
+                                                               (y) by the definition of δg .
+This leads to a contradiction since g and gn,τ intersect on 2(n + 1) + 1 = 2n + 3
+                                                  conv
+
+points (the factor 2 comes from the fact that both are odd polynomials) including
+the origin while the degree of both g and gn,τ      conv
+                                                          is 2n + 1 < 2n + 3. Therefore,
+gn,τ (x) > g(x) for all x ∈ (0, δconv ).
+ conv
+                                                                                                t
+                                                                                                u
+
+
+
+                                       g                                                g
+                                      conv                                             conv
+                                     gn,τ                                             gn,τ
+
+         1                                                1
+
+
+      1−τ                                              1−τ
+
+
+
+
+         0                                                0
+             0 δ0   δg   x2    1                              0 δ0 δg    x2     1
+
+   (a) Intersections without multiplicity           (b) Intersection with multiplicity at x2
+
+
+       Fig. 4: Example description of intersections of g and gn,τ
+                                                              conv
+                                                                   for n = 3
+   f            conv
+     If g(x) = gn,τ  (x) on some x ∈ (0, δ0 ), it is the point of intersection in (0, δg ), and
+proof continues.
+
+
+                                               20
+                      conv
+Corollary 2. Let gn,τ      be the ideal output polynomial of Algorithm 2, and δ0
+be the corresponding minimal δ satisfying Prop IV. If n = 1, (n, τ ) = (2, 0.25),
+                                            conv
+or (n, τ ) = (3, 0.35), then δ0 < δg and gn,τ    (x) > g(x) on x ∈ (0, δ0 ) for any
+other degree-(2n + 1) polynomial g satisfying Prop I & IV.
+
+    Though gn,τ is hard to be expressed in closed form contrary to fn , we can find
+it with a certain precision (e.g., 2−10 ) by running Algorithm 2 in MATLAB. For
+example, we provide explicit descriptions of the polynomials gn,τ for n = 1, 2, 3, 4
+and τ = 41 . In this case, the equality check in Algorithm 2 was done with 10−4
+precision. We omit the subscript τ of gn,τ for τ = 14 for convenience.
+
+ • g1 (x) = − 1359    3  2126
+               210 · x + 210 · x
+               3796    5   6108    3    3334
+ • g2 (x) =     210 · x − 210 · x + 210 · x
+ •   g3 (x) = − 12860    7  25614    5    16577  3  4589
+                 210 · x + 210 · x − 210 · x + 210 · x
+ •   g4 (x) = 46623     9   113492    7    97015  5  34974 3 5850
+                 210 · x − 210 · x + 210 · x − 210 · x + 210 · x
+
+
+
+
+                                          g1                                               (5)
+                                                                   1                     f1
+                1                         g2                                           (3)     (2)
+                                          g3                                          f1 ◦ g1
+              1−τ                         g4
+
+
+
+
+                                                    −1                          1
+      −1                          1
+
+
+              τ −1
+                                                               −1
+                −1
+
+
+
+
+                                                             (d +dg )        (d )   (d )
+     Fig. 5: Illustration of gn and the comparison of f1 f              and f1 f ◦ g1 g
+
+
+     We can empirically check that gn also satisfies the following two heuristic
+properties. The first property shows how large gn0 (0) is when it compared to
+fn0 (0), and the second property shows how fast gn (x) gets close to ±1, i.e., the
+gn -version of Lemma 3.
+Heuristic Properties of gn :
+
+ 1. gn0 (0) ≃ 0.98 · fn0 (0)2 (Hence, log gn0 (0) ≃ 2 · log cn )
+                            0
+ 2. 1 − gn (x) ≤ (1 − x)gn (0) for x ∈ [0, δ0 ] where δ0 is the minimal δ in Prop IV
+
+
+                                               21
+Experimental results supporting above heuristic properties are described in Ap-
+pendix B. Applying these gn polynomials, we can provide a new comparison
+algorithm (Algorithm 3), which is a modified version of Algorithm 1 and offers
+the same functionality with the reduced computational complexity and depth.
+We can also estimate the number of compositions df and dg required for this
+modified algorithm to achieve a certain accuracy as Corollary 3.
+
+
+Algorithm 3 NewCompG(a, b; n, df , dg )
+Input: a, b ∈ [0, 1], n, df , dg ∈ N
+Output: An approximate value of 1 if a > b, 0 if a < b and 1/2 otherwise
+ 1: x ← a − b
+ 2: for i ← 1 to dg do
+                                                                   (d )
+ 3:   x ← gn (x)                                      // compute gn g (a − b)
+ 4: end for
+ 5: for i ← 1 to df do
+                                                            (d )   (d )
+ 6:   x ← fn (x)                               // compute fn f ◦ gn g (a − b)
+ 7: end for
+ 8: return (x + 1)/2
+
+
+
+
+Corollary 3. (With Heuristic Properties) If dg ≥ log g10 (0) · log(1/) + O(1) =
+                                                                     n
+1/2+o(1)                                1
+  log cn · log(1/) + O(1) and df ≥ log n · log(α − 2) + O(1), then the error of the
+output of NewCompG(a, b; n, df , dg ) compared to the true value is bounded by 2−α
+for any a, b ∈ [0, 1] satisfying |a − b| ≥ .
+
+                                                                                    (d )
+Proof. Following the proof of Theorem 3, it suffices to show that 1−gn g (x) ≤ τ
+for x ∈ [, 1] where τ = 1/4. Let en := gn0 (0). By the second heuristic property of
+                                      (d)              d                  (d−1)
+gn , we obtain two inequalities: 1−gn (x) ≤ (1−x)en for d satisfying gn         (x) ≤
+               (d)            (d−1)
+δ0 , and 1 − gn (x) ≤ τ for gn      (x) > δ0 . Therefore, it holds that
+                                                     d
+                                                            
+                          1 − gn(d) (x) ≤ max (1 − x)en , τ
+                                        l                                  m
+for any d > 0. Applying d = dg :=             1                  1
+                                                                         / , we finally obtain
+                                                                     
+                                            log en · log   log   τ
+                                 dg
+1 − gn g (x) ≤ τ since (1 − x)en ≤ (1 − )log( τ )/ < τ .
+     (d )                                            1
+                                                                                             t
+                                                                                             u
+
+    The important point is that dg is reduced as approximately half (applying
+the first heuristic property of gn ) compared to the previous case that only uses
+fn to approximate the sign function. Since gn and fn requires same number of
+non-scalar multiplications, we can conclude that the computational complexity
+    (d )    (d )
+of fn f ◦ gn g is L a2n , bn where an and bn are defined from T Cn = L(an , bn ).
+                            
+
+
+                                            22
+                                                                         
+                            (d )    (d )          logn+O(1) log n+O(1)
+    The total depth of fn f ◦ gn g is L             2·log cn , log(n+1)       which gets close
+to L(1, 1) as n increases . Note that L(1, 1) is theoretically the minimal depth
+                            g
+
+obtained by minimax polynomial approximation (see Section 2.2).
+
+
+4    Application to Min/Max
+
+As described in [13], min/max functions correspond to the absolute function as
+
+                       a + b |a − b|                              a + b |a − b|
+        min(a, b) =         −              and      max(a, b) =        +        .
+                         2      2                                   2      2
+Therefore, an approximate polynomial of |x| directly gives us the approximate
+polynomial of min/max functions. Since |x| = x · sgn(x), we can consider the
+                    (d)
+convergence of x · fn (x) to |x| as an analogue. As min(a, b) is directly computed
+from max(a, b), we only describe an algorithm of max for convenience.
+    Contrary to sgn(x), the absolute function |x| is continuous so that the pa-
+rameter  is unnecessary. The following theorem provides the convergence rate
+        (d)
+of x · fn (x) to |x|.
+                                            (d)
+Theorem 5 (Convergence of x · fn ). If d ≥ log1cn · (α − 1), then the error
+       (d)
+of x · fn (x) compared to |x| is bounded by 2−α for any x ∈ [−1, 1].
+
+Proof. Since |x| = x · sgn(x), the error is upper bounded as
+                                                                                  d
+             x · fn(d) (x) − |x| = |x| · fn(d) (x) − sgn(x) ≤ |x| · |1 − |x||cn .
+
+Let y = |x| ∈ [0, 1] and k = cdn , then the error upper bound is expressed as
+E(y) = y · (1 − y)k . By a simple computation, one can check that E(y) has the
+maximal value at y = 1/(k + 1). Therefore, k should satisfy
+
+                                          kk
+                                 
+                              1
+                        E           =            ≤ 2−α .
+                             k+1      (k + 1)k+1
+
+Since 2 ≤ (1 + 1/k)k ≤ e for k ≥ 1, setting k ≥ 2α−1 implies d ≥ log1cn · (α − 1).
+                                                                                t
+                                                                                u
+                                                                    (d)
+    We denote an algorithm which evaluates a+b
+                                             2 + 2 · fn (a − b) by NewMax
+                                                  a−b
+
+(see Algorithm 4), and Theorem 5 is naturally transformed into the context of
+min/max as Corollary 4.
+
+Corollary 4. If d ≥ log1cn ·(α−2), then the error of the output of NewMax(a, b; n, d)
+compared to the true value is bounded by 2−α for any a, b ∈ [0, 1].
+
+   g
+     It does not mean the “convergence” to L(1, 1) as n → ∞, since n should be O(1)
+with respect to α and 1/.
+
+
+                                             23
+Algorithm 4 NewMax(a, b; n, d)
+Input: a, b ∈ [0, 1], n, d ∈ N
+Output: An approximate value of max(a, b)
+ 1: x ← a − b, y ← a+b 2
+ 2: for i ← 1 to d do
+                                                                            (d)
+ 3:   x ← fn (x)                                             // compute fn (a − b)
+ 4: end for
+ 5: y ← y + a−b
+              2 ·x
+ 6: return y
+
+
+
+Our Max v.s. Previous Max. In [13], Cheon et al. introduced a max algorithm
+                                                    |a−b|
+exploiting the same identity max(a, b) = a+b  2 +     2 , but they interpret the
+                           √
+absolute function as |x| = xp  2 which is different with our our interpretation
+
+|x| = x · sgn(x). To compute (a − b)2 , they exploit Wilkes’s algorithm [47]
+                                                            √
+denoted by Sqrt(y; d) which approximately computes y for y ∈ [0, 1]: Let
+a0 = y and b0 = y − 1, and iteratively compute an+1 = an 1 − b2n and bn+1 =
+                                                                     
+
+b2n bn4−3 for 0 ≤ n ≤ d − 1, where the final output is ad .
+         
+                                                           (d)
+    We note that the output of Sqrt(x2 ; d) equals to x · f1 (x), which means our
+max algorithm NewMax(a, b; 1, d) (in the case of n = 1) gives the same output to
+the max algorithm in [13]. However, there are several significant advantages to
+use our max algorithm instead of the max algorithm in [13].
+ – Sqrt(x2 ; d) requires 3 multiplications including 1 square multiplication for
+   each iteration, while f1 (x) can be computed by only 2 multiplications. There-
+   fore, NewMax(·, ·; 1, d1 ) is faster than the max algorithm in [13].
+ – We can further optimize our max algorithm by substituting f1 (x) with fn (x)
+   for some n > 1. As an analogue of Section 3.4, we can select an optimal n
+   which minimizes d · Cn where d = log1cn · (α − 2), where n = 4 is optimal.
+ – Applying the approximate HE scheme HEAAN [11, 12], the max algorithm
+   in [13] is unstable when two inputs a and b are too close. To be precise, if the
+   input (a − b)2 is close to zero and even smaller than an error accompanied
+   by HEAAN, then the input attached with the error can be a negative value.
+   However, the output of Sqrt(y; d) for y < 0 diverges as d increases. In
+                (d)
+   contrary, fn is stable over the interval [−1, 1], so our max algorithm still
+   works well even if two inputs are very close.
+Applying {gn }n≥1 to Max. As a construction of NewCompG, we can also apply
+the family of polynomials {gn }n≥1 with heuristic properties to accelerate our
+NewMax algorithm. We denote an algorithm which evaluates a+b             a−b
+                                                                   2 + 2 ·f
+                                                                                (df )
+                                                                                      ◦
+g (dg )
+        (a − b) by NewMaxG(a, b; n, df , dg ). Applying  = 2 to Corollary 3, one can
+                                                             −α
+
+easily obtain the following result on NewMaxG.
+Corollary 5. If dg ≥ log g10 (0) · α + O(1) and df ≥ log1 n · log(α − 2) + O(1), then
+                           n
+the error of the output of NewMaxG(a, b; n, df , dg ) compared to the true value is
+bounded by 2−α .
+
+
+                                          24
+5      Experimental Results
+
+We measured the performance of our algorithms with comparison to Comp or Max
+of [13]. The experiments are divided into two categories: 1. Running algorithms
+on plain inputs, 2. Running algorithms on encrypted inputs. All experiments were
+conducted on Linux with Intel Xeon CPU at 2.10GHz processor with 8 threads.
+For experiments in an encrypted state, we used HEAAN library [12, 44].
+
+
+5.1      Approximate HE Scheme HEAAN
+
+Cheon et al. [12] proposed an HE scheme HEAAN which supports approximate
+computations of real/complex numbers. Let N be a power-of-two integer and
+L be the bit-length of initial ciphertext modulus, and define q` = 2` for 1 ≤
+` ≤ L. For R = Z[X]/(X N + 1) and Rq := R/qR, let χkey , χerr and χenc be
+distributions over R. A (field) isomorphism τ : R[X]/(X N +1) → CN/2 is applied
+for encoding/decoding of plaintexts.
+
+    • KeyGen(N, L, D).
+        - Sample s ← χkey . Set the secret key as sk ← (1, s).
+        - Sample a ← U (RqL ) and e ← χerr . Set pk ← (−a · s + e, a) ∈ Rq2L .
+        - Sample a0 ← U (RqL2 ) and e0 ← χerr , and set evk ← (b0 = −a0 · s + e0 +
+           qL · s2 , a0 ) ∈ Rq22 .
+                                   L
+    • Encpk (m; ∆).
+        - For a plaintext m = (m0 , ..., mN/2−1 ) in CN/2 and a scaling factor ∆ =
+           2p > 0, compute a polynomial m ← b∆ · τ −1 (m)e ∈ R
+        - Sample v ← χenc and e0 , e1 ← χerr . Output ct = [v · pk + (m + e0 , e1 )]qL .
+    • Decsk (ct; ∆).
+        - For a ciphertext ct = (c0 , c1 ) ∈ Rq2` , compute m0 = [c0 + c1 · s]q` .
+        - Output a plaintext vector m0 = ∆−1 · τ (m0 ) ∈ CN/2 .
+    • Add(ct, ct0 ). For ct, ct0 ∈ Rq2` , output ctadd ← [ct + ct0 ]q` .
+    • Multevk (ct, ct0 ). For ct = (c0 , c1 ), ct0 = (c00 , c01 ) ∈ R2q` , let (d0 , d1 , d2 ) =
+                                                                              −1
+      (c0 c00 , c0 c01 + c1 c00 , c1 c01 ). Compute ct0mult ← [(d0 , d1 ) + bqL  · d2 · evke]q` , and
+      output ctmult ← [b∆ · ctmult e]q`−p .
+                                     −1      0
+
+
+The secret key distribution χkey is set to be HW T N (256), which uniformly sam-
+ples an element with ternary coefficients in R that has 256 non-zero coefficients.
+
+
+5.2      Parameter Selection
+
+We have two parameters α and  which measure the quality of our comparison
+algorithms. In our experiments, we set  = 2−α , which is the case expecting that
+input and output of algorithms have the same precision bits.
+HEAAN Parameters. We fix the dimension N = 217 , then we can set the
+initial ciphertext modulus qL upto 22250 to achieve 128-bit security estimated by
+
+
+                                                  25
+Albrecht’s LWE estimator [1, 2]. In each experiment, we set the initial modulus
+such that the modulus bit after each algorithm is log ∆ + 10. For example, on
+our comparison algorithm NewComp(·, ·; n, d), we set the initial modulus bit as
+
+           log qL = (log ∆ · dlog(2n + 1)e + 2n − 1) · d + log ∆ + 10.
+
+Note that each coefficient of fn is of the form m/22n−1 for m ∈ Z (Section 3.1).
+We progress the scalar multiplication of m/22n−1 in an encrypted state by m
+additions and (2n − 1)-bit scaling down which results in the factor (2n − 1) in
+the above equation. In the case of NewCompG(·, ·; n, df , dg ), we similarly set
+
+log qL = log ∆ · dlog(2n + 1)e · (df + dg ) + (2n − 1) · df + 10 · dg + log ∆ + 10.
+
+The bit-length of the scaling factor ∆ is set to be around 40 as in [13].
+    Note that one can evaluate N/2 comparison functions simultaneously in a
+single homomorphic comparison. In this sense, an amortized running time of our
+algorithm is obtained by dividing the total running time by N/2 = 216 .
+Choice of n in {fn }n≥1 and {gn }n≥1 . One should consider a different cost
+model other than T Cn in the case of experiments in an encrypted state. When
+running our algorithms with HEAAN, not only the complexity T Cn but also the
+depth T Dn is an important factor affecting the running time, since the compu-
+tational cost of a homomorphic multiplication is different for each level. Instead
+of T Cn , we take another cost model T Dn · T Cn considering that a multiplication
+in Rq takes (quasi-)linear time with respect to log q. Under the setting  = 2−α ,
+one can check by simple computation that n = 4 also minimizes T Dn · T Cn as
+well as T Cn , and we used fn and gn with n = 4 for the experiments.
+
+
+5.3   Performance of NewComp and NewCompG
+
+We compare the performance of our new comparison algorithms NewComp and
+NewCompG with the previous comparison algorithm Comp proposed in [13]. The
+following experimental results show that NewComp is much faster than Comp in
+practice, and applying gn polynomials (NewCompG) substantially improves the
+performance of NewComp.
+Plain State Experiment. For “plain inputs” a, b ∈ [0, 1] satisfying |a − b| ≥
+ = 2−α , we measured the required computational complexity and depth of each
+comparison algorithm to obtain an approximate value of comp(a, b) within 2−α
+error. The parameters d, df and dg are chosen as the lower bounds described in
+Corollary 1 and Corollary 3, and we checked that these theoretical lower bounds
+are indeed very close to those obtained experimentally.
+    From Figure 6, we can see that NewComp requires much less depth and com-
+plexity than Comp, and those of NewCompG are even smaller. Note that the gap
+between these algorithms in terms of both depth and complexity grows up as
+α increases. For example, when α = 8, the required complexity is ×3–4 less in
+NewComp and NewCompG; when α = 32, it is over ×7 less in NewCompG.
+
+                                        26
+                                     400
+                                                 Comp                                                                                      Comp
+
+
+
+
+                                                                                             Required (multiplicative) Depth
+    Required Complexity (# Mults.)
+                                                                                                                               200       NewComp
+                                               NewComp
+                                               NewCompG                                                                                  NewCompG
+                                     300
+                                                                                                                               150
+
+                                     200
+                                                                                                                               100
+
+                                     100
+                                                                                                                               50
+
+
+                                      0                                                                                         0
+                                           4    8   12    16       20   24   28   32                                                 4    8   12    16       20    24   28   32
+                                                               α                                                                                         α
+
+
+Fig. 6: Comp, NewComp and NewCompG on various α with  = 2−α in a plain state
+
+
+Encrypted State Experiment. We also measured the performance of our al-
+gorithms which ouput an approximate value of comp(a, b) within 2−α error for
+“encrypted inputs” a, b ∈ [0, 1] satisfying |a − b| ≥ . Note that parameters d, df
+and dg are chosen as the lower bounds in Corollary 1 and 3. We checked through
+100 experiments that our algorithms with chosen parameters give accurate re-
+sults in spite of errors accompanied by HEAAN.
+    In Table 3, we can see the running time (and amortized running time) of our
+algorithms NewComp, NewCompG, and that of Comp ([13]) for various α. Note that
+our new algorithms NewComp and NewCompG provide outstanding performance
+in terms of amortized running time: NewComp takes 0.9 milliseconds for 8-bit
+comparison, and NewCompG only takes about 1 millisecond to compare up to 20-
+bit inputs. It is a significant improvement over the previous algorithm Comp. For
+example, NewCompG is about ×8 faster than Comp when α = 8, about ×18 faster
+when α = 16, and the ratio increases as α increases.
+    Note that the required depth of Comp is much larger than that of our algo-
+rithms as described in Figure 6. Consequently, to run Comp for α ≥ 10 in an
+encrypted state with 128-bit security, one must increase the HEAAN parameter
+N = 217 to N = 218 , or use bootstrapping techniques [11], both of which yields
+more than twice performance degradation, especially in total running time.
+
+
+
+         α                                           Comp                                 NewComp                                                                 NewCompG
+
+            8                                  238 s (3.63 ms)                         59 s (0.90 ms)                                               31 s (0.47 ms)
+   12                                          572 s (8.73 ms)∗                        93 s (1.42 ms)                                               47 s (0.72 ms)
+   16                                      1429 s (21.8 ms)             ∗
+                                                                                   151 s (2.30 ms)                                                  80 s (1.22 ms)
+   20                                      2790 s (42.6 ms)∗                       285 s (4.35 ms)∗                                                 94 s (1.43 ms)
+Table 3: Running time (amortized running time) of Comp, NewComp and NewCompG
+on HEAAN for various α and  = 2−α ; an asterisk (∗ ) means that the parameter
+for HEAAN does not achieve 128-bit security due to large log qL ≥ 2250.
+
+                                                                                        27
+5.4   Performance of NewMax and NewMaxG
+
+We also compared the performance of NewMax and NewMaxG in an encrypted state
+to that of the max algorithm Max in the previous work [13]. The parameters d, df
+and dg were chosen from the theoretical lower bounds described in Corollary 4
+and Corollary 5, and were confirmed that they are very close to those obtained
+experimentally. In Figure 7, we can see the running time of our new algorithms
+NewMax, NewMaxG, and that of Max in [13]. Our algorithms improve the Max con-
+siderably in running time (and depth), and the gap increases for larger α: when
+α = 8, our NewMax and NewMaxG algorithms are ×1.6 and ×2 faster than Max,
+respectively; when α = 20, our NewMaxG algorithm is ×4.5 faster than Max.
+
+
+                                             400
+                                                         Max
+                                                       NewMax
+                                             300       NewMaxG
+                        Running Time (sec)
+
+
+
+
+                                             200
+
+
+                                             100
+
+
+                                              0
+                                                   8             12        16   20
+                                                                       α
+
+
+Fig. 7: Running Time of Max, NewMax and NewMaxG on HEAAN for various α.
+Hollow marker implies that the parameter for HEAAN does not achieve 128-bit
+security due to large log qL ≥ 2250, which can be achieved by setting N = 218
+
+References
+ 1. M. R. Albrecht. A Sage Module for estimating the concrete security of Learning
+    with Errors instances., 2017. https://bitbucket.org/malb/lwe-estimator.
+ 2. M. R. Albrecht, R. Player, and S. Scott. On the concrete hardness of learning with
+    errors. Journal of Mathematical Cryptology, 2015.
+ 3. V. Andrievskii. Polynomial approximation of piecewise analytic functions on a
+    compact subset of the real line. Journal of Approximation Theory, 2009.
+ 4. F. Armknecht, C. Boyd, C. Carr, K. Gjøsteen, A. Jäschke, C. A. Reuter, and
+    M. Strand. A guide to fully homomorphic encryption. Cryptology ePrint Archive,
+    Report 2015/1192, 2015.
+ 5. J.-C. Bajard, P. Martins, L. Sousa, and V. Zucca. Improving the efficiency of svm
+    classification with fhe. IEEE Transactions on Information Forensics and Security,
+    2019.
+ 6. C. Boura, N. Gama, and M. Georgieva. Chimera: a unified framework for b/fv,
+    tfhe and heaan fully homomorphic encryption and predictions for deep learning.
+    Cryptology ePrint Archive, Report 2018/758, 2018.
+ 7. Z. Brakerski. Fully homomorphic encryption without modulus switching from
+    classical gapsvp. In Annual Cryptology Conference, pages 868–886. Springer, 2012.
+
+
+                                                                  28
+ 8. Z. Brakerski, C. Gentry, and V. Vaikuntanathan. (Leveled) fully homomorphic
+    encryption without bootstrapping. In Proc. of ITCS, pages 309–325. ACM, 2012.
+ 9. H. Chen, I. Chillotti, and Y. Song. Improved bootstrapping for approximate ho-
+    momorphic encryption. In Annual International Conference on the Theory and
+    Applications of Cryptographic Techniques, pages 34–54. Springer, 2019.
+10. J. H. Cheon, K. Han, S. M. Hong, H. J. Kim, J. Kim, S. Kim, H. Seo, H. Shim,
+    and Y. Song. Toward a secure drone system: Flying with real-time homomorphic
+    authenticated encryption. IEEE Access, 2018.
+11. J. H. Cheon, K. Han, A. Kim, M. Kim, and Y. Song. Bootstrapping for approximate
+    homomorphic encryption. In Annual International Conference on the Theory and
+    Applications of Cryptographic Techniques, pages 360–384. Springer, 2018.
+12. J. H. Cheon, A. Kim, M. Kim, and Y. Song. Homomorphic encryption for arith-
+    metic of approximate numbers. In International Conference on the Theory and
+    Application of Cryptology and Information Security, pages 409–437. Springer, 2017.
+13. J. H. Cheon, D. Kim, D. Kim, H. H. Lee, and K. Lee. Numerical method for
+    comparison on homomorphically encrypted numbers. In International Conference
+    on the Theory and Application of Cryptology and Information Security, pages 415–
+    445. Springer, 2019.
+14. J. H. Cheon, M. Kim, and M. Kim. Search-and-compute on encrypted data. In
+    International Conference on Financial Cryptography and Data Security, pages 142–
+    159. Springer, 2015.
+15. D. Chialva and A. Dooms. Conditionals in homomorphic encryption and machine
+    learning applications. Cryptology ePrint Archive, Report 2018/1032, 2018.
+16. I. Chillotti, N. Gama, M. Georgieva, and M. Izabachene. Faster fully homomorphic
+    encryption: Bootstrapping in less than 0.1 seconds. In International Conference on
+    the Theory and Application of Cryptology and Information Security, pages 3–33.
+    Springer, 2016.
+17. I. Chillotti, N. Gama, M. Georgieva, and M. Izabachène. Faster packed homo-
+    morphic operations and efficient circuit bootstrapping for tfhe. In International
+    Conference on the Theory and Application of Cryptology and Information Security,
+    pages 377–408. Springer, 2017.
+18. D. Comaniciu and P. Meer. Mean shift: A robust approach toward feature space
+    analysis. IEEE Transactions on Pattern Analysis & Machine Intelligence, 2002.
+19. A. Cordero, F. Soleymani, J. R. Torregrosa, and M. Z. Ullah. Numerically sta-
+    ble improved chebyshev–halley type schemes for matrix sign function. Journal of
+    Computational and Applied Mathematics, 318:189–198, 2017.
+20. C. Cortes and V. Vapnik. Support-vector networks. Machine learning, 1995.
+21. L. Ducas and D. Micciancio. Fhew: bootstrapping homomorphic encryption in less
+    than a second. In Annual International Conference on the Theory and Applications
+    of Cryptographic Techniques, pages 617–640. Springer, 2015.
+22. A. Eremenko and P. Yuditskii. Uniform approximation of sgn x by polynomials
+    and entire functions. Journal d’Analyse Mathématique, 101(1):313–324, 2007.
+23. J. Fan and F. Vercauteren. Somewhat practical fully homomorphic encryption.
+    IACR Cryptology ePrint Archive, 2012:144, 2012.
+24. J. H. Friedman. Greedy function approximation: a gradient boosting machine.
+    Annals of statistics, pages 1189–1232, 2001.
+25. J. H. Friedman. Stochastic gradient boosting. Computational statistics & data
+    analysis, 38(4):367–378, 2002.
+26. C. Gentry. A fully homomorphic encryption scheme. PhD thesis, Stanford Univer-
+    sity, 2009. http://crypto.stanford.edu/craig.
+
+
+                                         29
+27. C. Gentry, A. Sahai, and B. Waters. Homomorphic encryption from learning with
+    errors: Conceptually-simpler, asymptotically-faster, attribute-based. In Annual
+    Cryptology Conference, pages 75–92. Springer, 2013.
+28. R. Gilad-Bachrach, N. Dowlin, K. Laine, K. Lauter, M. Naehrig, and J. Wernsing.
+    Cryptonets: Applying neural networks to encrypted data with high throughput
+    and accuracy. In International Conference on Machine Learning, 2016.
+29. R. E. Goldschmidt. Applications of division by convergence. PhD thesis, Mas-
+    sachusetts Institute of Technology, 1964.
+30. K. Han, S. Hong, J. H. Cheon, and D. Park. Logistic regression on homomorphic
+    encrypted data at scale. The AAAI Conference on Innovative Applications of
+    Artificial Intelligence, 2019.
+31. K. Han and D. Ki. Better bootstrapping for approximate homomorphic encryption.
+    Cryptology ePrint Archive, Report 2019/688, 2019. To Appear in CT-RSA 2020.
+32. J. A. Hartigan and M. A. Wong. Algorithm as 136: A k-means clustering algorithm.
+    Journal of the Royal Statistical Society. Series C (Applied Statistics), 1979.
+33. N. J. Higham. Functions of matrices: theory and computation. Siam, 2008.
+34. D. K. Kazarinoff. On wallis’ formula. Edinburgh Mathematical Notes, 1956.
+35. C. S. Kenney and A. J. Laub. The matrix sign function. IEEE Transactions on
+    Automatic Control, 40(8):1330–1348, 1995.
+36. A. Kim, Y. Song, M. Kim, K. Lee, and J. H. Cheon. Logistic regression model train-
+    ing based on the approximate homomorphic encryption. BMC Medical Genomics,
+    11(4):83, Oct 2018.
+37. D. Kim, Y. Son, D. Kim, A. Kim, S. Hong, and J. H. Cheon. Privacy-preserving
+    approximate gwas computation based on homomorphic encryption. Cryptology
+    ePrint Archive, Report 2019/152, 2019.
+38. M. Kim, Y. Song, B. Li, and D. Micciancio. Semi-parallel logistic regression for
+    gwas on encrypted data. Cryptology ePrint Archive, Report 2019/294, 2019.
+39. Y. Lin. A note on margin-based loss functions in classification. Statistics & prob-
+    ability letters, 68(1):73–82, 2004.
+40. D. S. Mitrinović, J. E. Pečarić, and A. Fink. Bernoulli’s inequality. In Classical
+    and New Inequalities in Analysis, pages 65–81. 1993.
+41. Y. Nakatsukasa, Z. Bai, and F. Gygi. Optimizing halley’s iteration for computing
+    the matrix polar decomposition. SIAM Journal on Matrix Analysis and Applica-
+    tions, 31(5):2700–2720, 2010.
+42. M. S. Paterson and L. J. Stockmeyer. On the number of nonscalar multiplications
+    necessary to evaluate polynomials. SIAM Journal on Computing, 2(1):60–66, 1973.
+43. E. Saff and V. Totik. Polynomial approximation of piecewise analytic functions.
+    Journal of the London Mathematical Society, 2(3):487–498, 1989.
+44. snucrypto. HEAAN. https://github.com/snucrypto/HEAAN, 2017.
+45. A. R. Soheili, F. Toutounian, and F. Soleymani. A fast convergent numerical
+    method for matrix sign function with application in sdes. Journal of Computational
+    and Applied Mathematics, 282:167–178, 2015.
+46. B. H. M. Tan, H. T. Lee, H. Wang, S. Q. Ren, and K. M. M. Aung. Efficient private
+    comparison queries over encrypted databases using fully homomorphic encryption
+    with finite fields. Cryptology ePrint Archive, Report 2019/332, 2019.
+47. M. V. Wilkes. The Preparation of Programs for an Electronic Digital Computer:
+    With special reference to the EDSAC and the Use of a Library of Subroutines.
+    Addison-Wesley Press, 1951.
+
+
+
+
+                                          30
+A     Convergence of δ0 , S and gn,τ
+
+It is trivial that S ≤ τ2 . Let us denote S, δ0 and gn,τ updated in the i-th iteration
+by Si , δ0,i and gn,τ,i respectively. Assume that Si < τ2 for some i ≥ 1. Then it
+holds that gn,τ,i (x) ≥ (1 − τ2 ) − Si > 1 − τ for x ∈ [δ0,i , 1]. Therefore, δ0,i+1
+should be smaller than δ0,i , and hence Si+1 is larger than Si . Since δ0,i has a
+lower bound 0, δ0,i converges to some constant δconv > 0 as i increases. Hence,
+gn,τ,i converges to some gn,τ  conv
+                                     , and Si converges to some Sconv ≤ τ2 .
+     Now, assume that Sconv < τ2 and let ρ = τ2 − Sconv > 0. Since δ0,i converges
+(and decreases) to δconv , there exists some i ≥ 1 such that δ0,i < 1−τ             +ρ
+                                                                                  1−τ · δconv .
+Note that gn,τ,i is concave in [0, δ0,i ] as noted in Section 2.2. Therefore, it holds
+       g    (δ0,i )−(1−τ )   g     (δ0,i )
+that n,τ,iδ0,i −δ0,i+1     < n,τ,i
+                                δ0,i       where gn,τ,i (δ0,i+1 ) = 1 − τ . Since gn,τ,i (δ0,i ) −
+(1 − τ ) ≥ ρ, we obtain
+
+                   gn,τ,i (δ0,i ) − (1 − τ )                 1−τ
+ δ0,i − δ0,i+1 >                             δ0,i = δ0,i −                δ0,i
+                         gn,τ,i (δ0,i )                    gn,τ,i (δ0,i )
+                                                             1−τ                 ρ
+                                                  ≥ δ0,i −              δ0,i =        δ0,i .
+                                                           1−τ +ρ              1−τ +ρ
+
+Hence, we get δ0,i > 1−τ +ρ         1−τ +ρ
+                      1−τ · δ0,i+1 ≥ 1−τ · δconv , which is a contradiction.
+
+
+
+B     Heuristic Properties on gn
+
+We provide experimental results validating the heuristic properties in Section 3.5:
+
+ 1. gn0 (0) ≃ 0.98 · fn0 (0)2 (Hence, log gn0 (0) ≃ 2 · log cn )
+                                0
+ 2. 1 − gn (x) ≤ (1 − x)gn (0) for x ∈ [0, δ0 ] where δ0 is the minimal δ in Prop IV
+
+On the First Heuristic. Using MATLAB, we computed gn0 (0) and compared
+it with fn02 (0) derived from Lemma 2. See Figure 8 for 1 ≤ n ≤ 20.
+
+
+                                      25       (fn02 (0), gn0 (0))
+                                               0.98 · x − 0.18
+                                      20
+                            gn0 (0)
+
+
+
+
+                                      15
+
+                                      10
+
+                                      5
+
+                                      0
+                                           0    5        10          15    20   25
+                                                                fn02 (0)
+
+
+Fig. 8: fn02 (0) and gn0 (0) (R2 = 0.9999); n = 1, 2, ..., 20 from the left to the right
+
+
+                                                            31
+                                                                               0
+On the Second Heuristic. Let Gn (x) := 1 − (1 − x)gn (0) , then we can ex-
+perimentally check that Gn (x) ≤ gn (x) when x ∈ (0, δ0 ], which is equivalent to
+                     0
+1 − gn (x) ≤ (1 − x)gn (0) . Let δ1 be the largest δ such that Gn (x) ≤ gn (x) for all
+x ∈ [0, δ] (see Figure 9a). The experiment results show that 1/δ0 > 1/δ1 which
+is equivalent to δ0 < δ1 (see Figure 9b for 1 ≤ n ≤ 20).
+
+
+                                                          30
+                                                                   (1/δ0 , 1/δ1 )
+                                                                      y=x
+                                              g1
+    1                                         G1
+                                                          20
+ 1−c
+
+
+
+
+                                                   1/δ1
+                                                          10
+
+
+
+
+                                                          0
+                                                               0   5       10        15    20   25   30
+        0        δ0           δ1    1                                               1/δ0
+
+   (a) Description of δ0 , δ1 , G1 , and g1        (b) 1/δ0 and 1/δ1 ; n = 1, 2, ..., 20 from the
+                                                   left to the right
+                                                                           0
+  Fig. 9: Experimental evidence on 1 − gn (x) ≤ (1 − x)gn (0) when x ∈ (0, δ0 ]
+
+
+
+
+                                               32
+

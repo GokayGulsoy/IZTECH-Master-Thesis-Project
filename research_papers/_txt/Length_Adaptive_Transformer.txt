@@ -1,0 +1,731 @@
+                         Length-Adaptive Transformer:
+             Train Once with Length Drop, Use Anytime with Search
+
+                   Gyuwan Kim                                         Kyunghyun Cho
+              Clova AI, NAVER Corp.                                 New York University
+          gyuwan.kim@navercorp.com                               kyunghyun.cho@nyu.edu
+
+
+
+
+                      Abstract                              during inference, both in terms of time and memory,
+                                                            has hindered its use in real applications. This level
+    Despite transformers’ impressive accuracy,
+    their computational cost is often prohibitive           of excessive computation has further raised the con-
+    to use with limited computational resources.            cern over energy consumption as well (Schwartz
+    Most previous approaches to improve infer-              et al., 2019; Strubell et al., 2019; Cao et al., 2020).
+    ence efficiency require a separate model for               Recent studies have attempted to address these
+    each possible computational budget. In this             concerns regarding large-scale transformers’ com-
+    paper, we extend PoWER-BERT (Goyal et al.,              putational and energy efficiency (see §7 for a more
+    2020) and propose Length-Adaptive Trans-
+                                                            extensive discussion.) Among these, we focus on
+    former that can be used for various infer-
+    ence scenarios after one-shot training. We              PoWER-BERT (Goyal et al., 2020) which pro-
+    train a transformer with LengthDrop, a struc-           gressively reduces sequence length by eliminat-
+    tural variant of dropout, which stochastically          ing word-vectors based on the attention values as
+    determines a sequence length at each layer.             passing layers. PoWER-BERT establishes the su-
+    We then conduct a multi-objective evolution-            periority of accuracy-time trade-off over earlier
+    ary search to find a length configuration that          approaches (Sanh et al., 2019; Sun et al., 2019;
+    maximizes the accuracy and minimizes the
+                                                            Michel et al., 2019). However, it requires us to
+    efficiency metric under any given computa-
+    tional budget. Additionally, we significantly
+                                                            train a separate model for each efficiency constraint.
+    extend the applicability of PoWER-BERT be-              In this paper, we thus develop a framework based
+    yond sequence-level classification into token-          on PoWER-BERT such that we can train a single
+    level classification with Drop-and-Restore pro-         model that can be adapted in the inference time to
+    cess that drops word-vectors temporarily in in-         meet any given efficiency target.
+    termediate layers and restores at the last layer           In order to train a transformer to cope with a di-
+    if necessary. We empirically verify the util-           verse set of computational budgets in the inference
+    ity of the proposed approach by demonstrating
+                                                            time, we propose to train once while reducing the
+    the superior accuracy-efficiency trade-off un-
+    der various setups, including span-based ques-          sequence length with a random proportion at each
+    tion answering and text classification. Code is         layer. We refer to this procedure as LengthDrop,
+    available at https://github.com/clovaai/length-         which was motivated by the nested dropout (Rip-
+    adaptive-transformer.                                   pel et al., 2014). We can extract sub-models of
+                                                            shared weights with any length configuration with-
+1   Introduction
+                                                            out requiring extra post-processing nor additional
+Pre-trained language models (Peters et al., 2018;           fine-tuning.
+Devlin et al., 2018; Radford et al., 2019; Yang                It is not trivial to find an optimal length con-
+et al., 2019; He et al., 2020) have achieved notable        figuration given the inference-time computational
+improvements in various natural language process-           budget, although it is extremely important in order
+ing (NLP) tasks. Most of them rely on transform-            to deploy these large-scale transformers in practice.
+ers (Vaswani et al., 2017), and the number of model         Once a transformer is trained with the proposed
+parameters ranges from hundreds of millions to bil-         LengthDrop, we search for the length configuration
+lions (Shoeybi et al., 2019; Raffel et al., 2019; Ka-       that maximizes the accuracy given a computational
+plan et al., 2020; Brown et al., 2020). Despite this        budget. Because this search is combinatorial and
+high accuracy, excessive computational overhead             has multiple objectives (accuracy and efficiency),
+
+                                                       6501
+                Proceedings of the 59th Annual Meeting of the Association for Computational Linguistics
+             and the 11th International Joint Conference on Natural Language Processing, pages 6501–6511
+                           August 1–6, 2021. ©2021 Association for Computational Linguistics
+in this work, we propose to use an evolutionary          cient transformer for sequence-level classification.
+search algorithm, which further allows us to ob-
+tain a full Pareto frontier of accuracy-efficiency       2.1    Transformers and BERT
+trade-off of each model.                                 A transformer is a particular neural network that
+   PoWER-BERT, which forms the foundation of             has been designed to work with a variable-length
+the proposed two-stage procedure, is only appli-         sequence input and is implemented as a stack of
+cable to sequence-level classification, because it       self-attention and fully connected layers (Vaswani
+eliminates some of the word vectors at each layer        et al., 2017). It has recently become one of the
+by design. In other words, it cannot be used for         most widely used models for natural language pro-
+token-level tasks such as span-based question an-        cessing. Here, we give a brief overview of the
+swering (Rajpurkar et al., 2016) because these tasks     transformer which is the basic building block of
+require hidden representations of the entire input se-   the proposed approach.
+quence at the final layer. We thus propose to extend        Each token xt in a sequence of tokens x =
+PoWER-BERT with a novel Drop-and-Restore pro-            (x1 , . . . , xN ), representing input text, is first turned
+cess (§3.3), which eliminates this inherent limita-      into a continuous vector h0t ∈ RH which is the
+tion. Word vectors are dropped and set aside, rather     sum of the token and position embedding vec-
+than eliminated, in intermediate layers to maintain      tors. This sequence is fed into the first transformer
+the saving of computational cost, as was with the        layer which returns another sequence of the same
+original PoWER-BERT. These set-aside vectors are         length h1 ∈ RN ×H . We repeat this procedure L
+then restored at the final hidden layer and provided     times, for a transformer with L layers, to obtain
+as an input to a subsequent task-specific layer, un-     hL = (hL                   L
+                                                                       1 , . . . , hN ). We refer to each vector in the
+like the original PoWER-BERT.                            hidden sequence at each layer as a word vector to
+   The main contributions of this work are two-          emphasize that there exists a correspondence be-
+fold. First, we introduce LengthDrop, a structured       tween each such vector and one of the input words.
+variant of dropout for training a single Length-            Although the transformer was first introduced
+Adaptive Transformer model that allows us to au-         for the problem of machine translation, Devlin
+tomatically derive multiple sub-models with dif-         et al. (2018) demonstrated that the transformer can
+ferent length configurations in the inference time       be trained and used as a sentence encoder. More
+using evolutionary search, without requiring any         specifically, Devlin et al. (2018) showed that the
+re-training. Second, we design Drop-and-Restore          transformer-based masked language model, called
+process that makes PoWER-BERT applicable be-             BERT, learns a universally useful parameter set that
+yond classification, which enables PoWER-BERT            can be fine-tuned for any downstream task, includ-
+to be applicable to a wider range of NLP tasks such      ing sequence-level and token-level classification.
+as span-based question answering. We empirically            In the case of sequence-level classification, a
+verify Length-Adaptive Transformer works quite           softmax classifier is attached to the word vector hL         1
+well using the variants of BERT on a diverse set of      associated with the special token [CLS], and the
+NLP tasks, including SQuAD 1.1 (Rajpurkar et al.,        entire network, including the softmax classifier and
+2016) and two sequence-level classification tasks        BERT, is fine-tuned. For token-level classification,
+in GLUE benchmark (Wang et al., 2018). Our ex-           we use each hL        t as the final hidden representation of
+periments reveal that the proposed approach grants       the associated t-th word in the input sequence. This
+us fine-grained control of computational efficiency      strategy of pre-training followed by fine-tuning, of-
+and a superior accuracy-efficiency trade-off in the      ten referred to as transfer learning, is a dominant
+inference time compared to existing approaches.          approach to classification in natural language pro-
+                                                         cessing.
+2   Background                                           2.2    PoWER-BERT
+In this section, we review some of the building          PoWER-BERT keeps only the topmost lj word
+blocks of our main approach. In particular, we re-       vectors at each layer j by eliminating redundant
+view transformers, which are a standard backbone         ones based on the significance score which is the
+used in natural language processing these days, and      total amount of attention imposed by a word on the
+PoWER-BERT, which was recently proposed as an            other words (Goyal et al., 2020). lj is the hyper-
+effective way to train a large-scale, but highly effi-   parameter that determines how many vectors to
+
+                                                    6502
+keep at layer j. PoWER-BERT has the same model            Adaptive Transformer with LengthDrop which ran-
+parameters as BERT, but the extraction layers are         domly samples the number of hidden vectors to
+interspersed after the self-attention layer in every      be dropped at each layer with the goal of making
+transformer block (Vaswani et al., 2017).                 the final model robust to such drop in the infer-
+   PoWER-BERT reduces inference time success-             ence time. Once the model is trained, we search
+fully, achieving better accuracy-time trade-off than      for the optimal trade-off between accuracy and ef-
+DistilBERT (Sanh et al., 2019), BERT-PKD (Sun             ficiency using multi-objective evolutionary search,
+et al., 2019), and Head-Prune (Michel et al., 2019).      which allows us to use the model for any given
+Despite the original intention of maximizing the          computational budget without fine-tuning nor re-
+inference efficiency with the minimal loss in accu-       training. At the end of this section, we describe
+racy, it is possible to set up PoWER-BERT to be           Drop-and-Restore process as a way to greatly in-
+both more efficient and more accurate compared to         crease the applicability of PoWER-BERT which
+the original BERT, which was observed but largely         forms a building block of the proposed framework.
+overlooked by Goyal et al. (2020).                           In short, we train a Length-Adaptive Trans-
+   Training a PoWER-BERT model consists of                former once with LengthDrop and Drop-and-
+three steps: (1) fine-tuning, (2) length configura-       Restore, and use it with an automatically deter-
+tion search, and (3) re-training. The fine-tuning         mined length configuration for inference with any
+step is just like the standard fine-tuning step of        target computational budget, on both sequence-
+BERT given a target task. A length configuration          level and token-level tasks.
+is a sequence of retention parameters (l1 , · · · lL ),
+each of which corresponds to the number of word           3.1   LengthDrop
+vectors that are kept at each layer. These retention      Earlier approaches to efficient inference with trans-
+parameters are learned along with all the other pa-       formers have focused on a scenario where the target
+rameters to minimize the original task loss together      computational budget for inference is known in ad-
+with an extra term that approximately measures the        vance (Sanh et al., 2019; Goyal et al., 2020). This
+number of retained word vectors across layers. In         greatly increases the cost of deploying transform-
+the re-training step, PoWER-BERT is fine-tuned            ers, as it requires us to train a separate transformer
+with the length configuration fixed to its learned        for each scenario. Instead, we propose to train one
+one.                                                      model that could be used for a diverse set of target
+   For each computational budget, we must train           computational budgets without re-training.
+a separate model going through all three steps de-           Before each SGD update, LengthDrop ran-
+scribed above. Moreover, the length configuration         domly generates a length configuration by se-
+search step above is only approximate, as it relies       quentially sampling a sequence length li+1 at the
+on the relaxation of retention parameters which are       (i + 1)-th layer based on the previous layer’s se-
+inherently discrete. This leads to the lack of guar-      quence length li , following the uniform distribu-
+anteed correlation between the success of this stage      tion U((1 − p)li , li ), where l0 is set to the length
+and true run-time. Even worse, it is a delicate act       of the input sequence, and p is the LengthDrop
+to tune the length configuration given a target com-      probability. This sequential sampling results in a
+putational budget because the trade-off is implicitly     length configuration (l1 , · · · , lL ). Length-Adaptive
+made via a regularization coefficient. Furthermore,       Transformer can be thought of as consisting of a
+PoWER-BERT has an inherent limitation in that             full model and many sub-models corresponding to
+it only applies to sequence-level classification be-      different length configurations, similarly to a neu-
+cause it eliminates word vectors in intermediate          ral network trained with different dropout masks
+layers.                                                   (Srivastava et al., 2014).
+
+3   Length-Adaptive Transformer                           LayerDrop From the perspective of each word
+                                                          vector, the proposed LengthDrop could be thought
+In this section, we explain our proposed frame-           of as skipping the layers between when it was set
+work which results in a transformer that reduces          aside and the final layer where it was restored. The
+the length of a sequence at each layer with an ar-        word vector however does not have any informa-
+bitrary rate. We call such a resulting transformer        tion based on which it can determine whether it
+a Length-Adaptive Transformer. We train Length-           would be dropped at any particular layer. In our
+
+                                                     6503
+preliminary experiments, we found that this greatly      est and full models. At each iteration, we evolve
+hinders optimization. We address this issue by us-       the population to consist only of configurations
+ing LayerDrop (Fan et al., 2019) which skips each        lie on a newly updated efficiency-accuracy Pareto
+layer of a transformer uniformly at random. The          frontier by mutation and crossover. Mutation al-
+LayerDrop encourages each word vector to be ag-          ters an original length configuration (l1 , · · · , lL )
+nostic to skipping any number of layers between          to (l10 , · · · , lL
+                                                                            0 ) by sampling l0 from the uniform
+                                                                                               i
+                                                         distribution U(li−1    0 ,l
+when it is dropped and when it is restored, just                                     i+1 ) with the probability pm
+like dropout (Srivastava et al., 2014) prevents hid-     or keeping the original length li0 = li , sweeping
+den neurons from co-adapting with each other by          the layers from i = 1 to i = L. A crossover
+randomly dropping them.                                  takes two length configurations and averages the
+                                                         lengths at each layer. Both of these operations are
+Sandwich Rule and Inplace Distillation We                performed while ensuring the monotonicity of the
+observed that standard supervised training with          lengths over the layers. We repeat this iteration
+LengthDrop does not work well in the preliminary         G times while maintaining nm mutated configura-
+experiments. We instead borrow a pair of train-          tions and nc crossover’d configurations. Repeating
+ing techniques developed by Yu and Huang (2019)          this procedure pushes the Pareto frontier further
+which are sandwich rule and inplace distillation,        to identify the best trade-off between two objec-
+for better optimization as well as final generaliza-     tives, efficiency and accuracy, without requiring
+tion. At each update, we update the full model           any continuous relaxation of length configurations
+without LengthDrop as usual to minimize the super-       nor using a proxy objective function.
+vised loss function. We simultaneously update ns
+randomly-sampled sub-models (which are called            3.3    Drop-and-Restore Process
+sandwiches) and the smallest-possible sub-model,
+                                                         The applicability of the PoWER-BERT, based on
+which corresponds to keeping only (1 − p)li word
+                                                         which our main contribution above was made, is
+vectors at each layer i, using knowledge distilla-
+                                                         limited to sequence-level classification because it
+tion (Hinton et al., 2015) from the full model. Here,
+                                                         eliminates word vectors at each layer. In addition
+sub-models mean models with length reduction.
+                                                         to our main contribution above, we thus propose to
+They are trained to their prediction close to the full
+                                                         extend the PoWER-BERT so that it is applicable
+model’s prediction (inplace distillation).
+                                                         to token-level classification, such as span-based
+3.2   Evolutionary Search of Length                      question-answering. Our proposal, to which we re-
+      Configurations                                     fer as Drop-and-Restore, does not eliminate word
+                                                         vectors at each layer according to the length con-
+After training a Length-Adaptive Transformer with
+                                                         figuration but instead sets them aside until the final
+LengthDrop, we search for appropriate length con-
+                                                         hidden layer. At the final hidden layer, these word
+figurations for possible target computational bud-
+                                                         vectors are brought back to form the full hidden
+gets that will be given at inference time. The length
+                                                         sequence, as illustrated graphically in Figure 1.
+configuration determines the model performance
+in terms of both accuracy and efficiency. In order       4     Experiment Setup
+to search for the optimal length configuration, we
+propose to use evolutionary search, similarly to         Datasets We test the proposed approach on both
+Cai et al. (2019) and Wang et al. (2020a). This          sequence-level and token-level tasks, the latter of
+procedure is efficient, as it only requires a single     which could not have been done with the original
+pass through the relatively small validation set for     PoWER-BERT unless for the proposed Drop-and-
+each length configuration, unlike re-training for a      Restore. We use MNLI-m and SST-2 from GLUE
+new computational budget which requires multiple         benchmark (Wang et al., 2018), as was done to test
+passes through a significantly larger training set for   PoWER-BERT earlier, for sequence-level classi-
+each budget.                                             fication. We choose them because consistent ac-
+   We initialize the population with constant-ratio      curacy scores from standard training on them due
+configurations. Each configuration is created by         to their sufficiently large training set imply that
+li+1 = (1 − r)li for each layer i with r so that the     they are reliable to verify our approach. We use
+amount of computation within the initial population      SQuAD 1.1 (Rajpurkar et al., 2016) for token-level
+is uniformly distributed between those of the small-     classification.
+
+                                                    6504
+                         (a) PoWER                                            (b) Drop-and-Restore
+
+Figure 1: Illustration of (a) word-vector elimination process in PoWER-BERT (Goyal et al., 2020) and (b) Drop-
+and-Restore process in Length-Adaptive Transformer. Yellow box and blue boxes imply the output of embedding
+layer and transformer layers, respectively. Green boxes mean vectors dropped in lower layers and restored at the
+last layer. Red box is the task-specific layer. Though word-vectors in the middle could be eliminated (or dropped),
+remaining vectors are left-aligned for the better illustration. In this case, the number of transformer layers is four.
+
+
+Evaluation metrics We use the number of float-               epochs by Devlin et al. (2018), as learning pro-
+ing operations (FLOPs) as a main metric to mea-              gresses slower due to a higher level of stochasticity
+sure the inference efficiency given any length con-          introduced by LengthDrop and LayerDrop. We use
+figuration, as it is agnostic to the choice of the           the batch size of 32, the learning rate of 5e − 5 for
+underlying hardware, unlike other alternatives such          SQuAD 1.1 and 2e − 5 for MNLI-m and SST, and
+as hardware-aware latency (Wang et al., 2020a)               the maximum sequence length of 384 for SQuAD
+or energy consumption (Henderson et al., 2020).              1.1 and 128 for MNLI-m and SST.
+We later demonstrate that FLOPs and wall-clock
+time on GPU and CPU correlate well with the pro-             Search We run up to G = 30 iterations of evo-
+posed approach, which is not necessarily the case            lutionary search, using nm = 30 mutated config-
+for other approaches, such as unstructured weight            urations with mutation probability pm = 0.5 and
+pruning (Han et al., 2015; See et al., 2016).                nc = 30 crossover’d configurations, to find the
+                                                             Pareto frontier of accuracy and efficiency.
+Pre-trained transformers Since BERT was in-
+troduced by Devlin et al. (2018), it has become              5    Results and Analysis
+a standard practice to start from a pre-trained
+                                                             Efficiency-accuracy trade-off We use SQuAD
+(masked) language model and fine-tune it for each
+                                                             1.1 to examine the effect of the proposed approach
+downstream task. We follow the same strategy
+                                                             on the efficiency-accuracy trade-off. When the
+in this paper and test two pre-trained transformer-
+                                                             underlying classifier was not trained with Length-
+based language models; BERTBase (Devlin et al.,
+                                                             Drop, as proposed in this paper, the accuracy drops
+2018) and DistilBERT (Sanh et al., 2019), which
+                                                             even more dramatically as more word vectors are
+allows us to demonstrate that the usefulness and
+                                                             dropped at each layer. The difference between stan-
+applicability of our approach are not tied to any
+                                                             dard transformer and Length-Adaptive Transformer
+specific architectural choice, such as the number of
+                                                             is stark in Figure 2. This verifies the importance
+layers and the maximum input sequence length. Al-
+                                                             of training a transformer in a way that makes it
+though we focus on BERT-based masked language
+                                                             malleable for inference-time re-configuration.
+models here, the proposed approach is readily ap-
+                                                                When the model was trained with the proposed
+plicable to any transformer-based models.
+                                                             LengthDrop, we notice the efficacy of the proposed
+Learning We train a Length-Adaptive Trans-                   approach of using evolutionary search to find the
+former with LengthDrop probability and Layer-                optimal trade-off between inference efficiency and
+Drop probability both set to 0.2. We use ns = 2              accuracy. The trade-off curve from the proposed
+randomly sampled intermediate sub-models in ad-              search strategy has a larger area-under-curve (AUC)
+dition to the full model and smallest model for              than when constant-rate length reduction was used
+applying the sandwich learning rule.                         to meet a target computational budget. It demon-
+   We start fine-tuning the pre-trained transformer          strates the importance of using both LengthDrop
+without Drop-and-Restore first, just as Goyal et al.         and evolutionary search.
+(2020) did with PoWER-BERT. We then continue                    We make a minor observation that the proposed
+fine-tuning it for another five epochs with Drop-            approach ends up with a significantly higher accu-
+and-Restore. This is unlike the recommended three            racy than DistillBERT when enough computational
+
+                                                        6505
+                                                                                                                            GPU (1)          GPU (4)
+         BERT-Base      Length-Adaptive BERT-Base     Length-Adaptive BERT-Base ES                                         GPU (16)          GPU (64)
+          DistilBERT     Length-Adaptive DistilBERT   Length-Adaptive DistilBERT ES                               20
+
+
+
+
+                                                                                         Latency (ms/instance)
+           90                                                                                                     15
+
+                                                                                                                  10
+
+           88                                                                                                      5
+
+                                                                                                                   0
+                                                                                                                           10    15     20   25    30   35
+           86
+                                                                                                                                       FLOPs (G)
+
+                                                                                                                                 (a) GPU
+    F1
+
+
+
+
+           84
+                                                                                                                            CPU (1)          CPU (4)
+                                                                                                                           CPU (16)          CPU (64)
+
+           82                                                                                               1250
+
+
+
+
+                                                                                          Latency (ms/instance)
+                                                                                                            1000
+
+                                                                                                                  750
+           80
+                                                                                                                  500
+
+                                                                                                                  250
+                   9   10                             20                30                                             0
+                                          log FLOPs (G)                                                                     10    15    20   25    30   35
+                                                                                                                                       FLOPs (G)
+
+Figure 2: Pareto curves of F1 score and FLOPs on SQuAD 1.1 (Rajpurkar et al.,                                                    (b) CPU
+2016). We apply the proposed method to BERTBase (solid lines) and DistilBERT
+(dotted lines). For each model, we draw three curves using (1) standard fine-tuned      Figure 3:    Correlation
+transformer with constant-rate length reduction, (2) Length-Adaptive Transformer        between FLOPs and
+with constant-rate length reduction, and (3) Length-Adaptive Transformer with           latency with different
+length configurations obtained from the evolutionary search.                            length configurations.
+
+
+budget is allowed for inference (log FLOPs > 10).             ficiency and accuracy in order to see whether it
+This makes our approach desirable in a wide array             is possible for the proposed algorithm to find a
+of scenarios, as it does not require any additional           length configuration that both maximizes inference
+pre-training stage, as does DistilBERT. With a se-            efficiency and improves accuracy. We present the
+vere constraint on the computational budget, the              results in the rows marked with Length-Adaptive?
+proposed approach could be used on DistilBERT to              from Table 1. For all cases, Length-Adaptive Trans-
+significantly improve the efficiency without com-             former achieves higher accuracy than a standard
+promising the accuracy.                                       transformer does while reducing FLOPs signifi-
+                                                              cantly. Although it is not apparent from the table,
+Maximizing inference efficiency We consider                   tor MNLI-m and SST-2, the accuracy of the small-
+all three tasks, SQuAD 1.1, MNLI-m, and SST-2,                est sub-model is already greater than or equal to
+and investigate how much efficiency can be gained             that of a standard transformer.
+by the proposed approach with minimal sacrifice
+of accuracy. First, we look at how much efficiency            FLOPs vs. Latency As has been discussed in
+could be gained without losing accuracy. That is,             recent literature (see, e.g., Li et al. (2020); Chin
+we use the length configuration that maximizes                et al. (2020)), the number of FLOPs is not a perfect
+the inference efficiency (i.e., minimize the FLOPs)           indicator of the real latency measured in wall-clock
+while ensuring that the accuracy is above or the              time, as the latter is affected by the combination of
+same as the accuracy of the standard approach with-           hardware choice and network architecture. To un-
+out any drop of word vectors. The results are pre-            derstand the real-world impact of the proposed ap-
+sented in the rows marked with Length-Adaptive†               proach, we study the relationship between FLOPs,
+from Table 1. For example, in the case of BERTBase ,          obtained by the proposed procedure, and wall-clock
+the proposed approach reduces FLOPs by more                   time measured on both CPU and GPU by measur-
+than half across all three tasks.                             ing them while varying length configurations. As
+   From Figure 2, we have observed that the pro-              shown in Figure 3, FLOPs and latency exhibit near-
+posed Length-Adaptive Transformer generalizes                 linear correlation on GPU, when the minibatch size
+better than the standard, base model in some cases.           is ≥ 16, and regardless of the minibatch size, on
+Thus, we try to maximize both the inference ef-               CPU. In other words, the reduction in FLOPs with
+
+                                                           6506
+                                                                                             89.2
+                  Model                SQuAD 1.1       MNLI-m               SST-2
+     Pretrained                                                                              89.1
+                          Method      F1     FLOPs   Acc    FLOPs     Acc     FLOPs
+    Transformer
+                                                                                             89.0
+                       Standard       88.5   1.00x   84.4     1.00x   92.8     1.00x
+
+
+
+
+                                                                                       AUC
+    BERTBase       Length-Adaptive?   89.6   0.89x   85.0     0.58x   93.1     0.36x         88.9
+
+                   Length-Adaptive†   88.7   0.45x   84.4     0.35x   92.8     0.35x         88.8
+
+                       Standard       85.8   1.00x   80.9     1.00x   90.6     1.00x
+                                                                                             88.7
+    DistilBERT     Length-Adaptive?   86.3   0.81x   81.5     0.56x   92.0     0.55x
+                                                                                                    0   10       20   30
+                   Length-Adaptive†   85.9   0.59x   81.3     0.54x   91.7     0.54x                     Iteration
+
+
+Table 1: Comparison results of standard Transformer and Length-Adaptive Trans-         Figure 4:       Example
+former. Among length configurations on the Pareto frontier of Length-Adaptive          of area under Pareto
+Transformer, we pick two representative points: Length-Adaptive? and Length-           curve as the evolutionary
+Adaptive† as the most efficient one while having the highest accuracy and the ac-      search of length configu-
+curacy higher than (or equal to) standard Transformer, respectively.                   rations proceeds.
+
+
+the proposed approach directly implies the reduc-           execution time would be close to 2.9x in the same
+tion in wall-clock time.                                    setting of PoWER-BERT where the time measure-
+                                                            ment is done with a batch size of 128 on GPU. It
+Convergence of search Although the proposed
+                                                            indicates that our model offers a better trade-off
+approach is efficient in that it requires only one
+                                                            than PoWER-BERT, even with a single model.
+round of training, it needs a separate search stage
+for each target budget. It is important for evolution-      Comparison with DynaBERT According to
+ary search to converge quickly in the number of             Hou et al. (2020), DyanBERT obtains a gain of
+forward sweeps of a validation set. As exemplified          +1.0, +0.1, +0.4 for the best accuracy in SQuAD
+in Figure 4, evolutionary search converges after            1.1, MNLI-m, and SST-2, respectively, while
+about fifteen iterations.                                   Length-Adaptive Transformer achieves a gain of
+                                                            +1.1, +0.6, +0.3. These results imply that Length-
+6     Comparison with Other Works                           Adaptive Transformer can give a comparable (or
+Our framework allows a novel method for anytime             better) performance with DynaBERT.
+prediction with adaptive sequence length given any
+transformers. Thus, our goal is not state-of-the-art        7    Related Work
+classification accuracy, although our experimen-            The main purpose of the proposed algorithm is to
+tal results (§5) demonstrate that our method still          improve the inference efficiency of a large-scale
+attains a good accuracy level.                              transformer. This goal has been pursued from
+   We emphasize that other adaptive computation             various directions, and here we provide a brief
+works (§7) are orthogonal with ours, meaning                overview of these earlier and some concurrent at-
+that various adaptive dimensions (sequence length,          tempts in the context of the proposed approach.
+depth, attention head, hidden dimension, etc.) can
+be jointly used. In other words, even if other adap-        Weight pruning Weight pruning (Han et al.,
+tive methods show better curves than ours, our              2015) focuses on reducing the number of parame-
+method and theirs can boost each other when com-            ters that directly reflects the memory footprint of
+bined. We provide some comparison results with              a model and indirectly correlates with inference
+PoWER-BERT (not anytime prediction method)                  speed. However, their actual speed-up in runtime
+and DynaBERT (Hou et al., 2020) (concurrent                 is usually not significant, especially while execut-
+adaptive computation method) as follows.                    ing a model with parallel computation using GPU
+                                                            devices (Tang et al., 2018; Li et al., 2020).
+Comparison with PoWER-BERT According
+to Goyal et al. (2020), PoWER-BERT achieves                 Adaptive architecture There are three major
+2.6x speedup for MNLI-m and 2.4x speedup for                axes along which computation can be reduced in
+SST-2 by losing 1% of their accuracy. Length-               a neural network; (1) input size/length, (2) net-
+Adaptive Transformer obtains a 2.9x speedup in              work depth, and (3) network width. The proposed
+terms of FLOPs without losing accuracy on MNLI-             approach, based on PoWER-BERT, adaptively re-
+m and SST-2. Considering Figure 3, our speedup in           duces the input length as the input sequence is pro-
+
+                                                       6507
+cessed by the transformer layers. In our knowledge,       Search There have been a series of attempts at
+Goyal et al. (2020) is the first work in this direction   finding the optimal network configuration by solv-
+for transformers. Funnel-Transformer (Dai et al.,         ing a combinatorial optimization problem. In com-
+2020) and multi-scale transformer language mod-           puter vision, Once-for-All (Cai et al., 2019) use an
+els (Subramanian et al., 2020) also successfully          evolutionary search (Real et al., 2019) to find a bet-
+reduce sequence length in the middle and rescale          ter configuration in dimensions of depth, width, ker-
+to full length for the final computation. However,        nel size, and resolution given computational budget.
+their inference complexity is fixed differently with      Similarly but differently, our evolutionary search
+PoWER-BERT because they are not designed to               is mutli-objective to find length configurations on
+control efficiency. More recently, TR-BERT (Ye            the Pareto accuracy-efficiency frontier to cope with
+et al., 2021) introduces a policy network trained         any possible computational budgets. Moreover, we
+via reinforcement learning to decide which vectors        only change the sequence length of hidden vectors
+to skip.                                                  instead of architectural model size like dimensions.
+   LayerDrop (Fan et al., 2019) drops random lay-
+                                                          Sequence Length Shortformer (Press et al.,
+ers during the training to be robust to pruning in-
+                                                          2020) initially trained on shorter subsequences and
+spired by Huang et al. (2016). Word-level adaptive
+                                                          then moved to longer ones achieves improved per-
+depth in Elbayad et al. (2019) and Liu et al. (2020b)
+                                                          plexity than a standard transformer with normal
+might seemingly resemble with length reduction,
+                                                          training while reducing overall training time. Novel
+but word vectors that reached the maximal layer
+                                                          architectures with the efficient attention mechanism
+are used for self-attention computation without up-
+                                                          (Kitaev et al., 2020; Beltagy et al., 2020; Zaheer
+dating themselves. Escaping a network early (Teer-
+                                                          et al., 2020; Ainslie et al., 2020; Choromanski et al.,
+apittayanon et al., 2016; Huang et al., 2017) based
+                                                          2020; Peng et al., 2021) are suggested to reduce the
+on the confidence of the prediction (Xin et al., 2020,
+                                                          transformer’s quadratic computational complexity
+2021; Schwartz et al., 2020; Liu et al., 2020a; Li
+                                                          in the input sequence length. Tay et al. (2020b)
+et al., 2021) also offers a control over accuracy-
+                                                          and Tay et al. (2020a) provide a survey of these
+efficiency trade-off by changing a threshold, but it
+                                                          efficient transformers and their benchmark compar-
+is difficult to tune a threshold for a desired computa-
+                                                          ison, respectively.
+tional budget because of the example-wise adaptive
+computation.                                              8   Conclusion and Future Work
+   Slimmable neural networks (Yu et al., 2018; Lee
+and Shin, 2018) reduce the hidden dimension for           In this work, we propose a new framework for train-
+the any-time prediction. DynaBERT (Hou et al.,            ing a transformer once and using it for efficient
+2020) can run at adaptive width (the number of at-        inference under any computational budget. With
+tention heads and intermediate hidden dimension)          the help of training with LengthDrop and Drop-
+and depth. Hardware-aware Transformers (Wang              and-Restore process followed by the evolutionary
+et al., 2020a) construct a design space with arbi-        search, our proposed Length-Adaptive Transformer
+trary encoder-decoder attention and heterogeneous         allows any given transformer models to be used
+layers in terms of different numbers of layers, at-       with any inference-time computational budget for
+tention heads, hidden dimension, and embedding            both sequence-level and token-level classification
+dimension. SpAtten (Wang et al., 2020b) performs          tasks. Our experiments, on SQuAD 1.1, MNLI-
+cascade token and head pruning for an efficient           m and SST-2, have revealed that the proposed al-
+algorithm-architecture co-design.                         gorithmic framework significantly pushes a better
+                                                          Pareto frontier on the trade-off between inference
+Structured dropout A major innovation we in-              efficiency and accuracy. Furthermore, we have
+troduce over the existing PoWER-BERT is the use           observed that the proposed Length-Adaptive Trans-
+of stochastic, structured regularization to make a        former could achieve up to 3x speed-up over the
+transformer robust to the choice of length config-        standard transformer without sacrificing accuracy,
+uration in the inference time. Rippel et al. (2014)       both in terms of FLOPs and wallclock time.
+proposes a nested dropout to learn ordered repre-            Although our approach finds an optimal length
+sentations. Similar to LengthDrop, it samples an          configuration of a trained classifier per computa-
+index from a prior distribution and drops all units       tional budget, it leaves a open question whether
+with a larger index than the sampled one.                 the proposed approach could be further extended
+
+                                                     6508
+to support per-instance length configuration by for           of the IEEE/CVF Conference on Computer Vision
+instance training a small, auxiliary neural network           and Pattern Recognition, pages 1518–1528.
+for each computational budget. Yet another aspect
+                                                           Krzysztof Choromanski, Valerii Likhosherstov, David
+we have not investigated in this paper is the ap-            Dohan, Xingyou Song, Andreea Gane, Tamas Sar-
+plicability of the proposed approach to sequence             los, Peter Hawkins, Jared Davis, Afroz Mohiuddin,
+generation, such as machine translation. We leave            Lukasz Kaiser, et al. 2020. Rethinking attention
+both of these research directions for the future.            with performers. arXiv preprint arXiv:2009.14794.
+   Our approach is effective, as we have shown in          Zihang Dai, Guokun Lai, Yiming Yang, and Quoc V Le.
+this paper, and also quite simple to implement on            2020. Funnel-transformer: Filtering out sequential
+top of existing language models. We release our im-          redundancy for efficient language processing. arXiv
+plementation at https://github.com/clovaai/length-           preprint arXiv:2006.03236.
+adaptive-transformer, which is based on Hugging-           Jacob Devlin, Ming-Wei Chang, Kenton Lee, and
+Face’s Transformers library (Wolf et al., 2019), and          Kristina Toutanova. 2018. Bert: Pre-training of deep
+plan to adapt it for a broader set of transformer-            bidirectional transformers for language understand-
+based models and downstream tasks, including                  ing. arXiv preprint arXiv:1810.04805.
+other modalities (Dosovitskiy et al., 2020; Touvron        Alexey Dosovitskiy, Lucas Beyer, Alexander
+et al., 2020; Gulati et al., 2020).                          Kolesnikov, Dirk Weissenborn, Xiaohua Zhai,
+                                                             Thomas Unterthiner, Mostafa Dehghani, Matthias
+Acknowledgments                                              Minderer, Georg Heigold, Sylvain Gelly, et al. 2020.
+                                                             An image is worth 16x16 words: Transformers
+The authors appreciate Clova AI members and the              for image recognition at scale. arXiv preprint
+anonymous reviewers for their constructive feed-             arXiv:2010.11929.
+back. Specifically, Dongyoon Han and Byeongho
+                                                           Maha Elbayad, Jiatao Gu, Edouard Grave, and Michael
+Heo introduced relevant works and gave insights             Auli. 2019. Depth-adaptive transformer. arXiv
+from the view of the computer vision community.             preprint arXiv:1910.10073.
+We use Naver Smart Machine Learning (Sung et al.,
+2017; Kim et al., 2018) platform for the experi-           Angela Fan, Edouard Grave, and Armand Joulin. 2019.
+                                                             Reducing transformer depth on demand with struc-
+ments.
+                                                             tured dropout. arXiv preprint arXiv:1909.11556.
+
+                                                           Saurabh Goyal, Anamitra Roy Choudhury, Saurabh
+References                                                   Raje, Venkatesan Chakaravarthy, Yogish Sabharwal,
+Joshua Ainslie, Santiago Ontanón, Chris Alberti, Va-        and Ashish Verma. 2020. Power-bert: Accelerat-
+   clav Cvicek, Zachary Fisher, Philip Pham, Anirudh         ing bert inference via progressive word-vector elim-
+   Ravula, Sumit Sanghai, Qifan Wang, and Li Yang.           ination. In International Conference on Machine
+   2020. Etc: Encoding long and structured inputs in         Learning, pages 3690–3699. PMLR.
+   transformers. arXiv preprint arXiv:2004.08483.
+                                                           Anmol Gulati, James Qin, Chung-Cheng Chiu, Niki
+Iz Beltagy, Matthew E Peters, and Arman Cohan.               Parmar, Yu Zhang, Jiahui Yu, Wei Han, Shibo
+   2020. Longformer: The long-document transformer.          Wang, Zhengdong Zhang, Yonghui Wu, et al.
+   arXiv preprint arXiv:2004.05150.                          2020. Conformer: Convolution-augmented trans-
+                                                             former for speech recognition. arXiv preprint
+Tom B Brown, Benjamin Mann, Nick Ryder, Melanie              arXiv:2005.08100.
+  Subbiah, Jared Kaplan, Prafulla Dhariwal, Arvind
+  Neelakantan, Pranav Shyam, Girish Sastry, Amanda         Song Han, Huizi Mao, and William J Dally. 2015.
+  Askell, et al. 2020. Language models are few-shot          Deep compression: Compressing deep neural net-
+  learners. arXiv preprint arXiv:2005.14165.                 works with pruning, trained quantization and huff-
+                                                             man coding. arXiv preprint arXiv:1510.00149.
+Han Cai, Chuang Gan, and Song Han. 2019. Once for
+  all: Train one network and specialize it for efficient
+                                                           Pengcheng He, Xiaodong Liu, Jianfeng Gao, and
+  deployment. arXiv preprint arXiv:1908.09791.
+                                                             Weizhu Chen. 2020. Deberta: Decoding-enhanced
+Qingqing Cao, Aruna Balasubramanian, and Niranjan            bert with disentangled attention. arXiv preprint
+  Balasubramanian. 2020. Towards accurate and re-            arXiv:2006.03654.
+  liable energy measurement of nlp models. arXiv
+  preprint arXiv:2010.05248.                               Peter Henderson, Jieru Hu, Joshua Romoff, Emma
+                                                             Brunskill, Dan Jurafsky, and Joelle Pineau. 2020.
+Ting-Wu Chin, Ruizhou Ding, Cha Zhang, and Diana             Towards the systematic reporting of the energy
+  Marculescu. 2020. Towards efficient model com-             and carbon footprints of machine learning. arXiv
+  pression via learned global ranking. In Proceedings        preprint arXiv:2002.05651.
+
+                                                       6509
+Geoffrey Hinton, Oriol Vinyals, and Jeff Dean. 2015.        Hao Peng, Nikolaos Pappas, Dani Yogatama, Roy
+  Distilling the knowledge in a neural network. arXiv         Schwartz, Noah A Smith, and Lingpeng Kong.
+  preprint arXiv:1503.02531.                                  2021. Random feature attention. arXiv preprint
+                                                              arXiv:2103.02143.
+Lu Hou, Lifeng Shang, Xin Jiang, and Qun Liu. 2020.
+  Dynabert: Dynamic bert with adaptive width and            Matthew E Peters, Mark Neumann, Mohit Iyyer, Matt
+  depth. arXiv preprint arXiv:2004.04037.                    Gardner, Christopher Clark, Kenton Lee, and Luke
+                                                             Zettlemoyer. 2018. Deep contextualized word repre-
+Gao Huang, Danlu Chen, Tianhong Li, Felix Wu,                sentations. arXiv preprint arXiv:1802.05365.
+  Laurens van der Maaten, and Kilian Q Wein-
+  berger. 2017. Multi-scale dense networks for re-          Ofir Press, Noah A Smith, and Mike Lewis. 2020.
+  source efficient image classification. arXiv preprint       Shortformer: Better language modeling using
+  arXiv:1703.09844.                                           shorter inputs. arXiv preprint arXiv:2012.15832.
+
+Gao Huang, Yu Sun, Zhuang Liu, Daniel Sedra, and            Alec Radford, Jeffrey Wu, Rewon Child, David Luan,
+  Kilian Q Weinberger. 2016. Deep networks with               Dario Amodei, and Ilya Sutskever. 2019. Language
+  stochastic depth. In European conference on com-            models are unsupervised multitask learners. OpenAI
+  puter vision, pages 646–661. Springer.                      Blog, 1(8):9.
+
+Jared Kaplan, Sam McCandlish, Tom Henighan,                 Colin Raffel, Noam Shazeer, Adam Roberts, Katherine
+   Tom B Brown, Benjamin Chess, Rewon Child, Scott            Lee, Sharan Narang, Michael Matena, Yanqi Zhou,
+   Gray, Alec Radford, Jeffrey Wu, and Dario Amodei.          Wei Li, and Peter J Liu. 2019. Exploring the limits
+   2020. Scaling laws for neural language models.             of transfer learning with a unified text-to-text trans-
+   arXiv preprint arXiv:2001.08361.                           former. arXiv preprint arXiv:1910.10683.
+
+Hanjoo Kim, Minkyu Kim, Dongjoo Seo, Jinwoong               Pranav Rajpurkar, Jian Zhang, Konstantin Lopyrev, and
+  Kim, Heungseok Park, Soeun Park, Hyunwoo Jo,                Percy Liang. 2016. Squad: 100,000+ questions
+  KyungHyun Kim, Youngil Yang, Youngkwan Kim,                 for machine comprehension of text. arXiv preprint
+  et al. 2018. Nsml: Meet the mlaas platform                  arXiv:1606.05250.
+  with a real-world case study.  arXiv preprint
+  arXiv:1810.09957.                                         Esteban Real, Alok Aggarwal, Yanping Huang, and
+                                                              Quoc V Le. 2019. Regularized evolution for image
+Nikita Kitaev, Łukasz Kaiser, and Anselm Levskaya.            classifier architecture search. In Proceedings of the
+  2020. Reformer: The efficient transformer. arXiv            aaai conference on artificial intelligence, volume 33,
+  preprint arXiv:2001.04451.                                  pages 4780–4789.
+
+Hankook Lee and Jinwoo Shin. 2018. Anytime neu-             Oren Rippel, Michael Gelbart, and Ryan Adams.
+  ral prediction via slicing networks vertically. arXiv       2014. Learning ordered representations with nested
+  preprint arXiv:1807.02609.                                  dropout. In International Conference on Machine
+                                                              Learning, pages 1746–1754.
+Xiaonan Li, Yunfan Shao, Tianxiang Sun, Hang Yan,
+  Xipeng Qiu, and Xuanjing Huang. 2021. Acceler-            Victor Sanh, Lysandre Debut, Julien Chaumond, and
+  ating bert inference for sequence labeling via early-       Thomas Wolf. 2019. Distilbert, a distilled version
+  exit. arXiv preprint arXiv:2105.13878.                      of bert: smaller, faster, cheaper and lighter. arXiv
+                                                              preprint arXiv:1910.01108.
+Zhuohan Li, Eric Wallace, Sheng Shen, Kevin Lin,
+  Kurt Keutzer, Dan Klein, and Joseph E Gonzalez.           Roy Schwartz, Jesse Dodge, Noah A Smith, and
+  2020. Train large, then compress: Rethinking model          Oren Etzioni. 2019. Green ai. arXiv preprint
+  size for efficient training and inference of transform-     arXiv:1907.10597.
+  ers. arXiv preprint arXiv:2002.11794.
+                                                            Roy Schwartz, Gabi Stanovsky, Swabha Swayamdipta,
+Weijie Liu, Peng Zhou, Zhe Zhao, Zhiruo Wang,                 Jesse Dodge, and Noah A Smith. 2020. The right
+  Haotang Deng, and Qi Ju. 2020a. Fastbert: a self-           tool for the job: Matching model and instance com-
+  distilling bert with adaptive inference time. arXiv         plexities. arXiv preprint arXiv:2004.07453.
+  preprint arXiv:2004.02178.
+                                                            Abigail See, Minh-Thang Luong, and Christopher D
+Yijin Liu, Fandong Meng, Jie Zhou, Yufeng Chen,               Manning. 2016. Compression of neural machine
+   and Jinan Xu. 2020b. Explicitly modeling adap-             translation models via pruning. arXiv preprint
+   tive depths for transformer.    arXiv preprint             arXiv:1606.09274.
+   arXiv:2004.13542.
+                                                            Mohammad Shoeybi, Mostofa Patwary, Raul Puri,
+Paul Michel, Omer Levy, and Graham Neubig. 2019.             Patrick LeGresley, Jared Casper, and Bryan Catan-
+  Are sixteen heads really better than one? In Ad-           zaro. 2019. Megatron-lm: Training multi-billion
+  vances in Neural Information Processing Systems,           parameter language models using gpu model paral-
+  pages 14014–14024.                                         lelism. arXiv preprint arXiv:1909.08053.
+
+                                                       6510
+Nitish Srivastava, Geoffrey Hinton, Alex Krizhevsky,     Hanrui Wang, Zhanghao Wu, Zhijian Liu, Han
+  Ilya Sutskever, and Ruslan Salakhutdinov. 2014.          Cai, Ligeng Zhu, Chuang Gan, and Song Han.
+  Dropout: a simple way to prevent neural networks         2020a. Hat: Hardware-aware transformers for ef-
+  from overfitting. The journal of machine learning        ficient natural language processing. arXiv preprint
+  research, 15(1):1929–1958.                               arXiv:2005.14187.
+
+Emma Strubell, Ananya Ganesh, and Andrew Mc-             Hanrui Wang, Zhekai Zhang, and Song Han. 2020b.
+  Callum. 2019.     Energy and policy considera-           Spatten: Efficient sparse attention architecture with
+  tions for deep learning in nlp. arXiv preprint           cascade token and head pruning. arXiv preprint
+  arXiv:1906.02243.                                        arXiv:2012.09852.
+
+Sandeep Subramanian, Ronan Collobert, Marc’Aurelio       Thomas Wolf, Lysandre Debut, Victor Sanh, Julien
+  Ranzato, and Y-Lan Boureau. 2020. Multi-scale            Chaumond, Clement Delangue, Anthony Moi, Pier-
+  transformer language models.     arXiv preprint          ric Cistac, Tim Rault, Rémi Louf, Morgan Fun-
+  arXiv:2005.00581.                                        towicz, et al. 2019. Transformers: State-of-the-
+                                                           art natural language processing. arXiv preprint
+Siqi Sun, Yu Cheng, Zhe Gan, and Jingjing Liu. 2019.       arXiv:1910.03771.
+   Patient knowledge distillation for bert model com-
+   pression. arXiv preprint arXiv:1908.09355.            Ji Xin, Raphael Tang, Jaejun Lee, Yaoliang Yu, and
+                                                            Jimmy Lin. 2020. Deebert: Dynamic early exit-
+Nako Sung, Minkyu Kim, Hyunwoo Jo, Youngil Yang,            ing for accelerating bert inference. arXiv preprint
+  Jingwoong Kim, Leonard Lausen, Youngkwan Kim,             arXiv:2004.12993.
+  Gayoung Lee, Donghyun Kwak, Jung-Woo Ha, et al.
+  2017. Nsml: A machine learning platform that en-       Ji Xin, Raphael Tang, Yaoliang Yu, and Jimmy Lin.
+  ables you to focus on your models. arXiv preprint         2021. Berxit: Early exiting for bert with better
+  arXiv:1712.05902.                                         fine-tuning and extension to regression. In Proceed-
+                                                            ings of the 16th Conference of the European Chap-
+Raphael Tang, Ashutosh Adhikari, and Jimmy Lin.             ter of the Association for Computational Linguistics:
+  2018. Flops as a direct optimization objective for        Main Volume, pages 91–104.
+  learning sparse neural networks. arXiv preprint
+  arXiv:1811.03060.                                      Zhilin Yang, Zihang Dai, Yiming Yang, Jaime Car-
+                                                           bonell, Russ R Salakhutdinov, and Quoc V Le. 2019.
+Yi Tay, Mostafa Dehghani, Samira Abnar, Yikang             Xlnet: Generalized autoregressive pretraining for
+  Shen, Dara Bahri, Philip Pham, Jinfeng Rao, Liu          language understanding. In Advances in neural in-
+  Yang, Sebastian Ruder, and Donald Metzler. 2020a.        formation processing systems, pages 5754–5764.
+  Long range arena: A benchmark for efficient trans-
+                                                         Deming Ye, Yankai Lin, Yufei Huang, and Maosong
+  formers. arXiv preprint arXiv:2011.04006.
+                                                           Sun. 2021. Tr-bert: Dynamic token reduction
+Yi Tay, Mostafa Dehghani, Dara Bahri, and Donald           for accelerating bert inference. arXiv preprint
+  Metzler. 2020b. Efficient transformers: A survey.        arXiv:2105.11618.
+  arXiv preprint arXiv:2009.06732.                       Jiahui Yu and Thomas S Huang. 2019. Universally
+                                                            slimmable networks and improved training tech-
+Surat Teerapittayanon, Bradley McDanel, and Hsiang-
+                                                            niques. In Proceedings of the IEEE International
+  Tsung Kung. 2016. Branchynet: Fast inference via
+                                                            Conference on Computer Vision, pages 1803–1811.
+  early exiting from deep neural networks. In 2016
+  23rd International Conference on Pattern Recogni-      Jiahui Yu, Linjie Yang, Ning Xu, Jianchao Yang, and
+  tion (ICPR), pages 2464–2469. IEEE.                       Thomas Huang. 2018. Slimmable neural networks.
+                                                            arXiv preprint arXiv:1812.08928.
+Hugo Touvron, Matthieu Cord, Matthijs Douze, Fran-
+  cisco Massa, Alexandre Sablayrolles, and Hervé        Manzil Zaheer, Guru Guruganesh, Avinava Dubey,
+  Jégou. 2020. Training data-efficient image trans-      Joshua Ainslie, Chris Alberti, Santiago Ontanon,
+  formers & distillation through attention. arXiv         Philip Pham, Anirudh Ravula, Qifan Wang, Li Yang,
+  preprint arXiv:2012.12877.                              et al. 2020. Big bird: Transformers for longer se-
+                                                          quences. arXiv preprint arXiv:2007.14062.
+Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob
+  Uszkoreit, Llion Jones, Aidan N Gomez, Łukasz
+  Kaiser, and Illia Polosukhin. 2017. Attention is all
+  you need. In Advances in neural information pro-
+  cessing systems, pages 5998–6008.
+
+Alex Wang, Amanpreet Singh, Julian Michael, Felix
+  Hill, Omer Levy, and Samuel R Bowman. 2018.
+  Glue: A multi-task benchmark and analysis platform
+  for natural language understanding. arXiv preprint
+  arXiv:1804.07461.
+
+                                                     6511
+

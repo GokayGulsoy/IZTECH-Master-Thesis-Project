@@ -1,0 +1,1381 @@
+                                                                                                                                                                            2021 IEEE Symposium on Security and Privacy (SP)
+
+
+
+
+                                                                                                                                PEGASUS: Bridging Polynomial and Non-polynomial Evaluations in Homomorphic
+                                                                                                                                                               Encryption
+
+
+                                                                                                                                                              Wen-jie Lu∗ , Zhicong Huang∗ , Cheng Hong∗ , Yiping Ma† and Hunter Qu∗
+                                                                                                                                                                    ∗ Gemini Lab, Alibaba Group, † University of Pennsylvania
+2021 IEEE Symposium on Security and Privacy (SP) | 978-1-7281-8934-5/21/$31.00 ©2021 IEEE | DOI: 10.1109/SP40001.2021.00043
+
+
+
+
+                                                                                                                                    Abstract—Homomorphic encryption (HE) is considered as                            Most of the current HE schemes can be categorized into
+                                                                                                                                one of the most important primitives for privacy-preserving                       word-wise HE (such as BFV [26], BGV [8] and CKKS [14])
+                                                                                                                                applications. However, an efficient approach to evaluate both                     and bit-wise HE (such as FHEW [24] and TFHE [18]). Each
+                                                                                                                                polynomial and non-polynomial functions on encrypted data
+                                                                                                                                is still absent, which hinders the deployment of HE to real-                      type has particular advantages and disadvantages. Word-
+                                                                                                                                life applications. To address this issue, we propose a practical                  wise HEs support efficient single-instruction-multiple-data
+                                                                                                                                framework PEGASUS. PEGASUS can efficiently switch back                            (SIMD) style homomorphic operations (i.e., addition and
+                                                                                                                                and forth between a packed CKKS ciphertext and FHEW ci-                           multiplication) by packing multiple plaintexts into a single
+                                                                                                                                phertexts without decryption, allowing us to evaluate arithmetic                  ciphertext [49]. However, it becomes difficult to compute
+                                                                                                                                functions efficiently on the CKKS side, and to evaluate look-up
+                                                                                                                                tables on FHEW ciphertexts. Our FHEW → CKKS conversion                            non-polynomial functions such as sigmoid, min/max, and
+                                                                                                                                algorithm is more practical than the existing methods. We                         division on the ciphertexts of word-wise HEs. As a compro-
+                                                                                                                                improve the computational complexity from linear to sublinear.                    mise, the existing word-wise HE-based approaches approxi-
+                                                                                                                                Moreover, the size of our conversion key is significantly                         mate non-polynomial functions using low-degree polynomi-
+                                                                                                                                smaller, e.g., reduced from 80 gigabytes to 12 megabytes.                         als [29], [39] or simply avoid them, e.g. replacing the max-
+                                                                                                                                We present extensive benchmarks of PEGASUS, including
+                                                                                                                                sigmoid/ReLU/min/max/division, sorting and max-pooling. To                        pooling with average-pooling [22]. Moreover, in applications
+                                                                                                                                further demonstrate the capability of PEGASUS, we developed                       such as K-means clustering, there exist inevitable non-
+                                                                                                                                two more applications. The first one is a private decision tree                   polynomial functions (i.e., min-index and division) that are
+                                                                                                                                evaluation whose communication cost is about two orders of                        hard to approximate via low-degree polynomials.
+                                                                                                                                magnitude smaller than the previous HE-based approaches.                             Contrary to word-wise HEs, bit-wise HEs support arbi-
+                                                                                                                                The second one is a secure K-means clustering that is able
+                                                                                                                                to run on thousands of encrypted samples in minutes that                          trary functions presented as boolean circuits by encrypting
+                                                                                                                                outperforms the best existing system by 14× – 20×. To the best                    each bit of the plain values using some representatives from
+                                                                                                                                of our knowledge, this is the first work that supports practical                  their message space. However, as shown in [17], [18], bit-
+                                                                                                                                K-means clustering using HE in a single server setting.                           wise HEs are barely practical for addition and multiplication
+                                                                                                                                  Keywords-Homomorphic Computation, Floating Point Com-                           circuits, especially when the boolean circuit consists of thou-
+                                                                                                                                putation, CKKS/FHEW                                                               sands of fan-in bits and a large circuit depth. For example,
+                                                                                                                                                                                                                  [18] took about a half minute to multiply two encrypted
+                                                                                                                                                         I. I NTRODUCTION                                         16-bit integers. Also, the expansion ratio of bit-wise HEs is
+                                                                                                                                   Homomorphic encryption (HE) is a cryptosystem that                             usually several orders of magnitude larger than the word-
+                                                                                                                                enables homomorphic operations on encrypted data and is                           wise HEs which could lead to a higher communication cost.
+                                                                                                                                considered as one of the most important building blocks                              When applying HEs to real-world applications such as
+                                                                                                                                for privacy-preserving applications. A potential application                      secure neural network inferences [22], [29], the problem
+                                                                                                                                of HE is secure outsourcing [3], [36], where all the data                         is even more challenging. That is because the inference
+                                                                                                                                comes from clients. That is, the client(s) encrypts his/her                       procedure computes many instances of arithmetic functions
+                                                                                                                                data using HE and uploads the ciphertexts to the server                           such as convolution, and non-polynomial functions such
+                                                                                                                                that performs all the computations over encrypted data. The                       as sigmoid and max-pooling. It is then natural to ask the
+                                                                                                                                server then returns the result in the form of ciphertext to the                   following question:
+                                                                                                                                client that can decrypt to get the computed result. Another                          Can we evaluate both polynomial functions and non-
+                                                                                                                                potential application of HE is secure two-party computation.                      polynomial functions on encrypted data efficiently and ef-
+                                                                                                                                The difference from secure outsourcing is that the server also                    fectively?
+                                                                                                                                holds its private databases, and the clients send encrypted                          Unfortunately, there are few practical approaches and
+                                                                                                                                queries to the server. Many applications fall into this setting,                  frameworks that achieve this target.
+                                                                                                                                e.g., the private information retrieval [42] and the decision-                    A. Related Work
+                                                                                                                                tree evaluation [37], [51].
+                                                                                                                                                                                                                    Cheon et al. [15], [16] presented an efficient (in the
+                                                                                                                                  † Yiping participated in this work as an internship at Alibaba.                 amortized sense) method to compute min/max over the
+
+
+                                                                                                                              © 2021, Wen-jie Lu. Under license to IEEE.                                   1057
+                                                                                                                              DOI 10.1109/SP40001.2021.00043
+                                                                                                                                             Authorized licensed use limited to: IEEE Xplore. Downloaded on April 09,2026 at 20:17:38 UTC from IEEE Xplore. Restrictions apply.
+Table I: Memory cost and computation costs (number of                               Table II: Insufficiency of existing approaches. The efficiency
+polynomial multiplications) of the repacking algorithms. N                          in the last column is considered as “high” if the method pro-
+(resp. n) denotes the dimension of RLWE (resp. LWE). q is                           vides either a high throughput or a low latency computation.
+the ciphertext modulus and ` denotes the number of LWE
+ciphertexts to repack. We have 1 ≤ ` ≤ N/2 and N  n.                                            SIMD?              Flexibility           Key       Efficiency
+
+                   Space (bit-size)                Computation                                                    Very limited
+                                                                                      [16]         Yes                                  ≈ 4GB        High†
+                                                                                                                    (min/max)
+     [7]          O(N n log q)                    O(n)                                                          Limited (LUT on
+  [11, §3.4]     O(N log N log q)            O(` + log(N/`))                          [43]         No                                   > 5GB         High
+                                                                                                                a small domain)
+                                              √ √                                                                High (LUT on
+    Ours             O(N log q)         O(min( n, ` + log(dn/`e)))                    [7]          Yes                                  10GB         Low
+                                                                                                                 large domains)
+                                                                                                                  High (LUT on
+                                                                                     Ours          Yes                                  ≈ 1GB         High
+                                                                                                                  large domains)
+CKKS scheme. Their method is suitable to compute the                                 † In the sense of amortization.
+min/max on a large batch (e.g., > 216 ) of encrypted integer
+pairs, but is less suitable for a recursive comparison such
+as sorting an encrypted vector. Moreover, their method is                           supports SIMD style homomorphic operations and provides
+designed specifically for the min/max operations, and it is                         high flexibility for non-polynomial functions is still absent.
+not clear how to use it to compute other non-polynomial
+functions, e.g., square-root and division.                                          B. Contribution
+   Micciancio et al. [43] presented a flexible method for non-                         In this work, we present PEGASUS, a highly optimized
+polynomial functions by evaluating look-up tables (LUT) on                          framework that supports both SIMD style operations and
+ciphertexts. Indeed, their method uses a learning-with-error                        LUT evaluations on large input domains (i.e., the last row of
+(LWE) -based HE scheme. However, their method demands                               Table II). Our contributions can be summarized as follows.
+the plaintext modulus to be a divisor of the LWE dimension,                           1) We ease the constraint in the LUT method [43] to
+which is usually chosen as a small value (e.g., an integer of                       accept a significantly larger input (e.g., > 40 bits) at the
+10–12 bits) for the sake of efficiency. As a result, one can                        cost of introducing some approximation errors. stress that
+not apply their LUT methods to the scenario that requires a                         a such large input domain is sufficient enough for many
+large plaintext domain. Not to mention that LWE-based HE                            applications such as privacy-preserving machine learning.
+schemes do not support SIMD style arithmetic computations.                          We provide empirical and theoretic analyses on the errors.
+   The most relevant study is by [7]. They designed the                               2) We present a memory-efficient and fast repacking
+CHIMERA framework to switch between TFHE ciphertexts                                algorithm. In brief, our repacking key consists of one
+and ciphertexts of the torus variant of CKKS/BFV schemes.                           CKKS ciphertext which is tremendously smaller than that
+On one hand, CHIMERA enables to perform SIMD style                                  of CHIMERA which consists of thousands of CKKS cipher-
+arithmetic operations on the CKKS/BFV side, and to com-                             texts. We compare our repacking algorithm with the existing
+pute LUTs with a large domain on the TFHE side. However,                            methods in Table I.
+their conversion TFHE → CKKS/BFV (designated as                                       3) We implemented PEGASUS using SEAL [47]. Dif-
+repacking) is costly in terms of key size and computation                           ferent from CHIMERA, we do not export CKKS to the
+costs. Although a concurrent work from [11] can improve                             torus. As a result, Pegasus can benefit from the efficiency of
+the computation efficiency of CHIMERA, this improvement                             the underlying optimized NTT/RNS. Our implementations
+is limited to a small repacking size, i.e., ` = Ω(log N ).                          are publicly available in https://github.com/Alibaba-Gemini-
+The computation costs of [11, §3.4] are still high when                             Lab/OpenPEGASUS.
+` ≈ N (see Table I). Moreover, CHIMERA uses multi-                                    4) We present extensive empirical results including
+precision floating-point values of hundreds of bits to main-                        min/max, sorting, division, square-root, and decision tree
+tain a proper precision when exporting CKKS/BFV to the                              evaluation on encrypted data. To further demonstrate the
+torus. As a result, CHIMERA needs Multi-Precision Fast                              potential of Pegasus, we also implement a viable application
+Fourier Transform (MP-FFT) for the polynomial operations                            that runs K-means clustering on thousands of encrypted
+in its torus variant of CKKS/BFV, which can significantly                           samples in minutes. To the best of our knowledge, we are
+deteriorate the efficiency of their framework. MP-FFT can be                        the first to achieve practical secure K-means clustering using
+several orders of magnitude slower compared to their integer                        purely HE in a single-server setting.
+counterparts using Number Theoretic Transform (NTT) and
+                                                                                                            II. P RELIMINARIES
+Residue Number System (RNS).
+   In Table II, we summarize the insufficiency of the current                       A. Notations
+arts for evaluating polynomial functions and non-polynomial                           For a 2-power number n, we write Rn = Z[X]/(X n + 1)
+functions on encrypted data. A practical approach that                              and Rn,q = Rn /qRn ≡ Zq [X]/(X n +1). We use lower-case
+
+
+                                                                             1058
+
+               Authorized licensed use limited to: IEEE Xplore. Downloaded on April 09,2026 at 20:17:38 UTC from IEEE Xplore. Restrictions apply.
+letters with a “hat” symbol such as â to represent elements in                  ciphertext ct that encrypts a ring element p̂0 , and a GSW
+Rn , and aj to denote the j-th coefficient of â. We use the dot                             ¨ ∈ RGSW(p̂1 ; g), the external multiplication
+                                                                                 ciphertext ct
+symbol · such as â · b̂ to represent the multiplication of ring                 ct ct¨ results in an RLWE ciphertext that encrypts p̂0 · p̂1 .
+elements. We use bold lower-case letters symbol such as a to
+                                                                                    Note that the LWE and RLWE encryption include errors
+represent vectors, and use a[j] to denote the j-th component
+                                                                                 whose magnitude will grow along with homomorphic op-
+of a, and use akb to denote the concatenation of vectors. We
+                                                                                 erations on the ciphertexts. To preserve the precision of
+use a  k to denote the left-hand-side rotation of the vector
+                                                                                 the decryption, we need to keep the magnitude of errors
+components. We use a> b to denote inner product of vectors
+                                                                                 relatively small. For instance, the gadget vector g is used
+and a ◦ b for the Hadamard product of vectors. We use bold
+                                                                                 to prevent the noise from growing too large. We defer the
+upper-case letters such as M to denote matrices, and M[i, j]
+                                                                                 concrete choice of gadget vectors to the full protocol of
+to denote the (i, j) entry of M. We denote by hni the set
+                                                                                 PEGASUS. Also if the gadget vector g is unimportant or
+{0, · · · , n−1} for n ∈ N. We use d·c to denote the rounding
+                                                                                 clear from the context, we simply omit it in the notation.
+function. Function I(P ) returns 1 if the predicate P is true,
+and otherwise it returns 0. All logarithms are to base 2.
+                                                                                 C. Coefficients and Slots Manipulation
+B. LWE, Ring-LWE Encryption
+   We use the notation LWEn,q                                                       The ring structure of Z[X]/(X n + 1) allows us to encode
+                               s (m) to denote the set of the
+possible LWE encryption of the message m ∈ Zq under the                          a real vector v ∈ R` as a ring element of Rn,q . We use
+secret s ∈ Znq . (b, a) = (m + e − a> s, a) ∈ LWEn,q                             Ecd(v, ∆) ∈ Rn,q to denote the encoding of v with a scaling
+                                                        s (m),
+where a ∈ Znq is chosen uniformly at random, and the error                       factor ∆ > 0, and use Dcd(v̂, ∆, `) ∈ R` to denote the
+e is chosen from an error distribution χerr . The decryption                     decoding of v̂ with a scaling factor ∆ > 0 and a length
+formula for the LWE ciphertext is b + a> s ≈ m.                                  ` > 0. We introduce the following properties and functions
+   Similarly, a basic RLWE encryption of a message m̂ ∈                          of the encoding and refer the details to [14], [32].
+Rn,q under the key ŝ ∈ Rn is given as (b̂, â) = (m̂ +                          •  Self-repeating. Dcd (Ecd (vk· · · kv, ∆) , ∆, `) = v. In
+ê − â · ŝ, â) ∈ RLWEn,q
+                         ŝ (m̂), where â ∈ Rn,q is chosen                      other words, the encoding of some self-repeating vectors
+uniformly at random, and the error ê is chosen by sampling                      can be viewed as the encoding of a single copy.
+its coefficients from the error distribution χerr independently.                 • Slot-wise Addition and Multiplication. Given the ring
+To lighten the notation, we identify the secret key of RLWE                      elements û and v̂ that encode the vectors u and v, respec-
+as a vector s where s[j] = sj for all j ∈ hni, and we                            tively, the addition û+ v̂ (resp. multiplication û· v̂) results in
+write the RLWE encryption of m̂ as RLWEn,q    s (m̂) from now                    a ring element that encodes the vector u + v (resp. u ◦ v). In
+on. Also, PEGASUS can work with an asymmetric RLWE                               the realm of ciphertexts, this property enables us to perform
+encryption, but we use the notations of symmetric RLWE                           slot-wise addition and multiplication over encrypted vectors.
+encryption for the sake of simplicity.                                           • Rotation. Given the RLWE ciphertext ct which en-
+   The RLWE encryption supports the following homomor-                           crypts Ecd (v, ∆), an integer k ∈ N, and a rotation key
+phic addition and multiplication operations. We provide the                      RotK, the operation RotLk (ct; RotK) results in an RLWE
+details of those operations in Appendix A.                                       ciphertext that encrypts the left-hand-side rotated vector
+  • Addition (+). Given RLWE ciphertexts ct0 and ct1 ,                           Ecd (v  k, ∆).
+which encrypts ring elements p̂0 and p̂1 , the operation ct0 +                   • Rescale. Given the RLWE ciphertext ct which en-
+
+ct1 results in a ciphertext that encrypts the sum, i.e., p̂0 + p̂1 .             crypts Ecd (v, ∆), and a factor ∆0 ∈ R, the operation
+  • Small Plaintext Multiplication (·). Given ciphertext ct                      Rescale(ct, ∆0 ) results in a ciphertext (with a smaller mod-
+that encrypts a ring element p̂, and given a “small” plain                       ulus) that encrypts Ecd (v, ∆/∆0 ).
+element r̂, the operation r̂ · ct results in a ciphertext that                   • Slots To Coefficients. Given the RLWE ciphertext ct
+
+encrypts r̂ · p̂. Notice that this multiplication can only be                    which encrypts Ecd (v, ∆), the operation S2C(ct) results in
+used with a low-norm ring element r̂.                                            an RLWE ciphertext that encrypts a ring element v̂ whose
+  • Arbitrary Plaintext Multiplication (). In order to                          coefficients are vi = ∆v[i] for all possible positions. Indeed,
+support multiplication by arbitrary ring elements, one defines                   S2C evaluates the decoding function homomorphically.
+                           ^ g) using a gadget vector                            • Coefficients Extraction. Given the ciphertext ct =
+an extended encryption RLWE(·;
+        d                                    ˜ ∈ RLWE(p̂;                        RLWEn,p s (m̂), and an integer k ∈ hni, the operation
+g ∈ Z . Given the extended ciphertext ct           ^ g)
+                                                       ˜ results                 Extractk (ct) results in LWEn,p s (mk ), i.e., an LWE encryp-
+and an arbitrary ring element r̂, the operation r̂  ct
+                                                                                 tion of the k-th coefficient of m̂ under the same secret key.
+in an RLWE ciphertext that encrypts r̂ · p̂.
+  • External Multiplication ( ). Furthermore, one can                              PEGASUS uses the combination of S2C and Extract to
+define a GSW-like encryption RGSW(·; g) to support mul-                          convert an RLWE ciphertext of an encoded vector to a set
+tiplication by RLWE ciphertexts [28]. Given an RLWE                              of LWE ciphertexts of the vector elements.
+
+
+                                                                          1059
+
+            Authorized licensed use limited to: IEEE Xplore. Downloaded on April 09,2026 at 20:17:38 UTC from IEEE Xplore. Restrictions apply.
+D. System and Security Model                                                                                 Function FKS
+   We give an overview of our desired security properties.                        Input: ctin ∈ LWEn,q
+                                                                                                   s (m).
+We consider three stakeholders: encryptor(s), cloud, and                          Output: ctout ∈ LWEsn,q (m) such that n ≤ n.
+decryptor. We assume all stakeholders behave semi-honestly
+                                                                                                    (a) Key-switching Function FKS .
+and the cloud does not collude with the decryptor. Let x be
+a private input of the encryptor and y be a private input
+                                                                                                            Function FLUT
+of the cloud and f be a known function. If the cloud do
+not provide any private input then we simply set y = ⊥.                           Input: ctin ∈ LWEn,q  s (d∆mc) of m ∈ R. A look-up
+We consider the following model. The encryptor(s) sends                           table function T (x) : R 7→ R.
+the ciphertext Enc(x) to the cloud for the computation of                         Output: ctout ∈ LWEn,q  s (d∆T (m)c + e) with a small
+a particular function f . The cloud operates specified homo-                      approximation error e.
+morphic operations on Enc(x) and y and sends the resulting                                         (b) Look-up table Function FLUT .
+ciphertext Enc(f (x, y)) to the decryptor who decrypts to
+learn f (x, y) but nothing else. Under this model, the security                                              Function FLT
+against a semi-honest cloud follows from the fact that the
+view of the cloud consists of ciphertexts only. Also, even                        Input: ctin ∈ RLWEn,q  s (Ecd (z, ∆)) of z ∈ R .
+                                                                                                                                  n
+                                                                                                    `×n                         `
+if the decryptor knows x, e.g., the encryptor and decryptor                       A matrix M ∈ R          and a vector t ∈ R such
+are the same entity, it learns nothing about the input of the                     that `, n ≤ n/2.
+                                                                                                           0
+cloud except the result f (x, y).                                                 Output: ctout ∈ RLWEn,q
+                                                                                                       s     (Ecd (Mz + t, ∆)).
+   Recently, Li et al. [41] point out that the approximated de-                                    (c) Linear transform Function FLT .
+cryption results of CKKS can leak additional information of
+the decryption keys. They successfully constructed passive                                                  Function Fmod
+attacks that could recover the decryption keys if given access                                                   0
+to the decryption results. We warn that the decryptor in                          Input: ctin ∈ RLWEn,q  s    (ẑ + qê) for a polynomial ẑ ∈
+PEGASUS should not reveal the decrypted values of CKKS                            Rn,q and some small norm polynomial ê ∈ Rn .
+                                                                                                                00
+ciphertexts to the encryptor and anyone else without doing                        Output: ctout ∈ RLWEn,q   s      (ẑ + ê0 ) with an approxima-
+any counter-measurement such as [13].                                             tion error ê of a small norm.
+   In the following descriptions, we describe the computation                                          (d) Mod q Function Fmod .
+on the cloud side and omit the decryption phase of the
+decryptor and the encryption phase of the encryptor since                               Figure 1: Core functions used in PEGASUS.
+these operations are either simple or application dependent.
+
+                                                                                n < n < n. In this section, we use q to denote the modulus
+          III. B UILDING B LOCKS OF PEGASUS                                     of the (R)LWE ciphertexts in a general way, i.e., q might
+   In this section, we propose PEGASUS, a novel framework                       be a large value with thousands of bits or just a machine
+that stays in the RLWE form for efficient SIMD computation                      word-sized integer. We give the specific value of q in the
+(e.g., addition, multiplication, and rotation) and transforms                   full description of PEGASUS in § IV.
+to LWE for evaluating a wide range of other complex func-                          PEGASUS can start with an RLWE ciphertext, e.g., ct ∈
+tions via a fine-grained look-up table approximation (e.g.,                     RLWEn,q                          `
+                                                                                       s (Ecd (v, ∆)) for v ∈ R . On a high level, it can
+sigmoid, ReLU, max/min). The PEGASUS transformation                             be summarized in a three-step transformation.
+consists of four core functions including key-switching (FKS                    1) Extract the elements of the encoded vector and obtains
+of Fig. 1a), look-up-table evaluation (FLUT of Fig. 1b),                        a set of LWE ciphertexts.
+linear transform (FLT of Fig. 1c), and approximated modulo
+(Fmod of Fig. 1d), which are detailed in this section. It is                                ct → cti ∈ LWEn,q
+                                                                                                          s (∆v[i]) for i ∈ h`i.
+noteworthy that the LUT function in PEGASUS is not exact                        2) Evaluate a look-up table T (x) on each LWE ciphertext.
+and would introduce some (bounded) approximation errors.
+                                                                                         cti → ct0i ∈ LWEn,q
+                                                                                                         s (∆T (v[i])) for i ∈ h`i.
+A. Overview
+   PEGASUS works on a set of (R)LWE-based schemes pa-                           3) Repack the set of LWE ciphertexts to a single RLWE
+rameterized by different (R)LWE dimensions and arguments.                       ciphertext that encrypts the encoded vector T (v).
+Particularly, we use the notations n, n, and n to denote                               {ct0i }i∈h`i → ct00 ∈ RLWEn,q
+                                                                                                                            00
+                                                                                                                     (Ecd (T (v), ∆)).
+                                                                                                                 s
+different (R)LWE dimensions and we write the secret keys in
+these dimensions as s, s, and s, respectively. Moreover, the                      In practice, we usually switch down the LWE ciphertext
+“bar” mark is used to indicate the magnitude of them, i.e.,                     of dimension n to a smaller dimension n < n of the
+
+
+                                                                         1060
+
+           Authorized licensed use limited to: IEEE Xplore. Downloaded on April 09,2026 at 20:17:38 UTC from IEEE Xplore. Restrictions apply.
+same message before the second step, aiming to reduce the                       Input: (b, a) ∈ LWEn,q
+                                                                                                     s (d∆mc) of a message m ∈ R with
+computation cost of the look-up table evaluation. Security                      a scaling factor ∆ such that |d∆mc| < q/4. Look-up table
+is also guaranteed for the smaller lattice dimension n. The                     function T (x) : R 7→ R. The evaluation key EK is a set
+repacking step is used to maintain consistent encoding,                         of RGSW ciphertexts of the key s ∈ {0, ±1}n .
+taking as input an encoded vector and outputting an evalu-
+                                                                                EKj,0 ∈ RGSWn,q +                     n,q −
+                                                                                            s (I (s[j])), EKj,1 ∈ RGSWs (I (s[j])),
+ated vector in the same encoding form, supporting further
+arithmetic operations seamlessly.                                               for j ∈ hni. I + (x) = I(x ≥ 0) and I − (x) = I(x ≤ 0).
+   The four functions in Fig. 1 have been investigated by                       Output: A LWE ciphertext ctout ∈ LWEn,q  s (·).
+many existing approaches. Particularly, Chen et al. [11,
+§3.2] recently presented a key-switching algorithm for LWE                        1: Let ηk = kq/(2n∆) ∈ R for 1 ≤ k ≤ n/2. Define a
+ciphertexts of a same lattice dimension. We modify their                             polynomial fˆ ∈ Rn,q whose coefficients are
+algorithm for the key-switching function PEGASUS.KS in                                         
+which the dimension n > n. The details of PEGASUS.KS                                           d∆T (0)c if j = 0
+                                                                                               
+are given in Fig. 9 in Appendix. Also, we adapt the RNS-                                  fj = d∆T (−ηj )c if 1 ≤ j ≤ n/2                          .
+                                                                                               
+friendly approach from [33] for the Fmod function.                                                d−∆T (ηn−j )c if n/2 < j < n
+                                                                                               
+   However, the existing methods for the other two functions
+                                                                                  2: Let b̃ = d 2n              2n
+                                                                                                 q bc and ã = d q ac.
+are either insufficient to support a wide range of input or
+inefficient in terms of computation and memory complexity.                        3: Initialize AC0 = (fˆ · X b̃ mod n , 0) ∈ Rn,q
+                                                                                                                               2
+                                                                                                                                   .
+Micciancio et al.’s method [43] for FLUT is confined to a                         4: for j = 0, 1, · · · , n − 1 do
+relatively small domain, e.g., |∆v[i]| ≤ 210 . Boura et al.’s                     5:          t = ((X ã[j] mod n − 1) · AC ) EK
+                                                                                               j                                   j            j,0 + ACj
+method [7] for FLT might generate a giant key of hundreds                                                 −ã[j] mod n
+                                                                                        ACj+1 = ((X                      − 1) · tj )    EKj,1 + tj
+of gigabytes. In the following, we present more efficient and
+flexible algorithms for the FLUT and FLT functions. Then                          6: end for
+                                                                                                   0
+                                                                                                               
+we bring them all together to form the full PEGASUS.                              7: Output Extract         ACn as ctout .
+B. Look-up Table Evaluation on a Larger Domain
+                                                                                   Figure 2: Look-up Table Evaluation PEGASUS.LUT
+   The existing methods that evaluate a look-up table T (x)
+on an LWE ciphertext (b, a) ∈ LWEn,q    s (m) basically fol-
+low [24] which requires q = 2n for some positive  ∈ N.                        Then the approximate decryption formula is defined as:
+These methods use an RLWE scheme RLWEn,q        s (·) to com-
+pute the (scaled-up) LWE decryption function modulo the                                            b̃ + ã> s mod n ≈ d˜
+                                                                                                                       nm/qc.                         (1)
+                                        b+a> s mod n
+polynomial degree, i.e., RLWEn,q  s (X                 ) which                  We also need to modify the look-up table as T̃ (x) = T ( ˜qn x)
+                   n,q
+equals to RLWEs (X m ). Then multiplying a polynomial                          to take inputs from the range x ∈ [−n/2, n/2) ∩ Z. By
+(constructed according to T (x) and ) can obliviously bring                    doing so, the origin LUT T (·) can be homomorphically
+the evaluation T (m) to the 0-th coefficient of the resulting                   evaluated within a subset of the wider range [−q/2˜   , q/2˜
+                                                                                                                                            ).
+polynomial. Finally, the extraction function Extract0 (·) gives                 The approximation error is bounded by Lq/(2˜       n) where
+an LWE ciphertext which encrypts the result T (m).                              L > 0 is the smoothness of the function T (·) (e.g., Lipschitz
+   As we have mentioned, the Ducas-like methods demand                          continuity). Some works have shown that such modification
+q|2n and commonly use a small q, e.g., q = 29 was used in                       has only a slight effect when T (x) is smooth enough [6].
+the implementation [43]. This constraint limits the usability                   Also, in our applications of private decision tree and K-
+of the Ducas-like LUT methods for applications that involve                     means clustering, we do not observe a large precision loss
+large integers or fixed-point values of proper precision. For                   due to this approximation.
+example, the HE-based privacy-preserving machine learn-                            Our algorithm for FLUT is shown in Fig. 2. The major
+ing [29], [38], [39] use a scaling factor ∆ > 230 to preserve                   cost of this algorithm lies in the 2n ciphertext multipli-
+the precision of fixed-point values before the encryption,                      cations ( ) The size of the our evaluation key EK is
+demanding a larger modulus q > ∆.                                               O(|g|nn log q) bits. Note that in the algorithm, RGSW is
+Our Solution via Approximate Decryption. The LWE                                used to simply encrypt binary values which can be viewed
+decryption formula b+a> s is computed in modulo q but we                        as degree-0 polynomials. Given a complex function G(x)
+can only perform modulo n in the RLWE scheme. To use                            to be evaluated, we can discretize the domain of x to small
+a larger ciphertext modulus q  n for larger plaintexts, our                    intervals and map each interval [u, v] to the function value
+insight is to use an approximate LWE decryption formula                         G( u+v                                                ˆ
+                                                                                     2 ). Fig. 2 builds a plain look-up polynomial f whose
+which is computed in modulo n. To do so, we first scale                         coefficients are the function values corresponding to the
+down the modulus from q to ˜n, i.e., b̃ = d ˜qn bc and                        intervals, whereas the decryption b̃ + ã> s mod n serves as a
+ã = d ˜qn ac for some even value ˜ ∈ N such as ˜ = 2.                       look-up index to select the appropriate coefficient (function
+
+
+                                                                         1061
+
+           Authorized licensed use limited to: IEEE Xplore. Downloaded on April 09,2026 at 20:17:38 UTC from IEEE Xplore. Restrictions apply.
+ Complex function:                  1
+                          (t) = 1+exp( t)
+                                                   1                                             Table III: Computation complexity of different methods for
+                                                                                                 the transform function.
+
+
+
+
+                                            (t)
+    t        4       3         2       1
+  T (t)   0.018   0.047     0.119   0.269         0.5
+    t       0       1         2       3                                                                        Method               #Rotation            Depth
+  T (t)    0.5    0.731     0.881   0.953                                                                                               √
+                                                                                                                 [30]                O( n)                1
+                                                   0
+                                                        4   2      0    2                                        [38]         O(d`n/ne + log(n/n))        1
+ Look-up polynomial:                                                                                 `<n
+                                                                  t 5                                         [10, §3.4]    O( + d`n/(n)e
+                                                                                                                                   √        log(n/))†    2
+ fˆ = (0) + ( 1)X + ( 2)X 2 + ( 3)X 3 + ( 4)X 4                 (3)X    (2)X 6   (1)X 7
+                                                                                                                Ours            O( ` + log(n/`))          1
+                                                                                                                                        √
+ Look-up index: i = b̃ + ã> s mod n 2 [ 4, 4)(n = 8).                                                          [30]                 O( `)                1
+                                                                                                     `≥n                                √
+ Ouput:    fn i if i > 0 else output f|i|
+                                                                                                                Ours                 O( n)                1
+                                                                                                     † 1 ≤  ≤ ` in [10].
+
+                    Figure 3: Look-up table example.
+
+                                                                                                 single RLWE ciphertext RK ∈ RLWEn,q       s (Ecd (s, ∆r )). The
+value). A toy example is given in Fig. 3 to illustrate the                                       scaling factor ∆r is used to preserve the precision because
+process.                                                                                         the secret key s is commonly a low-norm vector. Our
+   Theorem 1: Given the input ctin ∈ LWEsn,q (d∆mc) and                                          repacking key is about O(2n log q) bits (cf. Table I), e.g.,
+for any ternary secret s ∈ {0, ±1}n , Fig. 2 outputs ctout ∈                                     about 12 MB for the same parameter set n = 216 , n = 210 ,
+LWEn,q
+     s (d∆T (m)c + elut ) with a bounded error elut ∈ R.                                         and log q ≈ 735. Also, the LWE dimension n  n is fixed
+   The upper bound of the error elut depends on the noise of                                     in advance but the repacking size ` can change within the
+the input ciphertext, the concrete choice of gadget vector and                                   range 1 ≤ ` ≤ n/2. In other words, we need to evaluate the
+the smoothness of the function T (·). We will introduce the                                      linear transform As+b, given the ciphertext of the encoded
+concrete choice of gadget vectors used by PEGASUS in the                                         vector Ecd (s, ∆r ) and “plain” value of A and b such that
+next section. We defer the correctness proof of Theorem 1                                        the matrix A can be a “tall” matrix (i.e., ` > n) or a “short”
+and give a detailed noise analysis of elut to Appendix.                                          matrix (i.e., ` < n).
+C. More Efficient Repacking                                                                         There are some existing approaches to the linear transform
+   PEGASUS keeps consistent encoding by repacking a set                                          function FLT . Their efficiency greatly depends on the shape
+of LWE ciphertexts, i.e., from Fig. 2, to an RLWE ciphertext                                     of the matrix A . As shown in Table III, p         the diagonal
+that encrypts an encoded vector of the LUT evaluations. One                                      encoding method of Halevi et al. [30] using O( max(`, n))
+advantage of this consistency is that, the existing approaches                                   homomorphic rotations is thus more suitable for square
+that uses CKKS can benefit      from the capability of PEGA-                                     matrices. Juvekar et al. [38] improved [30] especially for
+                          1                                                                      “short” matrices. Chen et al. [10] further improved the
+SUS. For example, PEGASUS can replace the activation
+function in EVA [21] and keep other parts unchanged.                                             efficiency of [38] at the cost of more multiplicative depths.
+   The basic idea of repacking {cti ∈ LWEn,q                                                     These existing approaches are not sufficient to cover both
+                                                     s (mi )}i to
+             n,q 0                                                                               “tall” and “short” matrices efficiently. We now present a new
+ct ∈ RLWEs (Ecd (m0 , · · · )) consists of two steps. First                                      algorithm for the FLT function in Fig. 5 which is faster and
+we homomorphically evaluate 0
+                                   the partial LWE decryption                                    more flexible than the existing approaches.
+and obtain ct0 ∈ RLWEn,q      (Ecd  (m0 + qr0 , · · · )), given the                                 Theorem 2: On the input ctin ∈ RLWEn,q     s (Ecd (z, ∆r )),
+                          s
+secret key s in some form of encryption. Then we can                                             a plain matrix M ∈ R`×n such that `, n < n, and
+evaluate modulo q homomorphically using the methods such                                         a vector t ∈ R` , Fig. 5 outputs an RLWE ciphertext
+as [4], [9], [33].                                                                               ctout ∈ RLWEs
+                                                                                                                 n,q/∆r
+                                                                                                                        (Ecd (Mz + t, ∆0r )).
+   CHIMERA suggest to perform the partial decryption step
+                                                                                                    As the example shown in Fig. 4, the main idea in Fig. 5
+using a repacking key that consists of n RLWE^ ciphertexts,
+                                                                                                 is first to convert, conceptually, the rectangular matrix M to
+                        n,Q
+that is {RKi ∈ RLWE^ s (s[i]; g)}i∈hni (Q  q 0 ≥ q). As                                         a square matrix by repeating the rectangular matrix itself
+a result, the size of this key is O(2|g|nn log Q) bits which                                     (called tiling). We said “conceptually” because, we only
+can be tremendously large. For instance, the size of their                                       use a subset of the diagonals of the tiling matrix, which
+repacking key can be more than 80 gigabytes for a parameter                                      are constructed in Step 1 by looping through the rows and
+set that n = 216 , n = 210 , |g| = 7, and log Q ≈ 735.                                           columns of M. This tiling is always possible without zero-
+Our Solution via Linear Transform. We present a faster                                           padding because the number of rows and columns of M is
+and memory-efficient algorithm for the partial decryption                                        always a power-of-2 value. The baby-step-giant-step (BSGS)
+step. The insight is that the partial LWE decryption of a                                        technique [31] in Step 2 aims to sum up some products of
+batch of LWE ciphertexts can be written as a linear transform                                    plaintext–ciphertext with a specific offset of homomorphic
+                                       `×n
+As+b where the i-th row of A ∈ Zq comes from an LWE                                              rotations. Indeed, Step 2 results a ciphertext ct˜ that already
+ciphertext. Instead of encrypting elements of s separately, we                                   encrypts the result vector Mz for the “tall” case. On the
+suggest to use encoding and export the repacking key as a                                        other hand, when ` < n, intuitively, ct    ˜ can be viewed as
+
+
+                                                                                          1062
+
+                  Authorized licensed use limited to: IEEE Xplore. Downloaded on April 09,2026 at 20:17:38 UTC from IEEE Xplore. Restrictions apply.
+                                                                                  Input: ctin ∈ RLWEn,qs (Ecd (z, ∆r )). Rotation key RotK.
+                                                                                  A scaling factor ∆0r > 0. A plain matrix M ∈ R`×n such
+                  *      =                                                        that `, n < n. A vector t ∈ R` .
+                                                                                                                                n,q/∆r
+                                                                                  Output: An RLWE ciphertext ctout ∈ RLWEs             (·).
+    Tiling                                                                          1: Tiling and Diagonals. Let n̈ = max(`, n) and
+                                                                                       ñ = min(`, n). Define ñ vectors {m̃j }ñ−1
+                                                                                                                               j=0 by going
+                                                                                       through the rows and columns of M
+                                                             Sum
+                  Diagonals                   BSGS          Columns
+                                                                                          m̃j [r] = M[r mod `, r + j mod n] for r ∈ hn̈i.
+                                                                                                               √
+                                                                                    2: Baby-Step. Let g̃ = d ñe. For g ∈ hg̃i, compute
+                                                                                       cg = RotLg (ctin ).
+                                                                                    3: Giant-Step. Let b̃ = dñ/g̃e. Compute
+                                                                                                                                                       
+Figure 4: “Short” matrix example of PEGASUS.LT. ` = 2                                           X                     X
+                                                                                                                                                  0
+                                                                                                         RotLbg̃ 
+                                                                                                                                                    
+                                                                                          ˜ =
+                                                                                          ct                                  Ecd m̃bg̃+g  bg̃, ∆r · cg  .
+and n = 4. Dotted cells would be omitted in the tiling step.
+                                                                                                b∈hb̃i               g∈hg̃i
+
+                                                                                    4: if ` ≥ n then
+a ciphertext that encrypts a matrix of ` rows and (n/`)                             5:                   ˜ ∆r ) + Ecd (t, ∆0r ) as ctout .
+                                                                                          Output Rescale(ct,
+columns where the sum of the column vectors equals to                                               B ct˜ ∈ RLWEn,q                0
+                                                                                                                   s (Ecd (Mz, ∆r ∆r ))
+Mz (see Fig. 4). The post-possessing from Step 6 to Step 7                          6: else        B Sum Columns
+aims to sum up the encrypted columns, resulting in ctγ that                         7:                                 ˜
+                                                                                          Let γ = log(n/`) and ct0 = ct.
+encrypts a self-repeating vector Ecd (Mzk· · · kMz, ∆r ∆0r ).                       8:    Update iteratively for 1 ≤ j ≤ γ
+It can just be viewed as Ecd (Mz, ∆r ∆0r ) according to                                                                        j
+                                                                                                          ctj = RotL`2 (ctj−1 ) + ctj−1 .
+the property of the encoding function. Finally, we use
+Rescale(·, ∆r ) to reach the specified scaling factor ∆0r , and                                   B ctγ = RLWEn,q  s (Ecd (Mz, ∆r ∆r ))
+                                                                                                                                       0
+                                                                                                                              0
+then we add t at the end. The proof of Theorem 2 is deferred                        9:   Output Rescale(ctγ , ∆r ) + Ecd (t, ∆r ) as ctout .
+to Appendix B.                                                                     10: end if
+   We compare the computation complexity of Fig. 5 with
+the existing approaches in Table III. It is worthy to note that                             Figure 5: Linear Transform PEGASUS.LT
+the computation costs of our method are independent of the
+repacking size ` when ` ≥ n. In other words, we can repack
+a large amount of LWE ciphertexts to an RLWE ciphertext                             2) Gadget Vectors: The products ( and ) use a gadget
+without introducing extra overheads, which is confirmed                           vector to keep the noise magnitude small. Particularly, we
+empirically in §VI.                                                               use two types of gadget vectors in PEGASUS, i.e., the
+   Remark: Fig. 5 can also be used for other interests. For                       digit decomposition gadget gdigit and RNS decomposition
+example, the matrix M can also be given in the form of                            gadget grns . Given the decomposition base B > 1 and
+encryption as long as it follows the tiling-style encoding.                       d = dlogB qe, the gdigit is given as gdigit [i] = B i . The
+Indeed, in our secure K-means clustering application (§V),                        RNS gadget takes advantage of the RNS representation
+we reuse Fig. 5 to compute the product of an encrypted                            and the special modulus 0technique [27]. The grns vector
+matrix and encrypted vectors.                                                     is given as grns [i] = qq      q −1
+                                                                                                           qi (( qi )  mod qi ) where q 0 is a
+                                                                                  special modulus. One advantage of grns against the digit
+                      IV. O UR F RAMEWORK                                         gadget is that grns can render faster multiplications  and
+                                                                                    . However, grns requires a larger modulus, which demands
+  The full algorithm of PEGASUS includes many specific                            a larger lattice dimension to guarantee the security of the
+optimization techniques that are already investigated in                          encryption scheme. Particularly, we use gdigit in the LWE
+previous work. We briefly introduce these techniques here.                        switching key (i.e., SwK in Fig. 6) and use grns in the LUT
+                                                                                  evaluation key (i.e,. EK in Fig. 6).
+A. Optimizations
+  1) RNS and NTT: A well-known technique to optimize                              B. Full Algorithm of PEGASUS
+the integer polynomial arithmetic on Rn,q is to use a full                           Now we present the full description of PEGASUS in
+RNS by taking the modulus q as the product
+                                      Q of distinct and                           Fig. 6. PEGASUS uses L > 0 moduli for the RNS
+machine-word-sized primes, i.e., q = i∈hLi qi . One can                           representation and one special modulus q 0 for the gadget
+achieve up to L× improvement in polynomialQ arithmetic                            vector. Notice that our gadget vectors gdigit and grns only
+according to the ring isomorphism Rn,q → i∈hLi Rn,qi .                            involve the first modulus q0 . Indeed, PEGASUS performs
+
+
+                                                                           1063
+
+             Authorized licensed use limited to: IEEE Xplore. Downloaded on April 09,2026 at 20:17:38 UTC from IEEE Xplore. Restrictions apply.
+Public Parameters:
+                                                                      0
+                                                                                       Q
+  • Ciphertext moduli q0 , q1 , · · · , qL−1 and a special modulus q . Define Qi =       l∈hii ql for 1 ≤ i ≤ L.
+                                                                  d                                     d
+  • Digit decomposition gadget vector gdigit = [1, Bks , · · · , Bksks ] for some Bks , dks > 0 and Bksks ≥ q0 .
+                                                     0
+  • RNS decomposition gadget vector grns = [q mod q0 ].
+                                         0
+  • Rescaling factors 0 < ∆, ∆r , ∆r < q0 .
+
+Public Keys:
+  • Switching key SwKs→s is a vector of RLWE encryption of s under the key s where the j-th ciphertext is
+          n,q0 P                              
+     ^s
+    RLWE                s[jn + l]X l ; gdigit for j ∈ hn/ni. The switching key SwKs→s is defined in a similar way.
+                       l∈hni
+   •   LWE evaluation key EK is a set of GSW encryption of the elements of s under the key s where
+                                               0                                               0
+                        EKj,0 ∈ RGSWn,q
+                                    s
+                                        q0 +
+                                          (I (s[j]); grns ), EKj,1 ∈ RGSWn,q
+                                                                         s
+                                                                             q0 −
+                                                                               (I (s[j]); grns ) for j ∈ hni.
+    Specifically, I + (x) = 1{x ≥ 0} and I − (x) = 1{x ≤ 0}.
+                                 n,QL
+  • Repacking key RK ∈ RLWEs          (Ecd (s, ∆r )).
+  • Rotation key of the CKKS scheme RotK.
+
+Input:
+                                                                `                   n,Ql
+  • A level-l RLWE ciphertext (l > 1) of an encoded vector v ∈ R , i.e., ctin ∈ RLWEs    (Ecd (v, ∆)).
+  • A look-up table function T (x) : R 7→ R.
+                                             n,Q
+Output: A RLWE ciphertext ctout ∈ RLWEs L0 (Ecd (T (v), ∆)), i.e., the evaluation of T (x) on the elements of v.
+  1: Slots to coefficients and drop moduli. ct0 = S2C(ctin )                     B ct0 ∈ RLWEn,q s
+                                                                                                     0
+                                                                                                       (∆v̂)
+                                           i  0                                                n,q0
+  2: Extract Coefficients. cti = Extract (ct ) for each i ∈ h`i.                 B cti ∈ LWEs (∆v[i])
+  3: for i ∈ h`i do                                                              B parallel
+  4:   Switch from n to the smaller dimension n. ct   ˙ i = PEGASUS.KS(cti , SwKs→s ).
+                                                                                 B ct˙ i ∈ LWEn,q
+                                                                                               s
+                                                                                                   0
+                                                                                                     (∆v[i])
+                                        ¨                    ˙                      ¨          n,q0
+  5:   Evaluate the look-up table. cti = PEGASUS.LUT(...    ct i , EK, T (x)).   B  ct  i ∈ LWEs     (∆T (v[i]))
+  6:   Switch from n to the smaller dimension n. cti = (bi , ai ) = PEGASUS.KS(ct ¨ i , SwKs→s ).
+                                                                                    ...
+                                                                                 B cti ∈ LWEn,qs
+                                                                                                   0
+                                                                                                     (∆T (v[i]))
+  7: end for
+                                              `×n
+  8: Define b = [b0 , · · · , b`−1 ] and A ∈ Zq0 where the i-th row of A is ai . B As + b mod q0 = Ecd (T (v), ∆)
+  9: Evaluate the linear transform ct   ˜ = PEGASUS.LT(RK, RotK, ∆0r , A, b).       ˜ ∈ RLWEn,Q
+                                                                                 B ct           s
+                                                                                                     L−1
+                                                                                                         (Ecd (As + b, ∆0r ))
+                                      ˜                                                             n,QL0
+ 10: Evaluate the modulo q0 on ct via Fmod and output the result as ctout .      B ctout ∈ RLWEs           (Ecd (T (v), ∆))
+
+                                                     Figure 6: PEGASUS, Full Protocol
+
+
+the key-switching (Fig. 9) and the LUT evaluation (Fig. 2)                      renders smaller switching keys and LUT evaluation keys
+over the ring R∗,q0 for a various lattice dimension but a fixed                 (cf. Table IV). The independent LUT evaluations on LWE
+modulus q0 (reasons see below).                                                 ciphertexts from Step 4 to Step 5 can be easily parallelized
+   The input RLWE ciphertexts of PEGASUS are given in                           by multicores. Finally, PEGASUS repacks a set of LWE
+the RNS representation with l many moduli. PEGASUS first                        ciphertexts to an RLWE ciphertext by simply using the
+evaluates the slots-to-coefficients function S2C, followed by                   implementations of the FLT and Fmod (Step 9-10).
+Extract to obtain the encoded elements as a set of LWE                             The main computation errors in Fig. 6 come from the
+ciphertexts (Step 1 and Step 2). As a result, it requires l > 1                 key-switching in Step 4 and Step 6, and the LUT evaluation
+since S2C itself might consume 1 or 2 ciphertext moduli.                        in Step 5. We defer the error analysis of these two functions
+The computational costs of the following LUT evaluation                         to Appendix due to the space limit.
+and repacking depends on the modulus size of the LWE                               Remark: The very recent work from [11] provides a
+ciphertexts. To lighten the computation, PEGASUS drops                          different primitive for the repacking function. Briefly, given
+all RLWE moduli but keeps the first one q0 before Step 3.                       the LWE ciphertexts {cti ∈ LWEsn,q (mi )}i=0         `−1
+                                                                                                                                         , they first
+                                                                                                                                              n,q
+As a result, the following key-switching (Step 4 and Step 6)                    convert them to an RLWE ciphertext ct ∈ RLWE              P s (m̂) i
+and LUT (Step 5) take as the input of LWE ciphertexts                           that encrypts a polynomial such that m̂ =                    i mi X .
+from LWE∗,q0 (·) with a varying lattice dimension but a fixed                   Then they homomorphically0
+                                                                                                                evaluate the encoding function
+modulus. Also by using the smallest number of moduli, it                        and get ct0 ∈ RLWEn,q s    (Ecd (m 0 , m1 , · · · , m`−1 )). Indeed,
+
+
+
+
+                                                                         1064
+
+           Authorized licensed use limited to: IEEE Xplore. Downloaded on April 09,2026 at 20:17:38 UTC from IEEE Xplore. Restrictions apply.
+their conversion part needs O(` + log(n/`)) homomorphic
+                                                    √                           such as reciprocal, min/max, max-pooling, and sorting. Also,
+rotations (cf. Table I), and they might need O( `) more                         we propose a private decision tree evaluation and a secure
+rotations for the encoding step. On the other hand, the                         K-means clustering algorithm using PEGASUS.
+number of homomorphic √       rotations used in PEGASUS.LT
+                        √                                                       A. Application I: Basic Non-polynomial Functions
+(Step 9) is about min( n, `+log(n/`)) which is indepen-
+dent of the largest lattice dimension n. Also, the complexity                      We show some use cases for computing a wide range
+of our instantiation of Fmod from [33] is independent of                        of common functions using the look-up tables evaluation of
+the repacking size `. In conclusion, our method is more                         PEGASUS. Particularly, we compute the following functions
+computation-efficient than [11] when ` is large, e.g., ` > n.                   on LWE ciphertexts.
+                                                                                 • sigmoid/ReLU/sqrt/reciprocal. Many useful functions
+C. Advanced Features of PEGASUS
+                                                                                can be evaluated via one LUT, for instance sigmoid, ReLU,
+   For the sake of simplicity, we describe PEGASUS with                         square-root and reciprocal. These functions are commonly
+one LUT as input in Fig. 6. PEGASUS can provide much                            used in machine learning algorithms.
+more flexibility. We now introduce its advanced features.                        • min/max The min/max of two values m0 and m1 can
+1) Multiple LUTs: We can repeat Step 5 and Step 6 to                            be computed as follows
+evaluate a sequence of LUTs. Also, we can perform addi-
+tions and subtractions over the LWE ciphertexts before and                            min(m0 , m1 ) = 0.5(m0 + m1 ) − 0.5|m0 − m1 |,
+after Step 5. Indeed, one of our application that computes                           max(m0 , m1 ) = 0.5(m0 + m1 ) + 0.5|m0 − m1 |.
+the index of the minimum value of an encrypted vector
+                                                                                Thus, we can use two LUTs T0 (x) = 0.5x and T1 (x) =
+(described in the following section) needs some basic LWE
+                                                                                0.5|x| to compute the min/max on LWE encrypted values.
+additions and subtractions between two LUT evaluations.
+                                                                                   Also, we can find out the min/max of an array by a
+2) Customizable Encoding Layout: Moreover, we can rear-
+                                                                                min/max-tree. For example, the max of 4 values m0 , · · · , m3
+range the layout of encoding in Step 9 by just reordering
+                                                                                can be computed as max(max(m0 , m1 ), max(m2 , m3 )). To
+the rows of A and b. This property is very useful for
+                                                                                find out the min/max of t encrypted elements, in general, we
+many HE-based applications, in which different types of
+                                                                                need to evaluate O(2t) LUTs.
+encoding layout are usually mixed for better performance.
+                                                                                  • max-pooling. Max-pooling is a famous operation of
+For instance, [38] used two encoding layouts for the secure
+                                                                                deep learning. Although the average-pooling is more HE-
+evaluation of convolution layers and fully-connected layers.
+                                                                                friendly, it has been proved that the max-pooling can perform
+To switch between different layouts, [38] needs to decrypt
+                                                                                better in many image classification tasks [35]. Also, we
+ciphertexts in the middle with a random masking. On the
+                                                                                notice that the number input t is usually very small for
+other hand, such switching of encoding layouts is almost
+                                                                                max-pooling, e.g., t = 4. As long as the scaled maximum
+free in PEGASUS without interactions with the decryptor.
+                                                                                value still follows the range constraint of Algorithm 2, i.e.,
+3) Tunable Output Level: The number of moduli (denoted
+                                                                                |t · max(m0 , m1 , · · · , mt−1 )| < q0 /(4∆), we can use a
+as L0 ) of the resulting ciphertext from Step 10 depends on
+                                                                                smaller number of LUTs to compute the max-pooling.
+the number of moduli used for constructing the repacking
+                                                                                Indeed, we replace each max-operation in the max-tree with
+key RK. This parameter can be changed to a smaller one as
+                                                                                the scaled-max max0 (m0 , m1 ) = m0 + m1 − |m0 − m1 |,
+long as it provides enough depths for the Fmod , to tune a
+                                                                                resulting a t-scaled value. The factor t can then be removed
+best repacking performance for the specific application. For
+                                                                                by one extra LUT T2 (x) = x/t. In total, we can compute
+instance, L0 = 3 might be enough for secure convolution
+                                                                                the max-pooling within O(t) LUTs for a relatively small t.
+network inference since the polynomial operations (i.e.,
+                                                                                  • sorting. We adapt the bitonic sorting [2] which is data
+convolution) between two non-polynomial operations (e.g.,
+                                                                                independent and can be parallelized easily. A bitonic sorting
+activation and pooling) consume one multiplicative depth.
+                                                                                network uses two types of swap, i.e., ascending swap and
+   To wrap up, the size of the repacking key of PEGASUS                         descending swap
+is significantly smaller than CHIMERA’s repacking√key.
+                                                  √
+Also, our repacking approach demands O(min( n, ` +                                   ASwap(m0 , m1 ) = min(m0 , m1 ), max(m0 , m1 )
+log(n/`))) homomorphic rotations which is much lighter                               DSwap(m0 , m1 ) = max(m0 , m1 ), min(m0 , m1 ).
+than the repacking method of CHIMERA that needs O(n)
+rotations. Moreover, Pegasus can leverage the optimized                         In other words, each swap needs two LUTs since the min and
+NTT/RNS for the underlying arithmetic that is significantly                     max function computes the same LUTs. To sort an array of
+faster than its Torus counterpart used by CHIMERA.                              t encrypted elements, our bitonic sorting network evaluates
+                                                                                O(2t log22 t) LUTs.
+                       V. A PPLICATIONS                                           • min-index/max-index. The min-index (resp. max-index)
+ In this section, we present some useful applications of PE-                    function takes as input of an array m0 , m1 , · · · , mt−1 and
+GASUS. Specifically, we compute some statistical functions                      returns a binary sequence (b0 , b1 , · · · , bt−1 ) such that bk = 1
+
+
+                                                                         1065
+
+           Authorized licensed use limited to: IEEE Xplore. Downloaded on April 09,2026 at 20:17:38 UTC from IEEE Xplore. Restrictions apply.
+iff. mk is the min (resp. max) value of the the array. We first                 Table IV: Proposed parameter sets. Bks is the digit decompo-
+compute the min (resp. max) value of the array by a min-tree                    sition base. The scaling factors are set as ∆ ≈ 236 , ∆r ≈ 245
+(resp. max-tree). Then, we can compute the min-index (resp.                     and ∆0r = 1. The hamming weight of secret keys is set as
+max-index) using the predicate function T (x) = I(x ≤ 0)                        h = 64. The value log Q denotes the total bits of modulus
+evaluated on mi −min (resp. mi −max) with extra O(t) LUT                        used in SEAL (including the special modulus). All parameter
+evaluations. In total the min-index/max-index evaluation                        sets provide at least 119-bit of security level according to [1].
+needs O(3t) LUTs.                                                                   Encryption                            Parameters
+Cheon et al.’s numeric method [16] can also compute the                                n,q
+                                                                                  ^ s 0 (·)
+                                                                                  RLWE               n = 210 , q0 ≈ 245 , σks = 213 , Bks = 27 , dks = 7
+max/min-index but at the cost of a longer latency than                                   0
+                                                                                 RGSWn,q
+                                                                                      s
+                                                                                           q0
+                                                                                              (·)    n = 212 , q 0 ≈ 260 , σlut = 210
+PEGASUS which is confirmed in our experiments.
+                                                                                  RLWEn,∗
+                                                                                        s (·)        n = 216 , qi ≈ 245 , σckks = 3.19, log Q = 795
+B. Application II: Private Decision Tree Evaluation                                    Key                                    Size
+
+   Decision tree is a fundamental and popularly used clas-                          SwKs→s           2dks n log q0 bits ≈ 5.0 MB
+                                                                                    SwKs→s           2dks n log q0 bits ≈ 315 KB
+sification algorithm. Many current works have considered a                                                      0
+                                                                                      EK                     Q q0 ) bits ≈ 420 MB
+                                                                                                     8nn log(q
+cloud-based classification service using decision tree evalu-                         RK             2n log( i∈hLi qi ) bits ≈ 12 MB
+ation, using HEs to protect the query privacy for the user,
+and the model privacy for the cloud [5], [37], [40], [50],
+[51]. However, these approaches are either interactive, using                   consider the square Euclidean distance D(xi , cj ) = x>     i cj
+O(log N ) rounds of communication between the cloud and                         here. To solve this optimization problem, iterative algorithms
+the user or having a large communication overhead.                                                       (t)
+                                                                                are used. We write cj as the j-th centroid in the t-th
+   On the other hand, we can achieve a single-round and                         iteration. Without loss of generality, the t-th update can be
+communication-efficient private decision tree evaluation by                     described as follows.
+using PEGASUS. Consider that each edge of the tree has a
+                                                                                1) The distance between each data point and centroid is
+binary variable associated to it. The value of the binary zi,j is
+                                                                                computed in a form of matrix D ∈ RN ×K such that
+0 if, on the input vector a ∈ Rd , one should go from the node                                     (t)
+φi to φj , and 1 otherwise. For each leaf node, we write vk to                  D[i, j] = D(xi , cj ) for each i ∈ hN i and j ∈ hKi.
+denote the sum of the binary variables along a path from the                    2) Compute a matrix B ∈ {0, 1}N ×K such that B[i, j] =
+root node to the leaf φN +k . We designate vk as classification                 I(j = argminl D[i, l]). In other words, B[i, j] = 1 means
+predictor as the input is classified in the leaf node φN +k iff.                that the j-th centroid is the closest one of the i-th data point.
+                                                                                                                       (t+1)
+vk = 0. Given the encryption of the input vector, the cloud                     3) Update the j-th centroid as cj            = P 1b̃ [i] X> b̃j ,
+                                                                                                                                           i    j
+
+can compute the binary values {zi,j } using N LUTs. Then                        where b̃j ∈ {0, 1}N is the j-th column of B.
+the cloud aggregates the encrypted binary values along each                        Our objective is to perform the above update procedure on
+path in the tree and it obtains the classification predictors.                  encrypted data points. We assume X is already encoded and
+The cloud then calls N distinct LUTs on the classification                      encrypted using RLWE encryption. The distance matrix D
+predictors, i.e., Tk (x) = Ck · I(x ≤ 0) where Ck > 0 is the                    can be computed easily using the homomorphic operations
+                           P φN +k . Finally, the cloud sends
+class label in the leaf node                                                    of the RLWE encryption. Suppose D is computed as a
+a ciphertext of the sum k Tk (vk ) to the client. The major                     RLWE ciphertext, we first extract the ciphertexts of the
+computation costs on the cloud side is O(2N ) LUTs and                          distances {cti,j ∈ LWEn,q  0
+                                                                                                             (∆D[i, j])}i∈hN i,j∈hKi . Then we
+                                                                                                        s
+about O(dd/nen log q0 ) bits are sent.                                          can compute the min-index among the LWE ciphertexts
+C. Application III: Secure Clustering on Encrypted Data                           ¨ i,0 , · · · , ct
+                                                                                  ct              ¨ i,K−1 ← min-index(cti,0 , · · · , cti,K−1 ). (2)
+   Rao et al. [45] and Cheon et al. [17] have considered                                  ¨ i,j ∈ LWEsn,q0 (∆B[i, j]). Also the reciprocal
+                                                                                That is ct
+a privacy-preserving K-mean clustering using homomorphic                                       P
+encryption and two collusion-free servers. We consider the
+                                                                                of counting      i bj [i] can be computed by feeding the
+                                                                                           ¨
+                                                                                      P
+                                                                                sum       ct
+                                                                                         i i,j  to  the reciprocal look-up table T (x) =
+same K-means algorithm but in a single server setting: data
+                                                                                1/x. Finally, we repack all the computed LWE cipher-
+are encrypted and collected to a server which performs all
+                                                                                texts and obtain RLWE ciphertexts of    the encoded  vectors
+the computation for the clustering. We first introduce the                                                   n,QL0
+                                                                                                                               
+basic K-means algorithm. Then we show how to perform                            and scalars ctj ∈ RLWEs            (Ecd b̃j , ∆ ), and ct0j ∈
+                                                                                       n,Q
+                                                                                RLWEs L0 (d∆/ i b̃0 [i]c) for j ∈ hKi, which are then
+                                                                                                  P
+the K-means clustering on encrypted data using PEGASUS.
+   Given a dataset of X ∈ RN ×d where each row xi is a                          used to update the centroid vectors. We stress that the linear
+data point and given an positive integer K  N , the K-                         transform X> b̃j can be computed using   √ an similar tiling
+means clustering algorithm aims to find out K centroids                         idea in Algorithm 5 which needs O( K + log2 (N/K))
+{cj ∈ Rd }j∈hKi that minimize the total
+                                     P P distances between                      rotations on ciphertexts. Also, the number of clusters K is
+centroids and data points, i.e., min i j D(xi , cj ). We                        commonly a small value, e.g., K < 10. This allows us to
+
+
+                                                                         1066
+
+           Authorized licensed use limited to: IEEE Xplore. Downloaded on April 09,2026 at 20:17:38 UTC from IEEE Xplore. Restrictions apply.
+Table V: Single-threaded micro-benchmarks of PEGASUS.                           Table VI: Benchmarks of some non-polynomial functions on
+` denotes the number of slots or the repacking size. We                         Pegasus. t is the number of LWE ciphertexts. The time for
+compare with the implementation of CHIMERA from [19].                           extraction and repacking were not included.
+                         KS(s → s)     LUT         KS(s → s)                                                   Throughput
+            [19]          4192ms        60s         260ms                                                                            Max-Pooling
+                                                                                  #Threads     sigmoid/ReLU/sqrt/reciprocal
+            Ours          20.14ms      0.93s        1.49ms                                                                          2×2      4×4
+           Speedup         208×        64×           174×                             1                    1.06/s                   0.25/s          0.07/s
+                                                                                      4                     3.95s                   0.91/s          0.26/s
+                                                                                      8                    7.95/s                   1.97/s          0.50/s
+        S2C [32]†                     LT                                             16                    15.34/s                  3.90/s          0.98/s
+                                                        Fmod [33]†
+     log ` = 8, 10, 12         log ` = 8, 10, 12                                     20                    20.77/s                  4.83/s          1.21/s
+
+    0.78s, 1.28s, 2.02s     16.76s, 44.50s, 44.65s           7.06s                                               Latency
+    † The performance of our implementations of [32] and [33].                                           Min-Index                           Sort
+                                                                                  #Threads
+                                                                                               t = 28     t = 27       t = 24       t = 26          t = 25
+                                                                                      1       791.84s     395.39s     43.24s       1380.50s         493.30s
+                                                                                      4       238.73s     124.60s     176.60s      409.09s‡         148.88s
+optimize the complexity of (2) from O(3K) LUTs to O(2K)                               8       118.19s      62.57s      9.72s†      199.82s          73.02s
+LUTs using the same idea in the max-pooling.                                         16       66.15s       36.33s      5.17s       104.33s          38.27s
+                                                                                     20       44.73s       25.26s      5.17s        84.03s          34.10s
+                          VI. E VALUATION                                         † [16] took about 236s (24×). ‡ [25] took about 43 mins (6.3×).
+
+   We now report detailed performance of PEGASUS, in-
+cluding micro-benchmarks of the basic operations and the
+performance of the applications of decision tree and K-                         other words, the LUT evaluation throughput of PEGASUS
+means clustering. We have implemented PEGASUS on top                            is about 1 LUT per second which can be boosted up easily
+of the SEAL library with extra optimizations including a                        using multicores. To compare, we ran some benchmarks on
+faster NTT [46] and a faster () operator using a lazy-                         the same machine using the open-sourced implementation
+reduction. Also, we have implemented the S2C and Fmod                           of CHIMERA from [19]. Basically, we set the dimensions
+functionalities based on [32] and [33, §4], respectively. More                  n and n as same as ours and set other parameters of
+specifically, our implementations of S2C and Fmod require 2                     CHIMERA to match the security level. However, the repack-
+and 9 multiplicative depths, respectively. All experiments are                  ing implementation of CHIMERA is not provided in [19]
+performed on a server with an Intel Xeon Platinum 8269CY                        so we compared the key-switching functions and the LUT
+CPU (20-cores) at 2.50 GHz, compiled with gcc 7.5.0.                            function. Table V shows that our framework is about two
+                                                                                orders of magnitude faster than CHIMERA for these basic
+A. Concrete Parameters                                                          functions. Indeed, we adapt the evaluation key idea from
+   We use L = 16 RNS primes for the ciphertext modulus.                         [43] in Fig. 2. This enables us to use a ternary secret whose
+The first modulus is chosen q0 ≈ 245 and other moduli                           security is more well studied than the binary secret used
+are chosen slightly larger than q0 . A special modulus q 0 ≈                    in CHIMERA. Note that, if we use a binary secret key s as
+260 is used. We set the secret distribution as a hamming                        the CHIMERA does, the performance of our LUT evaluation
+weight distribution over the set of ternary polynomials of                      would be accelerated by 2×.
+coefficients in {0, ±1} subject to the condition that it has
+exactly h = 64 nonzero entries. Each coefficient/entry of                       C. Applications Evaluation
+(R)LWE error is drawn according to the discrete Gaussian                           1) Basic Non-polynomial Functions: We evaluated the
+distribution centered at zero with standard deviation σ.                        non-polynomials functions described in the previous section.
+Table IV illustrates the parameter sets used in our experi-                     We measured the throughput and latency (not including
+ments. For this parameter sets, the repacked ciphertexts from                   the time for encryption) for computing these functions
+Algorithm 6 have L0 = 6 moduli left. This enables us to run                     on encrypted data. We report the performing numbers in
+our secure clustering application without using the CKKS                        Table VI. From this table, we can see that the performance of
+bootstrapping [12] because we need 2 levels for updating                        PEGASUS can be easily accelerated by using more machine
+the centroids, 1 level for computing the distances, and 2                       cores. The acceleration efficiency for small fan-in functions
+more levels for S2C.                                                            e.g., sigmoid and max-pooling was nearly optimal, i.e.,
+                                                                                around 0.95. Also, the latency of PEGASUS for the min-
+B. Micro-benchmarks for PEGASUS                                                 index and sorting function is also superior to the state-of-
+   The single-threaded micro-benchmarks of PEGASUS are                          the-arts. For example, [16] took more than 236s to compute
+given in Table V. We can see that the main-loop (i.e.,                          the max-index of t = 24 encrypted elements using 8 threads,
+Step 4 to Step 6) in Algorithm 6 took about a second. In                        compared to PEGASUS that just took 9.72s. Also, [25] used
+
+
+                                                                         1067
+
+           Authorized licensed use limited to: IEEE Xplore. Downloaded on April 09,2026 at 20:17:38 UTC from IEEE Xplore. Restrictions apply.
+                            101                                                 9.05    13
+                                          1/(1 + e -x)
+                                          tanh(x)
+                                          √ |x|                                         12
+
+
+
+
+                                                                                             LUT Accuracy (bits)
+                                          max(0, x)
+           LUT Time (sec)
+
+
+                                                                    4.09                11
+
+                                                                                        10
+
+                                                     1.96                               9
+
+                                                                                        8
+                                   0.97
+                            100
+                                                                                        7
+                                                                                                                              (a) breast cancer (N = 569)      (b) ionosphere (N = 351)
+                                  12                     13            14          15
+                                                    Lattice Dimension log2(n)
+
+
+Figure 7: Trade-off between LUT accuracy and performance
+in PEGASUS. The LUT Accuracy is given as − log |f (x) −
+Tf (x)| for the function f . We demonstrate
+                                         p four functions
+f (x) = 1+e1−x , f (x) = tanh(x), f (x) = |x|, and f (x) =
+max(0, x) on uniform random messages from x ∈ [−8, 8].
+
+                                                                                                                                 (c) wine (N = 178)           (d) Control charts (N = 600)
+                                                                                                           6
+4 threads and took about 43 minutes to sort t = 2 encrypted                                                               Figure 8: Test accuracy of K-means clustering with a propor-
+integers using the bit-wise HE [48], which is about 6.3×                                                                  tion of closest assignments. The baseline is obtained from
+slower than ours.                                                                                                         the scikit-learn package [44]. All numbers are averaged from
+   The algorithms in PEGASUS do introduce errors to the                                                                   20 runs of 10-fold cross-validation.
+final results, including errors from the (R)LWE encryption,
+key-switching, and LUT. These errors can be controlled
+under a reasonable small value. According to our empiri-                                                                  one LWE ciphertext, leading to much smaller communica-
+cal results, the key-switching introduces small errors of a                                                               tion overhead, i.e., about 1% of that of [51]. The method
+magnitude of 2−14 . Also, the approximation errors of our                                                                 [37] is fast on the cloud side but it sends O(N ) RLWE
+LUT can be within [2−10 , 2−7 ] under the parameters from                                                                 ciphertexts to the client to decryption, which could lead to
+Table IV. We consider such small errors are acceptable for                                                                a large communication overhead and a long decryption time
+many applications such as machine learning and information                                                                when N increases. Also, [37] used 12-bit fixed point values
+retrieval. Indeed, the accuracy of our LUT can be improved                                                                and it might introduce some rounding errors, e.g., about 2%
+by using a larger lattice dimension n at a cost of a longer                                                               accuracy loss observed in our experiments.
+LUT evaluation time (see Fig. 7).                                                                                            3) Secure K-means Clustering: We evaluated our secure
+   2) Private Decision Tree Evaluation: We evaluated our                                                                  K-means algorithm on synthesis data X ∈ RN ×d where
+private decision tree evaluation algorithm on three real                                                                  the values of X were sampled from [−1, 1] uniformly a
+datasets from the UCI repository [23] that is the Iris,                                                                   random. The running time of our algorithm is separated into
+Housing, and Spambase dataset. We trained decision trees                                                                  five sectors and reported in Table VIII. The O(2KN ) LUTs
+on randomly selected 80% of the data points using the                                                                     from the Min-Index sector took about 95% of the compu-
+scikit-learn library [44], and used the remaining 20% for                                                                 tation time, which can be easily accelerated by using more
+testing. We measured the execution time on both sides of                                                                  cores. Also, the running time of arithmetic computation, i.e.,
+the cloud and the client and measured the communication                                                                   computing Euclidean distance (4th column) and updating
+costs counting all the ciphertexts sent by the client and the                                                             cluster centroids (8th column) took just a few seconds. The
+cloud. . The results are given in Table VII. We compare                                                                   repacking sector converts N LWE ciphertexts to RLWE.
+with the previous single-round HE-based methods [37], [51].                                                                  We
+                                                                                                                              √ can see that the running time of repacking grows
+The approach [51] uses the bit-wise TFHE to evaluate the                                                                  in N when N ≤ n, and it stays over 60 seconds for a
+boolean circuit representation of the decision tree on inputs                                                             larger number of data points n < N < n. We emphasize
+of δ = 16-bit integers, which is sufficient precision for                                                                 that our K-means algorithm is faster than the existing HEs-
+the used datasets. That is, [51] did not introduce accuracy                                                               based secure K-means algorithms. For example, [34] used
+loss on the classification. On the contrary, PEGASUS in-                                                                  TFHE for the same K-means clustering problem. However,
+troduced about 3% miss-classification on the used datasets.                                                               the boolean circuit representation of the K-means algorithm
+Also, [51] was about 2× faster than ours, not counting                                                                    could consist of millions of gates which could take a long
+the communication time. Indeed, they needs to exchange                                                                    time to evaluate. To improve the efficiency, [34] suggested
+O(32 · 210 · δ(d + N )) bits of ciphertexts. On the other hand,                                                           to use an approximate comparison by comparing the highest
+for d < n, our method sends only one RLWE ciphertext and                                                                  bits of the encrypted fixed-point values at the cost of intro-
+
+
+                                                                                                                   1068
+
+           Authorized licensed use limited to: IEEE Xplore. Downloaded on April 09,2026 at 20:17:38 UTC from IEEE Xplore. Restrictions apply.
+Table VII: Compare the performance of our private decision tree evaluation algorithm with the existing approaches. N is the
+number of internal nodes in the tree, d is the number of features, and C is the number of classification labels. Computation
+time includes the evaluation time on both sides of the cloud and the client. On the cloud side, 16 threads were used for
+these experiments, following the same settings of [37], [51].
+                 Setting                           Computation                        Communication                            Classification Accuracy
+   Data              N        d    C       [37]        [51]      Ours         [37]         [51]         Ours         [37]       [51]      Ours        On Plaintexts
+    Iris           ≈ 10      4      3     0.59s       0.94s      1.87s     1.65 MB       1.19 MB      16.89 KB     97.37%     95.33%     94.74%          97.37%
+  Housing          ≈ 100     13     2     10.27s      6.30s      10.71s    13.12 MB      6.63 MB      16.89 KB     100.0%     98.12%     98.04%          100.0%
+ Spambase          ≈ 60      57     2     6.88s       3.66s      6.75s     11.54 MB      7.36 MB      16.89 KB     87.86%     87.06%     85.03%          87.86%
+
+
+Table VIII: Running time of one update of our privacy-preserving clustering algorithm where N and K is the number of
+data points and the number of clusters, respectively. Dimension d = 16 and 20 threads were used.
+
+   Setting          Closest Assign Ratio ρ                                    Break-down Running Time (for n = 212 )†
+  N       K              n = 212 (213 )           Distance    Extract     Min-Index & Recip.      Repacking    Centroid       Total       [34, §6]‡      Speedup
+             2        82.03%(92.97%)               1.56s      1.83s             51.53s                           0.35s      1.35min      19.81min          14×
+  256        4        83.59%(97.27%)               2.69s      2.60s            107.78s             25.93s        0.50s      2.33min      39.61min          17×
+             8        86.72%(94.92%)               3.11s      4.36s            211.31s                           0.87s      4.09min      79.23min          19×
+             2        79.88%(95.41%)               1.58s      5.33s            109.27s                           0.33s      3.66min      79.23min          21×
+ 1024        4        86.13%(95.80%)               2.79s      8.95s            387.08s             55.22s        0.45s      7.57min      158.45min         21×
+             8        86.52%(95.31%)               3.10s      16.31s           844.58s                           0.97s      15.34min     316.89min         20×
+             2        82.10%(94.65%)               1.61s      17.78s          756.33s                            0.32s      13.95min    316.89min          22×
+ 4096        4        86.33%(96.00%)               2.73s      32.48s          1500.37s             60.69s        0.45s      26.61min    633.79min          23×
+             8        88.79%(96.14%)               3.03s      57.04s          3000.85s                           1.04s      52.04min    1267.58min         24×
+ † For n = 213 , the runtime of the Min-Index sector (i.e,. 6th column) was increased by about 2× and other sectors were almost unchanged.
+ ‡ By estimation using the provided runtimes per update, per centroid, per data point, per CPU in [34, § 6].
+
+
+
+
+ducing about 5% misclassification rate (cf. Fig 6 of [34]).                             effectively perform both polynomial functions and non-
+Nevertheless, their optimized method could take up to 20×                               polynomial functions on encrypted data. The main technical
+longer time than ours.                                                                  contribution is two-fold. We propose a new FHEW →
+   Our algorithm introduces approximation errors during the                             CKKS conversion algorithm achieving better performance
+computation. A data point could be assigned to a “wrong”                                and a significantly smaller key compared to the prior work
+centroid particularly when two centroids are both close to                              of CHIMERA [7]. Also, we extend the prior approach for
+that data point. In the 3rd column of Table VIII, we counted                            homomorphic look-up table evaluation [43] to accept a
+the percentage of data points that were properly assigned to                            wide range of input. Finally, we showed that PEGASUS
+the closest centroid. We observed that about ρ ≈ 82% of the                             can be applied to many real-life applications, including
+data points were assigned to the closest centroid when using                            the private decision tree evaluation on an encrypted query,
+the parameter n = 212 . This proportion ρ can be improved                               and secure outsourced K-means clustering on an encrypted
+to about 95% by using a larger n = 213 at the cost of                                   dataset. We consider that PEGASUS is practical for a wide
+increasing the time of the Min-Index sector by about 2×.                                range of privacy-preserving scenarios, especially for cloud-
+   To study the effects of ρ on the classification accuracy of                          based applications. One of our future work is to improve
+the K-means, we simulated on four real datasets from [23].                              the performance of PEGASUS using hard-wares such as
+In brief, in each centroid update, we randomly chose a                                  GPGPU and FPGA.
+proportion of 1 − ρ of the training points and independently
+assign them to a randomly chosen centroid, excluding the                                                       ACKNOWLEDGMENT
+closest one. From the simulation results shown in Fig 8, the                               The authors would like to thank the anonymous reviewers
+classification accuracy of K-means seems quite robust. The                              of this paper for their insightful comments. The authors
+accuracy did not drop much (within 4% when ρ ≥ 0.8)                                     would also like to thank Hao Chen, Ph.D. from Facebook
+compared to the baseline in which all data points were                                  for helpful discussions on CHIMERA and TFHE.
+assigned to the closest centroid.
+                                                                                                                   R EFERENCES
+                            VII. C ONCLUSION
+                                                                                         [1] M. R. Albrecht, R. Player, and S. Scott, “On the concrete
+  In conclusion, this work presents PEGASUS, a highly                                        hardness of learning with errors,” J. Mathematical Cryptol-
+optimized framework that allows us to efficiently and                                        ogy, vol. 9, no. 3, pp. 169–203, 2015.
+
+
+
+                                                                                 1069
+
+                 Authorized licensed use limited to: IEEE Xplore. Downloaded on April 09,2026 at 20:17:38 UTC from IEEE Xplore. Restrictions apply.
+ [2] K. E. Batcher, “Sorting networks and their applications,” in                    numbers,” in ASIACRYPT 2019, Kobe, Japan, December 8-
+     American Federation of Information Processing Societies:                        12, 2019, pp. 415–445.
+     AFIPS Conference Proceedings: 1968 Spring Joint Computer                   [17] J. H. Cheon, D. Kim, and J. H. Park, “Towards a practical
+     Conference, Atlantic City, USA, 30 April - 2 May 1968, pp.                      clustering analysis over encrypted data,” IACR Cryptol. ePrint
+     307–314.                                                                        Arch., vol. 2019, p. 465, 2019.
+ [3] J. W. Bos, K. E. Lauter, and M. Naehrig, “Private predictive               [18] I. Chillotti, N. Gama, M. Georgieva, and M. Izabachène,
+     analysis on encrypted medical data,” J. Biomed. Informatics,                    “TFHE: fast fully homomorphic encryption over the torus,”
+     vol. 50, pp. 234–243, 2014.                                                     J. Cryptology, vol. 33, no. 1, pp. 34–91, 2020.
+ [4] J. Bossuat, C. Mouchet, J. R. Troncoso-Pastoriza, and
+                                                                                [19] “CHIMERA                                      Implementation,”
+     J. Hubaux, “Efficient bootstrapping for approximate homo-
+                                                                                     https://github.com/DPPH/chimera-iDash2018, 2020, team
+     morphic encryption with non-sparse keys,” IACR Cryptol.
+                                                                                     CEA-EPFL-Inpher: code for the iDash 2018 competition.
+     ePrint Arch., vol. 2020, p. 1203, 2020.
+ [5] R. Bost, R. A. Popa, S. Tu, and S. Goldwasser, “Machine                    [20] A. Costache and N. P. Smart, “Which ring based somewhat
+     learning classification over encrypted data,” in 22nd Annual                    homomorphic encryption scheme is best?” in Topics in Cryp-
+     Network and Distributed System Security Symposium, NDSS                         tology - CT-RSA 2016 - The Cryptographers’ Track at the
+     2015, San Diego, USA, February 8-11, 2015.                                      RSA Conference 2016, San Francisco, USA, February 29 -
+                                                                                     March 4, 2016, Proceedings, pp. 325–340.
+ [6] C. Boura, N. Gama, M. Georgieva, and D. Jetchev, “Simulat-
+     ing homomorphic evaluation of deep learning predictions,” in               [21] R. Dathathri, B. Kostova, O. Saarikivi, W. Dai, K. Laine,
+     Cyber Security Cryptography and Machine Learning - Third                        and M. Musuvathi, “EVA: an encrypted vector arithmetic
+     International Symposium, CSCML 2019, Beer-Sheva, Israel,                        language and compiler for efficient homomorphic computa-
+     June 27-28, 2019, Proceedings, pp. 212–230.                                     tion,” in Proceedings of the 41st ACM SIGPLAN International
+ [7] ——, “Chimera: Combining ring-lwe-based fully homomor-                           Conference on Programming Language Design and Imple-
+     phic encryption schemes,” Journal of Mathematical Cryptol-                      mentation, PLDI 2020, London, UK, June 15-20, 2020, pp.
+     ogy, vol. 14, no. 1, pp. 316 – 338, 2020.                                       546–561.
+ [8] Z. Brakerski, C. Gentry, and V. Vaikuntanathan, “(Leveled)                 [22] R. Dathathri, O. Saarikivi, H. Chen, K. Laine, K. E. Lauter,
+     fully homomorphic encryption without bootstrapping,” in In-                     S. Maleki, M. Musuvathi, and T. Mytkowicz, “CHET: an
+     novations in Theoretical Computer Science 2012, Cambridge,                      optimizing compiler for fully-homomorphic neural-network
+     USA, January 8-10, 2012, pp. 309–325.                                           inferencing,” in Proceedings of the 40th ACM SIGPLAN
+                                                                                     Conference on Programming Language Design and Imple-
+ [9] H. Chen, I. Chillotti, and Y. Song, “Improved bootstrapping
+                                                                                     mentation, PLDI 2019, Phoenix, USA, June 22-26, 2019, pp.
+     for approximate homomorphic encryption,” in Advances in
+                                                                                     142–156.
+     Cryptology - EUROCRYPT 2019 - 38th Annual International
+     Conference on the Theory and Applications of Cryptographic                 [23] D. Dua and C. Graff, “UCI machine learning repository,”
+     Techniques, Darmstadt, Germany, May 19-23, 2019, Proceed-                       2017. [Online]. Available: http://archive.ics.uci.edu/ml
+     ings, Part II, pp. 34–54.                                                  [24] L. Ducas and D. Micciancio, “FHEW: bootstrapping homo-
+[10] H. Chen, W. Dai, M. Kim, and Y. Song, “Efficient multi-key                      morphic encryption in less than a second,” in EUROCRYPT
+     homomorphic encryption with packed ciphertexts with appli-                      2015, Sofia, Bulgaria, April 26-30, 2015, pp. 617–640.
+     cation to oblivious neural network inference,” in Proceedings              [25] N. Emmadi, P. Gauravaram, H. Narumanchi, and H. Syed,
+     of the 2019 ACM SIGSAC Conference on Computer and                               “Updates on sorting of fully homomorphic encrypted data,” in
+     Communications Security, CCS 2019, London, UK, November                         2015 International Conference on Cloud Computing Research
+     11-15, 2019, pp. 395–412.                                                       and Innovation, ICCCRI 2015, Singapore, October 26-27,
+[11] ——, “Efficient homomorphic conversion between (ring)                            2015, pp. 19–24.
+     LWE ciphertexts,” IACR Cryptol. ePrint Arch., vol. 2020,                   [26] J. Fan and F. Vercauteren, “Somewhat practical fully homo-
+     p. 15, 2020.                                                                    morphic encryption,” IACR Cryptol. ePrint Arch., vol. 2012,
+[12] J. H. Cheon, K. Han, A. Kim, M. Kim, and Y. Song,                               p. 144, 2012.
+     “Bootstrapping for approximate homomorphic encryption,” in
+                                                                                [27] C. Gentry, S. Halevi, and N. P. Smart, “Homomorphic evalu-
+     Advances in Cryptology - EUROCRYPT 2018 - 37th Annual
+                                                                                     ation of the AES circuit,” in CRYPTO 2012, Santa Barbara,
+     International Conference on the Theory and Applications of
+                                                                                     USA, August 19-23, 2012., pp. 850–867.
+     Cryptographic Techniques, Tel Aviv, Israel, April 29 - May 3,
+     2018 Proceedings, Part I, pp. 360–384.                                     [28] C. Gentry, A. Sahai, and B. Waters, “Homomorphic en-
+[13] J. H. Cheon, S. Hong, and D. Kim, “Remark on the security                       cryption from learning with errors: conceptually-simpler,
+     of ckks scheme in practice,” IACR Cryptol. ePrint Arch., vol.                   asymptotically-faster, attribute-based,” in CRYPTO 2013,
+     2020, p. 1581, 2020.                                                            Santa Barbara, USA, August 18-22, 2013., pp. 75–92.
+[14] J. H. Cheon, A. Kim, M. Kim, and Y. S. Song, “Homomor-                     [29] R. Gilad-Bachrach, N. Dowlin, K. Laine, K. E. Lauter,
+     phic encryption for arithmetic of approximate numbers,” in                      M. Naehrig, and J. Wernsing, “CryptoNets: Applying neural
+     ASIACRYPT 2017, Hong Kong, China, December 3-7, 2017,                           networks to encrypted data with high throughput and accu-
+     pp. 409–437.                                                                    racy,” in ICML 2016, New York City, USA, June 19-24, 2016,
+[15] J. H. Cheon, D. Kim, and D. Kim, “Efficient homomor-                            pp. 201–210.
+     phic comparison methods with optimal complexity,” in ASI-                  [30] S. Halevi and V. Shoup, “Algorithms in HElib,” in Advances
+     ACRYPT 2020, Daejeon, South Korea, December 7-11, 2020,                         in Cryptology - CRYPTO 2014 - 34th Annual Cryptology
+     pp. 221–256.                                                                    Conference, Santa Barbara, USA, August 17-21, 2014, Pro-
+[16] J. H. Cheon, D. Kim, D. Kim, H. Lee, and K. Lee, “Numer-                        ceedings, Part I, pp. 554–571.
+     ical method for comparison on homomorphically encrypted                    [31] ——, “Faster homomorphic linear transformations in HElib,”
+
+
+
+                                                                         1070
+
+           Authorized licensed use limited to: IEEE Xplore. Downloaded on April 09,2026 at 20:17:38 UTC from IEEE Xplore. Restrictions apply.
+     in CRYPTO 2018, Santa Barbara, USA, August 19-23, 2018,                     [47] “Microsoft             SEAL            (release           3.5),”
+     pp. 93–120.                                                                      https://github.com/Microsoft/SEAL, Apr. 2020, microsoft
+[32] K. Han, M. Hhan, and J. H. Cheon, “Improved homomorphic                          Research, Redmond, WA.
+     discrete fourier transforms and FHE bootstrapping,” IEEE                    [48] N. P. Smart and F. Vercauteren, “Fully homomorphic encryp-
+     Access, vol. 7, pp. 57 361–57 370, 2019.                                         tion with relatively small key and ciphertext sizes,” in Public
+[33] K. Han and D. Ki, “Better bootstrapping for approximate                          Key Cryptography 2010, Paris, France, May 26-28, 2010., pp.
+     homomorphic encryption,” in Topics in Cryptology - CT-RSA                        420–443.
+     2020 - The Cryptographers’ Track at the RSA Conference                      [49] ——, “Fully homomorphic SIMD operations,” Des. Codes
+     2020, San Francisco, USA, February 24-28, 2020, Proceed-                         Cryptogr., vol. 71, no. 1, pp. 57–81, 2014.
+     ings, pp. 364–390.                                                          [50] R. K. H. Tai, J. P. K. Ma, Y. Zhao, and S. S. M. Chow,
+[34] A. Jäschke and F. Armknecht, “Unsupervised machine learn-                       “Privacy-preserving decision trees evaluation via linear func-
+     ing on encrypted data,” in Selected Areas in Cryptography                        tions,” in ESORICS 2017, Oslo, Norway, September 11-15,
+     2018, Calgary, Canada, August 15-17, 2018, Revised Selected                      2017, pp. 494–512.
+     Papers, pp. 453–478.                                                        [51] A. Tueno, Y. Boev, and F. Kerschbaum, “Non-interactive
+[35] Jianchao Yang, Kai Yu, Yihong Gong, and T. Huang, “Linear                        private decision tree evaluation,” in DBSec 2020, Regensburg,
+     spatial pyramid matching using sparse coding for image                           Germany, June 25-26, 2020, pp. 174–194.
+     classification,” in 2009 IEEE Conference on Computer Vision
+     and Pattern Recognition, 2009, pp. 1794–1801.                                                               A PPENDIX
+[36] W. jie Lu, S. Kawasaki, and J. Sakuma, “Using fully ho-
+     momorphic encryption for statistical analysis of categorical,               A. Operations of the RNS Variant of the CKKS Scheme
+     ordinal and numerical data,” in 24th Annual Network and                       We give the details of the CKKS operations used in
+     Distributed System Security Symposium, NDSS 2017, San
+     Diego, USA, February 26 - March 1, 2017.
+                                                                                 PEGASUS.
+[37] W. jie Lu, J. Zhou, and J. Sakuma, “Non-interactive and                       • Setup. Dimension n is a 2-power value. L > 0 distinct
+                                                                                                                          Qi
+     output expressive private comparison from homomorphic                       primes q0 , q1 , · · · , qL−1 . Let Qi = k=0 qi for all i ∈ hLi.
+     encryption,” in AsiaCCS 2018, Incheon, Republic of Korea,                   The error distribution χerr is defined as the centered dis-
+     June 04-08, 2018, pp. 67–74.                                                crete normal distribution of standard deviation σckks > 0.
+[38] C. Juvekar, V. Vaikuntanathan, and A. Chandrakasan,                         The encryption distribution χenc is defined as the uniform
+     “GAZELLE: A low latency framework for secure neural                         distribution over {0, ±1}n .
+     network inference,” in USENIX Security 2018, Baltimore,                                                                                  n
+                                                                                   • KeyGen. Sample the secret key s from {0, ±1} . Set
+     USA, August 15-17, 2018, pp. 1651–1669.                                                                      n,QL−1
+[39] M. Kim, Y. Song, S. Wang, Y. Xia, and X. Jiang, “Secure
+                                                                                 the public key pk ∈ RLWEs               (0), i.e., a RLWE sample
+     logistic regression based on homomorphic encryption,” IACR                  of zero.
+     Cryptol. ePrint Arch., vol. 2018, p. 74, 2018.                                • Encryption. On a plaintext m̂ ∈ Rn,QL−1 , computes
+
+[40] Á. Kiss, M. Naderpour, J. Liu, N. Asokan, and T. Schneider,                ct = (m̂ + ê, 0) + û · pk ∈ RLWEn,Q      s
+                                                                                                                                L−1
+                                                                                                                                     (m̂), where the
+     “Sok: Modular and efficient private decision tree evaluation,”              coefficients of ê ∈ Rn,QL−1 are sampled from χerr and û ∈
+     PoPETs, vol. 2019, no. 2, pp. 187–208.                                      Rn,QL−1 are sampled from χenc .
+[41] B. Li and D. Micciancio, “On the security of homomorphic                      • Extended Encryption. On a plaintext m̂ ∈ Rn,QL−1 ,
+     encryption on approximate numbers,” IACR Cryptol. ePrint                    and a gadget g ∈ Zd , compute a set of RLWE samples
+     Arch., vol. 2020, p. 1533, 2020.
+                                                                                                                                n,QL−1
+[42] C. A. Melchor, J. Barrier, L. Fousse, and M. Killijian, “XPIR
+     : Private information retrieval for everyone,” PoPETs, vol.
+                                                                                               (c0 , · · · , cd−1 ) ∈ RLWE
+                                                                                                                      ^s                 (m̂; g)
+     2016, no. 2, pp. 155–174.
+                                                                                 where ci ∈ RLWEn,Q     s
+                                                                                                           L−1
+                                                                                                                  (g[i] · m̂) for i ∈ hdi.
+[43] D. Micciancio and Y. Polyakov, “Bootstrapping in FHEW-                                                                                                   2
+                                                                                   • Decryption. On the ciphertext ct = (c0 , c1 ) ∈ Rn,Q
+     like cryptosystems,” IACR Cryptol. ePrint Arch., vol. 2020,                                                                                                l
+
+     p. 86, 2020.                                                                for any l ∈ hLi, compute and output c0 + c1 · s ∈ Rn,Ql .
+                                                                                                                                                       n,Q
+                                                                                   • Addition. On the ciphertexts (c0 , c1 ) ∈ RLWEs l (m̂)
+[44] F. Pedregosa, G. Varoquaux, A. Gramfort, V. Michel,                                 0    0              n,Ql       0
+     B. Thirion, O. Grisel, M. Blondel, P. Prettenhofer, R. Weiss,               and (c0 , c1 ) ∈ RLWEs (m̂ ) for any l ∈ hLi, compute
+     V. Dubourg, J. Vanderplas, A. Passos, D. Cournapeau,                        (c0 + c00 , c1 + c01 ) ∈ RLWEn,Q    s
+                                                                                                                          l
+                                                                                                                            (m̂ + m̂0 ).
+     M. Brucher, M. Perrot, and E. Duchesnay, “Scikit-learn:                       • Multiplication.        On the ciphertexts (c0 , c1 )                       ∈
+     Machine learning in Python,” Journal of Machine Learning                    RLWEn,Q     l
+                                                                                                (m̂) and  (c 0
+                                                                                                               , c 0
+                                                                                                                     ) ∈    RLWE   n,Ql
+                                                                                                                                         ( m̂ 0
+                                                                                                                                                ) and   a  relin-
+                                                                                         s                   0 1                   s
+     Research, vol. 12, pp. 2825–2830, 2011.                                                                             n,Ql
+                                                                                 earization key RelK ∈ RLWE      ^ s (s2 ; g), for any l ∈ hLi,
+[45] F. Rao, B. K. Samanthula, E. Bertino, X. Yi, and D. Liu,
+     “Privacy-preserving and outsourced multi-user k-means clus-                 first compute c̃0 = c0 ·c00 , c̃1 = c0 ·c01 +c1 ·c00 and c̃2 = c1 ·c01 .
+     tering,” in Conference on Collaboration and Internet Comput-                Then output (c̃0 , c̃1 ) + c̃2  RelK ∈ RLWEn,Q         s
+                                                                                                                                               l
+                                                                                                                                                 (m̂ · m̂0 ).
+     ing 2015, Hangzhou, China, October 27-30, 2015, pp. 80–89.                    • Rotation.         On        the        ciphertext       (c0 , c1 )         ∈
+[46] M. Scott, “A note on the implementation of the number                       RLWEn,Q s
+                                                                                             l
+                                                                                                (Ecd (m))      and     a     rotation     key      RotK   k     ∈
+     theoretic transform,” in Cryptography and Coding - 16th                             n,Ql
+     IMA International Conference, IMACC 2017, Oxford, UK,                        ^ s (φk (s); g), for any l ∈ hLi, compute
+                                                                                 RLWE
+     December 12-14, 2017, Proceedings, pp. 247–258.                             (φk (c0 ), 0) + c1  RotKk ∈ RLWEn,Q               s
+                                                                                                                                         l
+                                                                                                                                           (Ecd (m ≪ k)).
+
+
+                                                                          1071
+
+            Authorized licensed use limited to: IEEE Xplore. Downloaded on April 09,2026 at 20:17:38 UTC from IEEE Xplore. Restrictions apply.
+The automorphism function φk : Rn → Rn is defined by                                3) Suppose s[j] = −1 then ã[j]s[j] = −ã[j]. We note
+         k
+X 7→ X 5 .                                                                       that EKj,0 is GSW encryption of 0 and EKj,1 is a GSW
+  • Operator (). On any ring element r̂ ∈ Rn,Ql , and                           encryption of 1 in this case.
+                                                    n,Ql
+the ciphertext ct = (c0 , · · · , cd−1 ) ∈ RLWE
+                                              ^ s (m̂; g),
+                                                                                       ACj+1 = ((X −ã[j] − 1) · tj )               RGSWs (1) + tj
+to perform thePoperation r̂  ct, first decompose
+                                                Pd−1 the ring                                          −ã[j]              −ã[j]
+                    d−1
+element r̂ = j=0 g[j]r̂j . Then compute i=0 r̂j · cj ∈                                           =X             · tj = X            · ACj .
+RLWEn,Q
+      s
+          l
+            (r̂ · m̂).                                                              So it is proved  that, for any j ∈ hni, we have ACj ∈
+                                                       n,Q
+  • Rescale. On the ciphertext (c0 , c1 ) ∈ RLWEs l (m̂),
+                                                                                                  P
+            0        −1                                                          RLWEs (fˆ · X b̃+ l∈hji ã[j]s[j] mod n ). In other words, after
+compute cb = ql · (cb − cb mod ql ) mod Ql−1 for b ∈                                                                                >
+                                                                                 the iterative updates, ACn ∈ RLWEs (fˆ · X b̃+ã s mod n ).
+{0, 1} and output (c00 , c01 ) ∈ RLWEsn,Ql−1 (dm̂/ql c).
+                                                                                    To prove the second part, we argue that
+  In addition to the CKKS operations, we need some
+operations from the GSW encryption. The GSW encryption                                 b + a> s = d∆mc + q0 i.e., decryption function
+RGSW(·; g) is defined as a tuple of RLWE
+                                    ^ ciphertexts                                                              2n
+                                                                                     ⇒ b̃ + ã> s = δ + 2n = d (d∆mc)c + 2n
+                                                                                                             q0
+                          n,q            n,q
+       n,q
+RGSWs (m̂; g) = RLWEs (m̂; g), RLWEs (ŝ · m̂; g) .
+                     ^               ^                                                                                              >
+                                                                                 where  ∈ N. In other words, X b̃+ã s mod n = X δ mod n .
+                                                                                 Also it is required that |∆m| < q/4. Thus we have δ ∈
+  The        operation multiples a RLWE ciphertext with a                        Z ∩ [−n/2, n/2), which means that
+GSW ciphertext. Specifically, given (b̂, â) ∈ RLWEn,q      s (m̂0 )
+and (β̂, α̂) ∈ RGSWn,q
+                                                                                                         (
+                        s ( m̂ 1 ), one   computes (b̂, â)   (β̂, α̂)                        δ mod n      −X n−|δ| for δ ≤ 0
+as b̂  β̂ + â  α̂ ∈ RLWEn,q   ( m̂  · m̂   ).                                            X         =                        .
+                             s       0      1                                                              X δ for δ > 0
+                                                                                                                            >
+B. Proofs                                                                          Then the 0-th coefficient of fˆ · X b̃+ã s mod n is
+  The proofs in this section show the correctness of pro-                           (
+posed building blocks.                                                                f|δ| X |δ| · −X n−|δ| = d∆T (−η|δ| )c for δ ≤ 0
+                                                                                                                                                     .
+  We first prove the correctness of Theorem 1.                                        −fn−δ X n−δ · X δ = d∆T (ηδ )c for δ > 0
+      Proof: (Theorem 1) Our proof consists of two parts.                        By definition
+First, we will prove the following invariant:
+                                                                                                           2n
+                                         P
+                                                                                                                d
+                                                                                                              d∆mccq0
+          ACj ∈ RLWEs (fˆ · X b̃+             l∈hji ã[l]s[l] mod n   )                                    q0
+                                                                                                      ηδ =            ≈m
+                                                                                                              2n∆
+for each j ∈ hni and any ternary key s ∈ {0, ±1}n . Then
+we prove that the 0-th coefficient of the decryption of ACn is                   (resp. η|δ| ≈ |m|), we have T (ηδ ) ≈ T (m) (resp.
+(approximately) the evaluation of the look up table at point                     T (−η|δ| ) ≈ T (m) for m ≤ 0). In other words, the 0-th
+m, i.e., ∆T (m).                                                                 coefficient of the decryption of ACn is approximately the
+   We prove the first part using mathematical induction.                         evaluation of T (x) at point m.
+In the beginning, by definition, AC0 is a trivial RLWE                              Then we show the correctness of Theorem 2.
+                                                                                      Proof: (Theorem 2) After Step 2, ct     ˜ encrypts some
+ciphertext of fˆ · X b̃ , which follows the invariant. Let us                                   n
+assume ACj follows the invariant for any 0 < j < n.                              vectors u ∈ R which consists of products of {m̃j } and z.
+Since the key s is ternary, we now prove for each case,                          Indeed, for any c ∈ hn̈/ñi and r ∈ hñi, we have
+i.e., k j ∈ {0, 1, −1}, ACj+1 also follows the invariant.                                         X
+                                                                                    u[cñ + r] =      m̃j [cñ + r]z[j + cñ + r]
+   1) Suppose s[j] = 0 then ã[j]s[j] = 0. We note that EKj,0
+                                                                                                    j∈hñi
+and EKj,1 are both GSW encryption of 1 in this case.                                                X
+                                                                                                =            M[cñ + r, j + cñ + r]z[j + cñ + r].
+    ACj+1 = ((X −ã[j] − 1) · tj )             RGSWs (1) + tj                                       j∈hñi
+
+             = X −ã[j] · tj = X −ã[j] · X ã[j] · ACj = ACj .                  We omit the modulo in the subscripts    to lighten the notation.
+                                                                                                                  P
+                                                                                    If n = ñ then u[cñ + r] = j M[cn + r, j + r]z[j + r],
+  2) Suppose s[j] = 1 then ã[j]s[j] = ã[j]. We note that                       that is the cn+r-th element of the product Mz. Since cn+r
+EKj,0 is a GSW encryption of 1 and EKj,1 is a GSW                                loops over h`i, u = Mz in this case.
+encryption of 0 in this case.                                                       To simplify the second part of our proof (i.e., ` = ñ), we
+       ACj+1 = ((X −ã[j] − 1) · tj )             RGSWs (0) + tj                 first define Mc ∈ R`×` as a column-block matrix of M such
+                            ã[j]
+                                                                                 that Mc [i, j] = M[i, c` + j] for i, j ∈ h`i, and write
+                                                                                                                                      P zc =
+               = tj = X             · ACj .                                      z[c` : c` + `]. By this definition, we have Mz = c Mc zc .
+
+
+                                                                          1072
+
+            Authorized licensed use limited to: IEEE Xplore. Downloaded on April 09,2026 at 20:17:38 UTC from IEEE Xplore. Restrictions apply.
+Input: A LWE ciphertext (b, a) ∈ LWEn,q
+                                      s (m). The
+                                                                                             respectively. Then the variance of the coefficients of the sum
+                              ^ ciphertexts, that is
+LWE switching key is a set of RLWE                                                           â+b̂ is σa2 +σb2 , and that of the product â·b̂ is nσa2 σb2 . Remind
+                                                                                           that, PEGASUS uses the digit decomposition gadget gdigit
+                SwKj ∈ RLWE
+                       ^s
+                                   n,q
+                                         
+                                             X
+                                                              l
+                                                     s[jn + l]X ; g
+                                                                                             for the key-switching function, and uses RNS gadget grns
+                                             l∈hni                                           in the LUT evaluation function.
+                                                                                                1) Key-Switching: We can view the switching key
+for j ∈ hn/ni.                                                                               SwKs→s as a (n/n) × dks matrix over RLWEn,q                  0
+                                                                                                                                                            (·). The
+                                                                                                                                                       s
+Output: A LWE ciphertext ctout ∈ LWEn,q
+                                    s (·).                                                                                                     k
+                                                                                             (j, k) entry of this matrix decrypts to Bks ŝj + êj,k where
+  1: Define a set of polynomials {âj }j where âj = a[jn]−                                                                                                  2
+      Pn−1                                                                                   the variance of the coefficients of the poly êj,k is σks          . The
+                       n−l                                                                   multiplications () in Step 2 of Algorithm
+         l=1 a[jn + l]X    for j ∈ hn/ni.                                                                                                         9 will  introduce
+               ˜                             2
+                                                                                                                                    P
+                                                                                                                                      j,k âj,k · êj,k where the
+                     P
+  2: Compute ct =     j∈hn/ni âj  SwKj ∈ Rn,q .                                            the extra error in the form of
+                            0 ˜                                                              coefficients of âj,k is bounded by Bks due to the digit
+  3: Output (b, 0) + Extract (ct) as ctout .
+                                                                                             decomposition gadget. By viewing the coefficients of âj,k
+                                                                                                                                                               2
+Figure 9: Key-Switch PEGASUS.KS (modified from [11])                                         as a uniform random over [0, Bks ), its variance is Bks             /12.
+                                                                                                                                                    1          2 2
+                                                                                             As a result, the variance of the extra error is 12        ndks Bks   σks .
+                                                                                                2) Look-up Table Evaluation: Suppose the input LWE
+Next, we view u as a column-major matrix U ∈ R(n/`)×`                                        ciphertext of the LUT evaluation decrypts to b + a> s mod
+such that U[r, c] = u[c` + r]. Since ` = ñ, we have                                         q0 = ∆m + e0 for some error term e0 whose variance
+                  X                                                                          is σ02 . Our LUT evaluation outputs a LWE ciphertext
+       U[r, c] =      M[r, j + c` + r]z[j + c` + r],
+                                                                                             that decrypts to ∆T (m + e1 ) + e2 . We now analyze the
+                     j∈h`i
+                                                                                             variances of these errors. By scaling down from [0, q0 )
+which equals to (Mc zc )[r]. In other words, the c-th column                                 to [0, 2n), in Step 2 of Algorithm 2, we obtain b̃ =
+of U is the product vector Mc zc . Then to obtain Mz, we                                     d(2nb)/q0 c and ã[i] = d(2na[i])/q0 c for i ∈ hni. Let
+the need to sum the columns of U, which is done in Step 7.                                   define idx = b̃ + ã> s mod 2n. According to the central
+   Finally, Rescale(·, ∆r ) + Ecd (t, ∆0r ) gives the result, i.e.,                          limit heuristic [24], idx = d(2n∆m)/q0 c + e with the
+RLWEs (Ecd (Mz + t, ∆0r )).                                                                  error variance of ((2nσ0 )/q0 )2 + (ksk2 +1)/12. The value
+   For the sake of completeness, we present the our key-                                     idx serves as a look-up index to select the coefficient
+switching algorithm in Fig. 9. We now show the correctness                                   of fˆ, i.e., ∆T (q0 /(2∆n) · idx) which can be viewed as
+of our key-switching in Algorithm 9.                                                         ∆T (m+e0 +erd ) with the rounding error erd and an error e0
+   Theorem 3: On the input ciphertext LWEn,q     s (m), Fig. 9                               of a variance (σ0 /∆)2 +q02 (ksk2 +1)/(48n2 ∆2 ). By viewing
+outputs a LWE ciphertext ctout ∈ LWEsn,q (m) when n is a                                     the message m as a uniform random over [−q0 /4∆, q0 /4∆),
+2-power value.                                                                               the variance of erd can be given as q02 /(48n2 ∆2 ). As a
+     Proof: (Theorem 3) It suffices to show that the 0-th                                    result, the variance of e1 = e0 + erd can be given as
+coefficient of the decryption of ct˜ is the inner product of a
+and s.                                                                                       (σ0 /∆)2 + q02 (ksk2 +2)/(48n2 ∆2 ). Moreover, the error e2
+                       n−1
+                                                                                             is accumulated from the 2n multiplications ( ). According
+                                                                                             to the analysis of special prime technique from [10], the
+       X                X                                             X
+˜ ∈
+ct          (a[jn] −          a[jn + l]X n−l )  RLWE
+                                                 ^ s(                     s[jn + l]X l )
+      j∈hn/ni           l=1                                       l∈hni                      variance of e2 can be given as 4nq0 σlut    2
+                                                                                                                                             /q 0 .
+                                                                 
+                                                                                                Suppose T (·) is a L-Lipschitz function. Then the differ-
+                                                                                             ence between the ground truth T (m) and the approximated
+       X                   X
+  ∈             RLWEs             a[jn + l]s[jn + l] + r̂j  ∵ X n = −1
+      j∈hn/ni              l∈hni                                                             result T (m + e1 ) + e2 /∆ can be bounded as
+                                                                                               q                                     q                 
+                                                                                             6 · L (σ0 /∆)2 + q02 (ksk2 +2)/(48n2 ∆2 ) + 4nq0 σlut
+                                                                                                                                               2
+                                                                                                                                                   /q 0 /∆
+                   X       X
+  ∈ RLWEs                         a[jn + l]s[jn + l] + r̂j 
+                 j∈hn/ni l∈hni
+                                                                                                                                                                 (3)
+  ∈ RLWEs a> s + r̂ ,
+                                                                                              with high probability.
+ where {r̂j }j and r̂ are polynomials that do not contain the
+constant term. Then Extract0 (ct)
+                               ˜ + (b, 0) gives a valid LWE
+                >
+encryption of a s + b ≈ m under the target key s.
+C. Error Analysis
+   Our analysis follows the widely used heuristic assumption
+that the coefficients of each polynomial behave like indepen-
+dent zero-mean random variables of the same variance [20],
+and central limit heuristic [24]. On the polynomials â, b̂ ∈
+Rn whose variances of the coefficients are σa2 and σb2 ,
+
+
+                                                                                      1073
+
+            Authorized licensed use limited to: IEEE Xplore. Downloaded on April 09,2026 at 20:17:38 UTC from IEEE Xplore. Restrictions apply.
+

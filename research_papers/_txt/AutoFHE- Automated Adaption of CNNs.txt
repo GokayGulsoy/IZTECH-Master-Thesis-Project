@@ -1,0 +1,1448 @@
+AutoFHE: Automated Adaption of CNNs
+   for Efficient Evaluation over FHE
+Wei Ao and Vishnu Naresh Boddeti, Michigan State University
+ https://www.usenix.org/conference/usenixsecurity24/presentation/ao
+
+
+
+
+This paper is included in the Proceedings of the
+       33rd USENIX Security Symposium.
+          August 14–16, 2024 • Philadelphia, PA, USA
+                         978-1-939133-44-1
+
+
+
+
+                                Open access to the Proceedings of the
+                                  33rd USENIX Security Symposium
+                                      is sponsored by USENIX.
+     AutoFHE: Automated Adaption of CNNs for Efficient Evaluation over FHE
+
+                                             Wei Ao        Vishnu Naresh Boddeti
+                                                Computer Science and Engineering
+                                                   Michigan State University
+                                                     {aowei, vishnu}@msu.edu
+
+
+
+
+                          Abstract                                    AutoFHE
+                                                                                                                                      Solution 3 Cloud Server
+
+
+
+
+                                                                                                                     Accuracy
+                                                                                                          Higher the Better
+                                                                                                                                   Solution 2
+Secure inference of deep convolutional neural networks
+(CNNs) under RNS-CKKS involves polynomial approxima-                 Non-Arithmetic       Polynomial                            Solution 1
+                                                                       Neural Net         Neural Nets
+tion of unsupported non-linear activation functions. However,                                                                           Latency
+                                                                                                                                Lower the Better
+existing approaches have three main limitations: 1) Inflexibil-                                                                                    Alice
+                                                                                         Public Key
+ity: The polynomial approximation and associated homomor-           Private Data
+phic evaluation architecture are customized manually for each                            Encryption                                 Computer
+CNN architecture and do not generalize to other networks.                    Plaintext                Ciphertext                                   Ciphertext
+                                                                                         Decryption                                  Network
+2) Suboptimal Approximation: Each activation function is               Bob
+approximated instead of the function represented by the CNN.                             Secret Key
+3) Restricted Design: Either high-degree or low-degree poly-        Figure 1: AutoFHE can automatically adapt the standard CNN
+nomial approximations are used. The former retains high ac-         with non-linear activations into a set of polynomial CNNs that
+curacy but slows down inference due to bootstrapping opera-         span the trade-off between accuracy and latency for ciphertext
+tions, while the latter accelerates ciphertext inference but com-   inference. AutoFHE solutions can be deployed on the Cloud
+promises accuracy. To address these limitations, we present         server to satisfy a range of customer requirements.
+AutoFHE, which automatically adapts standard CNNs for se-
+cure inference under RNS-CKKS. The key idea is to adopt lay-
+erwise mixed-degree polynomial activation functions, which          (GCP), and Microsoft Azure. Its growth has been driven
+are optimized jointly with the homomorphic evaluation archi-        by the widespread success of deep learning on many tasks
+tecture in terms of the placement of bootstrapping operations.      like vision [15, 24], language [14, 56], games [49, 51], sci-
+The problem is modeled within a multi-objective optimization        ence [17, 28], and many more. Figure 1 shows a typical
+framework to maximize accuracy and minimize the number of           MLaaS scenario. The Cloud (Alice) holds deep learning mod-
+bootstrapping operations. AutoFHE can be applied flexibly on        els, while the customer (Bob) has private data and requests
+any CNN architecture, and it provides diverse solutions that        service from Alice. Bob wants to protect his private data
+span the trade-off between accuracy and latency. Experimen-         and does not want Alice to learn sensitive information. On
+tal evaluation over RNS-CKKS encrypted CIFAR datasets               the other hand, deep learning models, including neural archi-
+shows that AutoFHE accelerates secure inference by 1.32×            tectures and trained weights, are properties of Alice. Alice
+to 1.8× compared to methods employing high-degree poly-             spends considerable efforts to design neural architectures, like
+nomials. It also improves accuracy by up to 2.56% compared          ResNets [24], ViT [15], and MLP-Mixer [55] and consumes
+to methods using low-degree polynomials. Lastly, AutoFHE            huge computational resources to search for novel neural ar-
+accelerates inference and improves accuracy by 103× and             chitectures [39, 60] or train network weights [22, 57].
+3.46%, respectively, compared to CNNs under TFHE.
+                                                                    Homomorphic Encryption (HE): Secure inference of
+                                                                    deep learning models under leveled homomorphic encryp-
+1   Introduction                                                    tion (LHE) [6, 20, 41] or fully homomorphic encryption
+                                                                    (FHE) [18, 33, 34] is a promising approach for resolving secu-
+MLaaS, machine learning as a service, is a rapidly grow-            rity concerns between Bob and Alice in the context of MLaaS.
+ing market with many commercial offerings like Ama-                 FHE enables us to evaluate a circuit with arbitrary depth,
+zon Web Services (AWS), Google Google Cloud Platform                including modern deep CNNs [33]. Figure 1 shows secure
+
+
+
+USENIX Association                                                                         33rd USENIX Security Symposium                                  2173
+inference of CNNs under FHE. First, Bob generates a public        composite Minimax polynomial, and α quantifies approxima-
+key to encrypt his private data and sends Alice the ciphertext.   tion precision, i.e., |pα (x)−sgn(x)| ≤ 2−α . Given x ∈ [−B, B],
+Second, Alice applies neural networks to process the cipher-      the scaled AppReLU is defined as B · AppReLU(x/B), with
+text input, yielding an encrypted result. Finally, Bob uses the   a precision of B · 2−α . However, high-degree polynomials
+secret key to decrypt the encrypted result. Under FHE, Bob        consume many multiplicative levels and require numerous
+cannot learn Alice’s neural architectures and weights, while      bootstrapping operations, leading to a high computational
+Alice is also not exposed to Bob’s data or the outcome.           burden. MPCNN [33], the state-of-the-art approach for se-
+Polynomial CNNs: Non-arithmetic activation functions, such        cure inference of CNNs under RNS-CKKS, adopts Minimax
+as ReLU(x) = max(x, 0), are a core component of modern            composite polynomials with a precision of α = 13. By choos-
+CNNs, aiding in learning non-linear decision boundaries be-       ing to approximate each ReLU function with high precision,
+tween classes. For example, residual networks (ResNets) [24]      MPCNN results in prediction accuracy that is comparable to
+are composed of Conv-BN-ReLU triplets [24]. Since FHE             ReLU networks. However, the same high-degree AppReLU
+only supports multiplications and additions, ReLU must be         replaces all ReLUs and consumes ∼ 50% levels. The cipher-
+replaced by polynomial approximations to evaluate CNNs            text quickly exhausts levels and uses bootstrapping to refresh
+under FHE. Existing methods to generate polynomial CNNs           the zero-level ciphertext before every AppReLU layer (refer to
+fall into two categories; manual design of low-degree and         Figure 2). As such, the homomorphic evaluation architecture
+high-degree polynomial approximations.                            needs to be customized for each CNN architecture. Moreover,
+    (1) A number of approaches adopt low-degree (typically        bootstrapping operations consume > 70% of inference time
+≤ 3) polynomials [6, 12, 20, 41, 42, 45, 46] to substitute non-   (refer to Table 5) and result in prohibitively high latency.
+arithmetic activation functions and train the resultant poly-     Motivation: We propose AutoFHE to address the above-
+nomial neural networks from scratch. For instance, Cryp-          mentioned limitations of existing methods for secure infer-
+toNets [20], LoLa [6] and Delphi [45] employ a simple             ence of CNNs. It is based on layerwise mixed-degree poly-
+quadratic activation function x2 . Faster CryptoNets [12]         nomials and a hybrid of approximation and training methods.
+exploit more accurate low-degree approximation 2−3 x2 +           The goal is to Automatically generate polynomial CNNs and
+2−1 x + 2−2 . SAFENet [42] adopts a1 x3 + a2 x2 + a3 x + a4       associated homomorphic evaluation architecture spanning a
+or b1 x2 + b2 x + b3 and HEMET [41] uses ax2 + bx + c. Af-        trade-off front of accuracy and latency under FHE.
+ter low-degree polynomials are plugged into networks like            (1) L AYERWISE M IXED -D EGREE P OLYNOMIALS : A plau-
+ResNets both network weights and polynomial coefficients are      sible solution to decrease the computational burden of secure
+trained from scratch using stochastic gradient descent (SGD).     inference is to assign layerwise mixed-degree polynomials to
+However, polynomial layers often lead to unstable training        different ReLUs across a network based on the observation
+since they may dramatically amplify activations during for-       that different layers in a network have varying degree of sen-
+ward propagation and gradients during backward propaga-           sitivity to approximation errors. SAFENet [42] demonstrated
+tion. For example, gradient explosion was observed in prior       that mixed-degree polynomials can exploit layerwise sensi-
+works [42, 45]. As such, low-degree approaches suffer from a      tivity. However, current mixed-degree search frameworks are
+dilemma. On the one hand, since low-degree polynomials can-       limited in two aspects. i) small search space: e.g. SAFENet
+not precisely approximate ReLU, polynomial networks have          only provides two polynomials, degree 2 and degree 3. The
+to be trained from scratch and suffer from poor prediction ac-    small search space cannot include all possible solutions from
+curacy. On the other hand, using a higher degree polynomial       low-degree to high-degree polynomials. ii) scalarization of
+approximation of ReLU leads to training instability due to        multiple objectives: a weighted sum is used to balance mul-
+exploding gradients. In either case, low-degree approaches        tiple objectives [42, 45]. However, this approach requires a
+achieve lower accuracy than ReLU networks, e.g. on CIFAR-         pre-defined preference to weigh the different objectives. So,
+10 HEMET [41] and SAFENet [42] report 83.7% and 88.9%             they cannot generate diverse solutions to meet different re-
+Top-1 accuracy, respectively. To mitigate gradient explosion,     quirements in a single optimization run.
+AESPA [46] normalized the outputs of each polynomial basis           (2) H YBRID OF A PPROXIMATION AND T RAINING : Pre-
+separately, leading to improved predictive accuracy.              cisely approximating ReLU allows MPCNN to achieve the
+    (2) A few approaches use high-degree polynomials to ap-       state-of-the-art ciphertext inference accuracy. Low-degree
+proximate ReLU precisely. So, high-degree approaches do not       approaches train polynomial CNNs from scratch to compen-
+need to train polynomial networks from scratch and can in-        sate for loss in accuracy. We posit that by taking advantage
+herit weights from pretrained ReLU networks. One representa-      of approximation and training, we can inherit weights from
+tive polynomial approximation of ReLU is Minimax compos-          ReLU networks and fine-tune polynomial networks to adapt
+ite polynomials [32, 36]. By expressing ReLU as ReLU(x) =         learnable weights to layerwise mixed-degree polynomials. In
+x · (0.5 + 0.5 · sgn(x)), a composite polynomial is used to ap-   principle, such a design can allow for high ciphertext infer-
+proximate sgn(x). The approximation of ReLU is defined as         ence accuracy while reducing latency.
+AppReLU(x) = x·(0.5+0.5· pα (x)), x ∈ [−1, 1]. pα (x) is the         However, realizing the above goals presents multiple chal-
+
+
+
+2174   33rd USENIX Security Symposium                                                                      USENIX Association
+lenges. The design space, which includes layerwise mixed-           speeds up inference by 1 . 1 × ∼ 1 . 4 × while increasing accu-
+degree polynomials and the associated homomorphic eval-             racy by + 0 . 3 6 % ∼ 0 . 7 5 % on CIFAR100. Compared to low-
+uation architectures in terms of placement of bootstrapping         degree AESPA [46], AutoFHE improves ciphertext accuracy
+operations, is prohibitively large for effective manual design.     by + 2 . 5 6 % and + 2 . 4 4 % based on ResNet32 and ResNet44
+Therefore, in this paper, we advocate for automated optimiza-       backbones on CIFAR10 with similar latency. Furthermore,
+tion of the joint polynomial and homomorphic architecture.          we compare the accuracy-latency trade-off of networks across
+Contributions: We outline our contributions from two per-           two FHE schemes, namely RNS-CKKS and TFHE. Specif-
+spectives, design and system.                                       ically, we compare AutoFHE networks designed for RNS-
+  From a design perspective, our contributions are,                 CKKS with REDsec [18], which is designed for TFHE. We
+                                                                    observe that AutoFHE improves accuracy by + 1 0 . 0 6 % and
+1. F LEXIBILITY: We jointly search for polynomial approxi-          + 3 . 4 6 % compared to REDsec BNetS and BNet, respectively,
+   mation and a compatible homomorphic evaluation archi-            while simultaneously reducing the corresponding latency by
+   tecture (placement of bootstrapping operations) so we can        2 4 × and 1 0 3 × , respectively.
+   automatically adapt any convolutional neural networks for
+                                                                    Code: https://github.com/human-analysis/AutoFHE.
+   secure evaluation over FHE.
+2. O PTIMAL A PPROXIMATION : We approximate the end-to-
+   end function represented by the CNN instead of a stan-
+                                                                    2    Preliminaries
+   dalone non-linear activation function. This allows us to
+                                                                    RNS-CKKS: The full residue number system (RNS) vari-
+   exploit the varying sensitivity of different layers to approx-
+                                                                    ant of Cheon-Kim-Kim-Song (RNS-CKKS) [8, 10] is a lev-
+   imation error, and obtain polynomial approximations with
+                                                                    eled homomorphic encryption (LHE) scheme for approximate
+   high accuracy and efficient evaluation over FHE.
+                                                                    arithmetic. Under RNS-CKKS, a ciphertext c ∈ RQ2ℓ satis-
+3. S EAMLESS D ESIGN : We allow for layerwise mixed-                fies the decryption circuit [⟨cc, sk⟩]Qℓ = m + e, where ⟨·, ·⟩ is
+   degree polynomials, which enables us to find a range of          the dot product and [·]Q is the modular reduction function.
+   models that span the accuracy and latency trade-off.             RQℓ = ZQℓ [X]/(X N + 1) is the residue cyclotomic polyno-
+                                                                    mial ring. The modulus is Qℓ = ∏ℓi=0 qℓ , where 0 ≤ ℓ ≤ L. ℓ
+  From a system perspective, our contributions are,                 is a non-negative integer, referred to as level, which denotes
+1. S EARCH S PACE : We design search space to include all           the capacity of homomorphic multiplications. sk is the se-
+   possible low-degree and high-degree polynomials to en-           cret key with Hamming weight h. m is the original plaintext
+   able us to discover better solutions.                            message, and e is a small error that provides security. A ci-
+                                                                    phertext has N/2 slots to accommodate N/2 complex or real
+2. S EARCH O BJECTIVE : We formulate the search problem as          numbers. RNS-CKKS supports homomorphic addition and
+   a multi-objective optimization. We automatically generate        multiplication:
+   diverse polynomial networks spanning the trade-off front
+   between accuracy and latency in a single optimization run.         Decrypt(cc ⊕ c ′ ) = Decrypt(cc) + Decrypt(cc′ ) ≈ m + m′
+                                                                                                                                (1)
+3. S EARCH A LGORITHMS : We propose combining search                  Decrypt(cc ⊗ c ′ ) = Decrypt(cc) × Decrypt(cc′ ) ≈ m × m′
+   and training algorithms to search over large search spaces
+   efficiently, optimize coefficients of arbitrary polynomi-        Bootstrapping: LHE only allows a finite number of homo-
+   als, and fine-tune layerwise mixed-degree polynomial net-        morphic multiplications, with each multiplication consuming
+   works. Specifically, we propose:                                 one level due to rescaling. Once a ciphertext’s level reaches
+                                                                    zero, a bootstrapping operation is required to refresh it to a
+   • MOS, a multi-objective search algorithm to search for          higher level and allow more multiplications. The number of
+     solutions within a large search space.                         levels needed to evaluate a circuit is known as its depth. RNS-
+   • R-CCDE, a gradient-free search algorithm to optimize           CKKS with bootstrapping [7] is an FHE scheme that can
+     coefficients of composite polynomials.                         evaluate circuits of arbitrary depth. It enables us to homomor-
+   • PAT, a fine-tuning algorithm that adapts network weights       phically evaluate deep CNNs on encrypted data. Conceptu-
+     to polynomial activations.                                     ally, bootstrapping homomorphically evaluates the decryption
+                                                                    circuit and raises the modulus from Q0 to QL by using the
+Experimental Results on encrypted CIFAR datasets show               isomorphism Rq0 ∼    = Rq0 × Rq1 × · · · × RqL [4]. Practically,
+that AutoFHE has a better trade-off of accuracy and latency         bootstrapping [7] homomorphically evaluates modular reduc-
+compared to high-degree and low-degree approaches under             tion [·]Q by first approximating it by a scaled sine function,
+RNS-CKKS. Compared to high-degree MPCNN [33], Aut-                  which is further approximated through polynomials [7, 35].
+oFHE accelerates inference by 1 . 3 2 × ∼ 1 . 8 × while improv-     Bootstrapping [4] has four stages: ModRaise, CoeffToSlot,
+ing accuracy by + 0 . 0 8% ∼ 0 . 3% on CIFAR10. AutoFHE             EvalMod, and SlotToCoeff. Bootstrapping incurs a lot of
+
+
+
+USENIX Association                                                                     33rd USENIX Security Symposium          2175
+key switching operations (KSO), which are the most time-                         where F (x) is a composite polynomial with K sub-
+consuming operation on the RNS-CKKS scheme [33]. The                                             d
+                                                                                 polynomials fk k with degree dk and seeks to approximate
+refreshed ciphertext has level ℓ = L − K, where K levels are                     0.5 · sgn(x) for d > 2.
+consumed by bootstrapping [4] for polynomial approximation
+of modular reduction.                                                                  F (x) = ( fKdK ◦ · · · ◦ fkdk ◦ · · · ◦ f1d1 )(x), 1 ≤ k ≤ K   (3)
+Threat Model: In this paper, we assume the same
+                                                                                     The total degree of F (x) is ∏Kk=1 dk , and consequently the
+threat model as prior works under HE, like HEMET [41],
+                                                                                 degree of EvoReLU is d = ∏Kk=1 dk + 1. For d > 2 the multi-
+MPCNN [33], REDsec [18]. As discussed in the MLaaS sce-
+                                                                                 plicative depth of EvoReLU is 1 + ∑Kk=1 ⌈log2 (dk + 1)⌉ when
+nario, a customer uploads encrypted data to a Cloud server
+                                                                                 using the Baby-Step Giant-Step (BSGS) algorithm [4, 35] to
+and requests ML services. The Cloud uses neural networks
+                                                                                 evaluate composite polynomial F (x). For d = 1 and d = 2,
+to process the ciphertext without decryption and send back
+                                                                                 the multiplicative depth is 0 and 2, respectively.
+an encrypted result. Only the customer holds the secret key
+                                                                                     EvoReLU is modeled to allow for automatic discovery
+and can decrypt the encrypted result. The Cloud cannot learn
+                                                                                 of common solutions in the literature for improving the la-
+sensitive information from the customer’s data and the re-
+                                                                                 tency of inference on ciphertexts. For instance, for d = 1,
+sult. The customer is also not exposed to the Cloud’s neural
+                                                                                 EvoReLU(x) = x is equivalent to removing the correspond-
+networks, including architectures and weights.
+                                                                                 ing ReLU layer through pruning [27, 42, 45]. Similarly, for
+                                                                                 d = 2, EvoReLU(x) = α2 x2 + α1 x + α0 is equivalent to using
+3     AutoFHE                                                                    low-degree approximations of ReLU through quadratic func-
+                                                                                 tions [6, 12, 20, 41, 42, 45]. Finally, for d > 2, EvoReLU(x) =
+Given a neural network g(aa, ω 0 (aa)) with architecture a                       x · (F (x) + 0.5) is equivalent to high-degree polynomial ap-
+and pretrained1 weights ω 0 (aa) and M ReLU layers, Aut-                         proximations [32, 33] of ReLU. In this case, EvoReLU bears
+oFHE generates polynomial networks on a trade-off front by                       similarity to the Minimax composite polynomial in Lee et
+maximizing accuracy and minimizing latency. For a given                          al. [33, 36]. However, the objective for optimizing the coeffi-
+architecture a during the search, every solution is represented                  cients differs significantly. While Lee et al. [33, 36] seek to
+by a triplet of variables S (aa) = (D D(aa), Λ(aa), ω(aa)). We will              approximate a single ReLU function precisely, our goal is to
+drop the architecture from hereon for ease of notation. D is
+                        a                                                        jointly optimize all EvoReLU functions in a neural network
+the degree vector of all EvoReLU layers, Λ is the coefficients                   a to approximate its corresponding function g(aa, ω ).
+of all EvoReLU layers, and ω are the trainable weights of                            For the quadratic version of EvoReLU, we allow the coeffi-
+the neural network which are initialized with ω0 and fine-                       cients α0 , α1 , and α2 to differ channel-wise when fine-tuning
+tuned for adaptation to the layerwise mix-degree polynomials.                    polynomial CNNs. Such a design improves performance and
+We will assign each solution with the minimization objective                     makes optimizing model weights ω more stable. For this
+o (SS ) = {1 − Acc(SS ), Boot(SS )}. 1 − Acc(SS ) is the validation              case, we also introduce a BatchNorm layer after the quadratic
+error, and Boot(SS ) is the number of bootstrapping operations.                  EvoReLU for recentering and reshaping the distribution of
+Note that the accuracy and the number of bootstrapping opera-                    output activations. We can integrate the BatchNorm param-
+tions depend on all the variables S . For instance, appropriately                eters into the polynomial coefficients. So, there is no extra
+adapting the network weights ω could allow us to use lower-                      consumption of multiplicative levels.
+degree polynomial approximations of the activation functions,                        We represent the composite polynomial F (x) by its degree
+which reduces the required number of bootstrapping calls.                                                                                d
+                                                                                 vector d = {dk }Kk=1 , dk ∈ N. Each sub-polynomial fk k (x) as a
+    AutoFHE is a search-based approach which comprises of                        linear combination of Chebyshev polynomials of degree dk ,
+three main components: search space (Section 3.1), search
+objective (Section 3.2) and search algorithm (Section 3.3).                                              d           1 dk
+We describe each of these in detail next.                                                              fk k (x) =       ∑ αi Ti (x)                   (4)
+                                                                                                                     βk i=1
+
+3.1      Search Space                                                            where αi ∈ R and βk ∈ R. Ti (x) is the Chebyshev basis of
+                                                                                 the first kind, αi are the coefficients for linear combination,
+EvoReLU is a genetic polynomial function used to replace                         and scaling parameter βk is a parameter to scale the output.
+the non-arithmetic ReLU function. We model it as follows,                                                    dk
+                                                                                 The coefficients α k = {αi }i=1 control the polynomial’s shape,
+                                                                                while βk controls its amplitude. A composite polynomial with
+                       x,
+                                            d=1                                 the degree vector d has learnable parameters:
+    y = EvoReLU(x) = α2 x2 + α1 x + α0 , d = 2         (2)
+                                                                                              λ = {α
+                                                                                                   α1 , β1 , · · · , α k , βk , · · · , α K , βK }    (5)
+                       
+                         x · (F (x) + 0.5) , d > 2
+                       
+
+    1 In our paper, pretrained neural networks especially refer to neural net-     A neural network with M ReLU activations needs M
+works with ReLU activation.                                                      EvoReLU polynomial activations. D = {dd 1 , d 2 , · · · , d M } is
+
+
+
+2176      33rd USENIX Security Symposium                                                                                             USENIX Association
+ResNet    Conv   BN             ReLU           Conv   BN              ReLU
+                                                                                                                                                       ×𝐵!"           Conv    BN
+                                                                                                                                           degree 1
+MPCNN     Conv   BN       Boot         AppReLU        Conv   BN       Boot       AppReLU                                                                              Boot
+                                                                                                                             1
+                                                                                                                        ×
+AESPA     Conv          HerPN           Conv                  HerPN    Boot
+                                                                                                                            𝐵!"
+                                                                                                                                                                     Conv     BN
+
+                                         ×2                                                                                                degree 2
+                                                                                                                                                            1
+AutoFHE                                                                                                                                                ×              Boot
+          Conv   BN              EvoReLU              Conv   BN               EvoReLU                                                                      𝐵#$%
+
+                                                                                                                                   1
+                 Boot                                                                                                        ×                         ×𝐵!"          Conv     BN
+                                                                                                                                  𝐵!"
+                                                                                                      Conv    BN                          degree > 2
+                                                                                                                                                           𝐵!"       Boot
+                                                                                                                                                       ×
+Figure 2: Homomorphic evaluation architectures for Resid-                                                          1                                       𝐵#$%
+                                                                                                              ×
+                                                                                                                  𝐵!"
+ual Networks (ResNets). 1st row: standard Conv-BN-ReLU                                                                                                     ×𝐵!"
+                                                                                                                                           degree 1                  Conv     BN
+triplet [24]. 2nd row: MPCNN [33] which uses high-degree
+polynomials. 3rd row: AESPA [46] which uses low-degree
+                                                                                                                             ×𝐵!"
+polynomials. 4th row: The proposed AutoFHE, which uses                                                       Boot                          degree 2                   Conv    BN
+
+layerwise mixed-degree polynomials. Dashed rectangles in-
+                                                                                                                                                           ×𝐵!"
+dicate the plausible locations where bootstrapping can be                                                                                 degree > 2                  Conv    BN
+
+placed. Both EvoReLU and the placement of bootstrapping
+operations are searched.                                                                   Figure 3: Scaling in AutoFHE. Color Key: integrate scaling
+                                                                                           into previous operation; integrate scaling into next operation.
+
+the degree vector of all EvoReLUs and the corresponding                                                    Variable                                               Option
+coefficient parameters are Λ = {λ
+                                λ1 , λ 2 , · · · , λ M }.
+                                                                                                           # polynomials (K)                                      6
+Homomorphic Evaluation Architecture refers to the place-                                                   poly degree (dk )                               {0, 1, 3, 5, 7}
+ment of ConvBN, polynomial, and bootstrapping. In MPCNN,                                                   coefficients (Λ
+                                                                                                                         Λ)                                      R
+AppReLU depth is 14, ConvBN depth is 2, and the remain-
+ing levels after bootstrapping are L − K = 16. So, bootstrap-                                         Table 1: Search variables and options.
+ping is placed after every AppReLU and ConvBN (Figure 2).
+AESPA [46] uses degree 2 Hermite polynomial (HerPN) with
+depth 2 to replace ReLU and Batchnorm. Therefore, every                                    placed before EvoReLU and after EvoReLU. So, we need to
+4 Conv-HerPN should be followed by one bootstrapping op-                                   estimate domain [−Bin , Bin ] and range [−Bout , Bout ] of each
+eration (Figure 2). In AutoFHE, EvoReLU is layerwise and                                   EvoReLU on the training dataset. Figure 3 shows possible
+mixed-degree. The multiplicative depth of EvoReLU varies                                   scaling scenarios in AutoFHE. We can integrate scaling into
+layer by layer. AutoFHE introduces a flexible evaluation ar-                               the previous or next operation. Specifically, we can multi-
+chitecture where bootstrapping can be called after ConvBN                                  ply convolutional weight, batch norm weight and bias, and
+or EvoReLU (Figure 2). The flexible evaluation architecture                                polynomial coefficients by the scaling constant. The scaling
+of AutoFHE can better fit layerwise mix-degree EvoReLU.                                    operation is conducted in plaintext and will not introduce ei-
+                                                                                           ther extra level consumption. With the scaling EvoReLU can
+Linear Scaling: Since the domain of Chebyshev polynomials                                  now be expressed as,
+and bootstrapping is [−1, 1], we need to scale the ciphertext                                                     
+to [−1, 1] before Chebyshev polynomials and bootstrapping                                                         x,
+                                                                                                                                           d=1
+and reverse it after Chebyshev polynomials and bootstrapping.                                     EvoReLU(x) = α2 x2 + α1 x + α0 ,          d=2         (6)
+To avoid consuming levels, scaling is integrated into other                                                       
+                                                                                                                    x · (F (x/B) + 0.5) , d > 2
+                                                                                                                  
+operations. In MPCNN, the polynomial neural network with
+AppReLU can be roughly regarded as piece-wise linear due
+                                                                                           Search Space: Our search space includes the number of sub-
+to high precision approximation of high-degree AppReLU.
+                                                                                           polynomials (K) in our composite polynomial, the choice of
+MPCNN estimates domain of AppReLU using the training
+                                                                                           degrees for each sub-polynomial (dk ), and the coefficients of
+dataset and uses the maximum number of all AppReLU do-
+mains to scale down input images by ×1/B and scale up
+ciphertext in the fully connected layer by ×B. In AESPA,                                        Backbone      #ReLUs                    Dimension of D              Search Space Size
+HerPN uses degree 2 Hermite polynomial and does not need                                        ResNet20            19                         114                           1080
+to scale input of HerPN. However, the input of bootstrap-                                       ResNet32            31                         186                           10130
+ping should be scaled to [−1, 1]. The domain [−B, B] of each                                    ResNet44            43                         258                           10180
+bootstrapping can be estimated on the training dataset, then                                    VGG11               10                         60                            1042
+integrate ×1/B into the previous HerPN and integrate ×B
+into the next Conv layer. In AutoFHE, bootstrapping can be                                  Table 2: Search space of AutoFHE for ResNet and VGG.
+
+
+
+USENIX Association                                                                                                  33rd USENIX Security Symposium                                      2177
+the polynomials Λ . Table 1 shows each variable’s options.                  The training loss Ltrain used to optimize the weight ω is
+Note that choice dk = 0 corresponds to an identity place-                (1 − τ)LCE + τLKL , where LCE is the cross-entropy loss and
+holder, so theoretically, the composite polynomial may have              LKL is the Kullback–Leibler (KL) divergence loss. τ is a pre-
+fewer than K sub-polynomials. Furthermore, when the degree               defined parameter to balance CE and KL loss. In Equation 7,
+       d      dk−1
+of (pk k ◦ pk−1    )(x) is less than or equal to 31 (maximum de-         we omit the variable of Ltrain . Given EvoReLU (D D, Λ ), the
+gree of a polynomial supported on RNS-CKKS [32, 36]), we                 variable is weight ω . The KL loss computes the distance
+merge the two sub-polynomials into a single sub-polynomial               between distributions of logits of the polynomial network
+  d     dk−1                                                             and the ReLU network. We introduce the KL loss because it
+pk k (pk−1   )(x) with degree dk · dk−1 ≤ 31 before computing
+its depth. This helps reduce the size of the search space and            can push the output of the polynomial network close to the
+leads to smoother exploration. Table 2 lists the number of               ReLU network. It can be regarded as knowledge distillation
+ReLUs of our backbone models and the corresponding dimen-                (KD) [25]. We transfer knowledge from the ReLU network to
+sion and size of search space for D . Searching for layerwise            polynomial networks.
+EvoReLU is a challenging high-dimensional optimization
+problem within a vast search space.                                      3.3     Search Algorithms
+                                                                         3.3.1    Multi-Objective Search
+3.2    Search Objective
+                                                                         Multi-Objective Optimization: Given two solutions with
+AutoFHE formulates the search problem as a multi-objective               minimization objectives o 1 , o 2 ∈ Rd , we want to minimize
+optimization                                                             all items of o 1 and o 2 . If o 1,i ≤ o 2,i , ∀i ∈ {1, 2, · · · , d} and
+                                                                         o 1, j < o 2, j , ∃ j ∈ {1, 2, · · · , d}, o 1 dominates o 2 [13, 52]. It
+       min                    ω∗ | D , Λ (D
+              {1 − Accval (g (ω           D))) , Boot(D
+                                                      D)}
+        D                                                                means o 1 is better than o 2 . It is denoted as o 1 ≺ o 2 . A set of
+       s.t. ω ∗ = arg min Ltrain (g (ω
+                                     ω | D , Λ (D
+                                                D)))              (7)    solutions O = {ooi }Ni=1 can be grouped into sub-sets, {ooi }Ni=1     1
+                                                                                                                                                  ,
+                                                                                N2
+                        ω                                                {ooi }i=1 , · · · , corresponding to the 1st trade-off front, the 2nd
+              Ltrain = (1 − τ)LCE + τLKL                                 trade-off front and so on. Solutions within the same trade-off
+                                                                         front are not dominated by each other. The 1st trade-off front
+where g(ω   ω) is a neural network with M activa-                        dominates the 2nd trade-off front, and so on.
+tion layers and the trainable network weight ω .
+                                                                         MOS: Figure 4 and Algorithm 1 show our Multi-Objective
+The outer multi-objective minimization formulation
+                                                                         Search framework for AutoFHE. MOS is an evolutionary
+minD {1 − Accval (g (ω   ω∗ | D , Λ (DD))) , Boot(DD)} for D is to
+                                                                         search algorithm to solve the multi-objective optimization
+maximize the validation accuracy Accval as well as minimize
+                                                                         in Equation 7. It maintains a population of solutions dis-
+the number of bootstrapping operations. The coefficient
+                                                                         tributed on trade-off fronts of accuracy and the number of
+vector Λ is formulated as a function of D . In Equation 7,
+                                                                         bootstrapping operations. We crossover and mutate solutions
+Accval is the Top-1 accuracy on a validation dataset val, Boot
+                                                                         to improve every generation’s trade-off fronts, as shown in
+is the number of bootstrapping operations. To determine
+                                                                         Figure 4. During the search, we define the population size,
+the number of bootstrapping operations, we count the level
+                                                                         namely the number of solutions, N. These N solutions may
+consumption of all EvoReLU’s to determine where we
+                                                                         be grouped into multiple trade-off fronts, which can improve
+need to call bootstrapping. By minimizing the number of
+                                                                         exploration ability during search. We design operations to
+bootstrapping operations, we search for the placement of
+                                                                         search for layerwise mixed-degree polynomials:
+bootstrapping and minimize the wasted levels. For example,
+consider that we have a ciphertext with a level equal to 2,               ⃝
+                                                                          1 S ELECT: Solutions of the current population are first
+but the next operation consumes 10 levels. We must waste 2                  grouped to different trade-off fronts by non-dominated
+levels and call bootstrapping to refresh the ciphertext first.              sorting [13]. Solutions on the same trade-off front have
+AutoFHE can minimize the wasted levels by adjusting the                     the same fitness. The 1st trade-off front has a higher
+depth of EvoReLU. {D      Di , Λ i } has its corresponding network          fitness than the 2nd trade-off front, and so on. We apply
+weight ω i that can compensate errors introduced by layerwise               the tournament selection [21] to improve the diversity
+EvoReLU {D   Di , Λ i }. We initialize ω i with the weight ω 0 from         of offspring. Specifically, we randomly select three solu-
+the pretrained ReLU network and then fine-tune the network                  tions from the current population and keep the solution
+g(ωωi ) to minimize the training loss Ltrain (ω   ωi ) on the training      with the highest fitness. We choose N ′ solutions from the
+dataset. In summary, the objective in Equation 7 guides the                 current population to build the offspring. In our paper,
+search algorithm to i) explore layerwise EvoReLU, including                 we set N ′ = 6N.
+its degrees and coefficients; 2) discover the placement of
+bootstrapping to work well with layerwise mixed-degree                    ⃝
+                                                                          2 C ROSSOVER enables network-level information ex-
+EvoReLU; 3) trade-off validation accuracy and inference                     change. As shown in Figure 4, we randomly and uni-
+latency to return diverse polynomial networks.                              formly exchange EvoReLU layers between two solutions
+
+
+
+2178    33rd USENIX Security Symposium                                                                                   USENIX Association
+                                  ① Select               ② Crossover               ④ PAT   ⑥ Pareto                          ① Select               ⑤ Mutate                   ③ R-CCDE ⑥ Pareto
+                                                                                                                                                                                ④ PAT
+             Population                      Offspring                 Offspring                               Population               Offspring                  Offspring
+                                                                                                                                 𝑜'(                                                                𝑜&( ′               𝑜'( ′
+
+
+
+
+                                                                                                                                                                               Accuracy
+                                                                                                               𝑜&(                              Increase degree     " #$
+                                                                                                                                                                  𝑓! %                    𝑜$( ′
+
+
+
+
+                                                                                              Accuracy
+Accuracy
+
+
+
+
+                                                                                                                                                                                                                         𝑜'(
+                                                                                                         𝑜$(                      𝑜'                                                                    𝑜&(
+                          𝑜'                                                                                         𝑜&                         "         "
+                                                                                                                                               𝑓! ! ∘ ⋯ 𝑓# " ⋯ ∘ 𝑓$$
+                  𝑜&
+                                                                                                                𝑜$                                                 " %$                           𝑜$(
+             𝑜$                                                                                                                                Decrease degree    𝑓! %
+               #Bootstrapping                                                                                         #Bootstrapping                                                                          #Bootstrapping
+
+
+
+                                                                           Figure 4: Multi-objective search of AutoFHE.
+
+
+     Algorithm 1: MOS                                                                                                     EvoReLU with predefined probabilities.
+      Input :Pretrained Network g(ω     ω0 ), population size N,                                                     ⃝
+                                                                                                                     6 PARETO refers to non-dominated sorting and crowd-
+              offspring size N ′ , number of generations T ,                                                           ing distance sorting [13]. We apply Pareto to select N
+              training dataset Train, mini-validation dataset                                                          solutions from both population and offspring (N + N ′
+              Minival;                                                                                                 solutions) to build a new population (N solutions).
+      Output :Trade-off front {DDi , Λ i , ω i } ⇒ o i , 1 ≤ i ≤ N ;
+           for t ← 1 to T do                                                                                     3.3.2        R-CCDE
+                              ′
+               {DD j , Λ j }Nj=1 ← Select({D
+                                           Di , Λ i , o i }Ni=1 ) ;                                             Coevolution: The composite polynomial used by
+                  ′     ′ N′                                   ′
+               {DD j , Λ j } j=1 ← Crossover({D D j , Λ j }Nj=1 ) ;                                             EvoReLU is: y1 = f1d1 (x|α     α1 , β1 ), · · · , yK = fKdK (yK−1 |α
+                                                                                                                                                                                   αK , βK ).
+                              ′                                    ′
+                  {ωω′j }Nj=1 ← PAT({ω     ω0 ; D ′j , Λ ′j }Nj=1 , Train) ;                                    The forward architecture of the composite polynomial,
+                           ′
+                  {oo′j }Nj=1 ← Eval({D
+                                                                  ′
+                                             D′j , Λ ′j , ω ′j }Nj=1 , Minival) ;                               x 7→ y1 7→ y2 · · · 7→ yK−1 7→ y is suitable for coevolu-
+                  n                   o                                                                         tion [43, 44, 58] and provides a natural decomposition.
+                    D ′j , Λ ′j , ω ′j ⇒ o ′j , 1 ≤ j ≤ N ′ ;                                                   We can sequentially adjust every sub-polynomial to
+                                                                             ′
+                  {ooi }Ni=1 ← Pareto({ooi }Ni=1 ∪ {oo′j }Nj=1 ) ;                                              push the output y close to the target non-arithmetic
+                  {DDi , Λ i , ω i } ⇒ o i , 1 ≤ i ≤ N ;                                                        function. Given the degree d , the learnable parameter
+                                       ′                                                                        of EvoReLU λ = (α             α1 , β1 , · · · , α K , βK ) is grouped into
+                  {DD j , Λ j , ω j }Nj=1 ← Select({D      Di , Λi , ωi , oi }Ni=1 ) ;
+                            ′                           ′
+                                                                                                                {αα1 }, {β1 }, · · · , {α
+                                                                                                                                        αK }, {βK }. The coefficient α controls
+                      ′   N                           N
+                  {DD j } j=1 ← Mutate({D        D j } j=1 ) ;                                                  the shape of the sub-polynomial output, while the scaling
+                              ′                               ′
+                   Λ′j }Nj=1 ← R-CCDE({D
+                  {Λ                      D′j }Nj=1 ) ;                                                         parameter β controls the amplitude. We sequentially update
+                          ′
+                   ω′j }Nj=1 ← PAT({ω
+                  {ω
+                                                         ′
+                                    ω′j ; D ′j , Λ ′j }Nj=1 , Train) ;                                          {ααk } followed by βk , 1 ≤ k ≤ K, since i) sub-polynomials
+                          ′                                            ′                                        close to input will have a larger effect on the output, and ii) it
+                  {oo′j }Nj=1 ← Eval({D      D′j , Λ ′j , ω ′j }Nj=1 , Minival) ;                               is easier to learn coefficients by decoupling the amplitude
+                  n                   o
+                    D ′j , Λ ′j , ω ′j ⇒ o ′j , 1 ≤ j ≤ N ′ ;                                                   from the coefficients.
+                  {ooi }Ni=1 ← Pareto({ooi }Ni=1 ∪ {oo′j }Nj=1 ) ;
+                                                                             ′
+                                                                                                                Differentiable Evolution: The EvoReLU variables {α                  αk }Kk=1
+                                                                                                                          K
+                                                                                                                and {βk }k=1 are in the continuous space. We adopt a simple
+                  {DDi , Λ i , ω i } ⇒ o i , 1 ≤ i ≤ N ;
+                                                                                                                yet effective search algorithm to optimize these variables.
+                                                                                                                Differentiable evolution (DE) [48] only uses the difference
+                                                                                                                between solutions to optimize continuous variables. Given
+             (parents) to generate two new solutions. However, new                                              the following minimization problem in the continuous space
+             solutions cannot inherit weights from parent solutions                                                                           x ∗ = arg min F (xx)                                                        (8)
+             because weights are adapted to the parent’s layerwise                                                                                            x
+             mixed-degree polynomials. So, we initialize weights
+                                                                                                                where x ∈ Rd and F is the minimization objective. DE main-
+             with pretrained weights and then fine-tune new solutions.
+                                                                                                                tains a set of solutions X = {xxi }Ni=1 , x i ∈ Rd . The mutation,
+      ⃝
+      3 R-CCDE optimizes EvoReLU coefficients.                                                                  crossover, and selection of DE are defined as:
+                                                                                                                       Mutation: v = x i + F · (xx j − x k ) , 1 ≤ i, j, k ≤ N
+      ⃝
+      4 PAT fine-tunes new polynomial CNNs.                                                                                              (
+                                                                                                                                            v [t], U (0, 1) ≤ CR
+                                                                                                                      Crossover: u [t] =                                 ,1 ≤ t ≤ d
+      ⃝
+      5 M UTATION is to locally explore EvoReLU. We ran-                                                                                    x i [t], Otherwise                                                            (9)
+        domly increase or decrease the degree to smoothly                                                                              (
+        change polynomials, as shown in Figure 4. We randomly                                                                            u , F (uu) ≤ F (xxi )
+                                                                                                                      Selection: u =
+        increase or decrease the degree of a sub-polynomial of                                                                           xi , Otherwise
+
+
+
+USENIX Association                                                                                                                        33rd USENIX Security Symposium                                              2179
+ Algorithm 2: R-CCDE
+                                                                              d
+   Input :Composite polynomial F (x) = ( fKdK ◦ fk−1                 k−1
+                                                                           ◦ · · · ◦ f1d1 )(x) with parameters λ = {α
+                                                                                                                    α1 , β1 , · · · , α k , βk , · · · α K , βK },
+            target function q(x), number of generations T , scaling decay γ ;
+   Output :Context vector λ ∗ = (α α∗1 , β∗1 , · · · , α ∗k , β∗k , · · · , α ∗K , β∗K );
+              ∗
+            λ ← LHS(∑Kk=1 dk + K)
+   Initial :λ
+   for t ← 1 to T do
+       for k ← 1 to K do
+           α ⋆k ← arg minα k LF ,q (α        αk |λ  λ∗ ) s.t. α k |λλ∗ = (α
+                                                                          α∗1 , β∗1 , · · · , α k , · · · , α ∗K , β∗K );
+             ∗       ∗     ∗             ⋆              ∗     ∗
+           λ ← (α  α1 , β1 , · · · , α k , · · · , α K , βK );
+           β⋆k ← arg minβk LF ,q (βk |λ           λ∗ ) + γ · βk 2 s.t. βk |λ
+                                                                           λ∗ = (α    α∗1 , β∗1 , · · · , βk , · · · , α ∗K , β∗K );
+           λ ∗ ← (αα∗1 , β∗1 , · · · , β⋆k , · · · , α ∗K , β∗K );
+
+
+
+where F ∈ R is the scaling factor, CR ∈ R is the crossover rate,                               Then, we evaluate the candidate solution αk by evaluat-
+and U (0, 1) is the uniform distribution between 0 and 1. Equa-                                ing LF ,q (αα∗1 , β∗1 , · · · , αk , · · · , α∗K , β∗K ). We adopt DE to solve
+tion 9 shows a simple strategy to update solutions by only                                     the single-objective optimization problem in the continuous
+using difference. First, mutation updates xi with the scaled                                   space. We maintain a set of candidate solutions of αk , namely
+difference F · (xx j − xk ). Then, we randomly select items from                               X = {xxi }Ni=1 , xi ∈ Rdk . Mutation, crossover, and selection de-
+v or xi to generate a new solution u. Finally, we evaluate F (uu)                              fined in Equation 9 are applied to update solutions in X . Then,
+and use u to replace x i if F (uu) ≤ F (xxi ). DE only uses differ-                            the best solution in X is assigned to α ⋆k . We use α ⋆k to replace
+ence and does not suffer from gradient exploding. It maintains                                 α ∗k in the context vector λ ∗ to update λ ∗
+a set of solutions and is not sensitive to initialization.
+                                                                                                                   λ∗ = (α
+                                                                                                                         α∗1 , β∗1 , · · · α⋆k , · · · , α∗K , β∗K )            (11)
+R-CCDE: We propose Regularized Cooperative Coevolution
+Differentiable Evolution, called R-CCDE, to search for pa-                                     In summary, i){α αk }Kk=1 and {βk }Kk=1 separately maintain their
+rameters of EvoReLU(x, λ ; d ), namely λ = {α                            αk , βk }Kk=1 . The   sets of solutions that are optimized by DE; ii) the context
+                                        K
+scaling parameters {βk }k=1 are used to adjust the ampli-                                      vector λ∗ is not only the best solution so far. It allows different
+tude of sub-polynomials during the search. After the search,                                   variables to share information. When evolving {βk }Kk=1 , the
+{βk }Kk=1 will be used to scale {α                   αk }Kk=1 and obtain coeffi-               objective introduces a regularization term
+cients of polynomials. The decomposition makes the search
+easier by decoupling the shape and amplitude of polyno-                                                                               λ∗ )
+                                                                                                             β⋆k = arg min LF ,q (βk |λ                  +      γ · βk 2
+                                                                                                                      βk   |     {z     }                       | {z }
+mials. We detail the implementation of R-CCDE in Al-                                                                              ℓ1 Distance              Regularization       (12)
+gorithm 2. R-CCDE takes as input a composite polyno-                                                        s.t. βk |λ
+                                                                                                                     λ     ∗
+                                                                                                                                  α1 , β1 , · · · , βk , · · · , α ∗K , β∗K )
+                                                                                                                               = (α ∗ ∗
+                                  dk−1
+mial F (x) = ( fKdK ◦ fk−1              ◦ · · · ◦ f1d1 )(x) with parameters λ =
+{αα1 , β1 , · · · α k , βk · · · α K , βK }. Because EvoReLU is defined                        where γ · β2k is the regularization term and γ is the scal-
+as y = EvoReLU(x) = x · (F (x) + 0.5) in Equation 3, we                                        ing decay parameter. Without the regularization γ · β2k , we
+use the composite polynomial F (x) to approximate q(x) =                                                                                               d
+                                                                                               observe {βk }Kk=1 prefers large numbers. Because pk k (x) =
+0.5 · sgn(x). We set the number of generations and the scaling                                  1   dk                       K
+decay parameter to T and γ, respectively. The objective func-                                  βk ∑i=1 αi Ti (x), large {βk }k=1 numbers can make the com-
+                                                                                               posite polynomial numerical stable because the polynomial
+tion LF ,q (·) is the ℓ1 distance between the composite polyno-
+                                                                                               output is scaled to a small number. However, it is hard to
+mial F (x) and the target function q(x). R-CCDE maintains
+                                                                                               distinguish different solutions of {ααk }Kk=1 . By introducing
+a context vector [44] λ ∗ = (α                α∗1 , β∗1 , · · · , α ∗K , β∗K ) as the best                                    2
+                         ∗                                                                     the regularization term γ · βk , DE prefers large numbers in
+solution so far. λ is initialized via Latin hypercube sampling
+                                                                                               earlier generations and gradually reduces βk . Therefore, DE
+(LHS). In Algorithm 2, α k and βk 1 ≤ k ≤ K are optimized
+                                                                                               is not biased toward solutions with large βk numbers. We
+using DE sequentially and alternatively. In generation t, given
+                                                                                               use R-CCDE to optimize coefficients of quadratic and high-
+the k-th position, we optimize α k as
+                                                                                               degree EvoReLU. For quadratic EvoReLU in Equation 2, α2
+                           α ⋆k = arg min LF ,q (α   λ∗ )
+                                                 αk |λ                                         is obtained by R-CCDE and α1 = 0.5, α0 = 0.
+                                        αk                                           (10)
+                        λ∗ = (α
+              s.t. α k |λ     α∗1 , β∗1 , · · · α k , · · · , α ∗K , β∗K )                     3.3.3      Polynomial-Aware Training
+where αk is a variable, while other α’s and β’s are                                            Replacing ReLU with EvoReLU in pretrained neural net-
+fixed. A candidate solution of αk is plugged into λ∗ .                                         works injects minor approximation errors, which leads to
+
+
+
+2180       33rd USENIX Security Symposium                                                                                                                  USENIX Association
+performance loss. Fine-tuning can mitigate this performance           Method       Venue     Scheme   Polynomial    Layerwise   Strategy   Arch
+
+loss by allowing the learnable weights (e.g., convolution or        MPCNN [33]     ICML22    CKKS     high-degree      ✕        approx     manual
+                                                                    AESPA [46]     arXiv22   CKKS     low-degree       ✕         train     manual
+fully connected layers) to adapt to the approximation error.        REDsec [18]    NDSS23    TFHE         n/a          n/a       train     manual
+However, backpropagation through EvoReLU easily leads                AutoFHE      USENIX24   CKKS        mixed         ✓         adapt     search
+
+to exploding gradients since the gradients may be amplified
+exponentially due to many composite polynomials. From              Table 3: AutoFHE and baselines. AutoFHE, MPCNN and
+Equation 2, high-degree EvoReLU can precisely approxi-             AESPA use fixed-point arithmetic under RNS-CKKS, while
+mate ReLU, while ReLU pruning (degree 1) and quadratic             REDsec adpots ternary neural networks under TFHE.
+EvoReLU (degree 2) have a larger approximation error. For
+low-degree EvoReLU (degree ≤ 2), we can use SGD to com-
+pute gradients because they do not amplify gradients. For          R-CCDE, we set the search domain of α to [−5, 5] and that
+high-degree EvoReLU (degree > 2), we can use gradients             of β to [1, 5]. We use the set of 20 solutions for optimizing
+from the original non-arithmetic ReLU function for backprop-       β. For α , we set the number of solutions equal to 20× the
+agation. Specifically, during the forward pass, EvoReLU in-        number of variables. We set both the scaling factor F and the
+jects slight errors captured by the training loss. During the      crossover rate CR to 0.5. We set the scaling decay to γ = 0.01
+backward pass, we bypass high-degree EvoReLU and use               and the number of iterations to 100. We run R-CCDE 10 times
+ReLU to compute gradients to update the weights of the linear      with different random seeds and retain the best solution. (3)
+trainable layers. We refer to this procedure as Polynomial-        F INETUNING PARAMETERS : To fine-tune AutoFHE poly-
+Aware Training (PAT). PAT is inspired by STE [3] and               nomial networks, we train them using PAT with batch size
+QAT [26], which uses two different functions for forward-          128, learning rate 0.02, momentum 0.9, weight decay 0.0005,
+and back-propagation. PAT is defined as:                           and KL weight τ = 0.9. We clip gradients to 1. During the
+                                                                   search, to quickly estimate the accuracy of polynomial net-
+                                                                   works, we set epochs to 5. After the search, we set epochs to
+                         
+                         1,                 d=1
+       ∂EvoReLU(x)                                                90 and use the cosine annealing learning rate scheduler. (4)
+                       = 2α2 x + α1 ,        d=2         (13)
+             ∂x                                                   C RYPTOGRAPHIC PARAMETERS : We followed MPCNN to
+                           ∂ReLU(x)/∂x, d > 2
+                         
+                                                                   set the same cryptographic parameters [33] of RNS-CKKS for
+                                                                   MPCNN, AESPA and AutoFHE. The cyclotomic polynomial
+                                                                   uses degree N = 216 . The Hamming weight of the secret key
+4   Experiments
+                                                                   is 192. The ciphertext level is L = 30, while bootstrapping
+Datasets: We benchmark AutoFHE on CIFAR10 and CI-                  uses 14 levels (K = 14). Base modulus, special modulus, and
+FAR100 [31]. Both datasets have 50,000 training and 10,000         bootstrapping modulus are set to 51 bits, while default modu-
+validation images at a resolution of 32 × 32. CIFAR10 has 10       lus is set to 46 bits [33]. The cryptographic parameters satisfy
+classes, while CIFAR100 includes 100 classes. The validation       128-bit security [9, 33].
+images are treated as private data and used only for evaluating    Hardware and RNS-CKKS Library: (1) S EARCH : On one
+the final networks. To guide the search process, we randomly       NVIDIA RTX A6000 GPU, the search process for ResNet-
+select 10,000 images from the training split as a minival [53]     20/32/44 and VGG11 on CIFAR10 took 44 hours, 64 hours,
+dataset and use the Top-1 accuracy on the minival dataset to       88 hours, 13 hours, respectively. The search for ResNet32
+optimize Equation 7. In addition, PAT uses the training split to   and VGG11 on CIFAR100 took 67 and 12 hours, respectively.
+fine-tune polynomial networks. Finally, as our final result, we    To accelerate R-CCDE, we use 100 CPU threads of AMD
+report the Top-1 accuracy on the encrypted validation dataset      EPYC 7502 32-core processor. (2) FHE I NFERENCE : We
+under RNS-CKKS.                                                    evaluate latency under FHE on the publicly available Amazon
+Parameters: (1) T RAINING PARAMETERS : We train ReLU               AWS instance, r5.24xlarge, which has 96 CPU threads and
+networks (used by MPCNN and AutoFHE) and AESPA using               768 GB RAM. We build C++ implementation of AutoFHE un-
+SGD optimizer with batch size 128, epochs 200, learning rate       der RNS-CKKS on top of MPCNN using Microsoft SEAL
+0.1, momentum 0.9 and weight decay 0.0005. We use a cosine         library [50]. We adopt MPCNN implementations of Conv,
+learning rate scheduler. We clip gradients to 1 when we train      BN, Downsample, AvgPool, and FC layers.
+polynomial networks (AESPA or AutoFHE). (2) S EARCH                Baselines: We compare the proposed AutoFHE with
+PARAMETERS : For MOS, we set the number of generations             two recent state-of-the-art approaches under RNS-CKKS,
+to 10. Population size is proportional to the number of vari-      high-degree polynomial and approximation-based approach
+ables. We set population size to 10, 20, 30 and 40 for VGG11,      MPCNN [33] and low-degree polynomial and training-based
+ResNet20, ResNet32 and ResNet44, respectively. The off-            approach AESPA [46], as shown in Table 3. We also bench-
+spring size is 6× as the population size. When we mutate a         mark against REDsec [18] under TFHE to compare different
+polynomial, its degree is decreased by −2 with a probability       FHE schemes.
+of 0.5 and is increased by +2 with a probability of 0.3. For         RNS-CKKS BASELINES : MPCNN uses high-degree
+
+
+
+USENIX Association                                                                     33rd USENIX Security Symposium                       2181
+   Ciphertext Accuracy (%)   94           ResNet32          ResNet44                     4.1     AutoFHE under RNS-CKKS
+                                  ResNet32
+                                                                       ResNet44
+                             93                           ResNet32                       Trade-offs under FHE: Figure 5 shows trade-offs between ci-
+                                               ResNet20
+                                       ResNet20                                          phertext accuracy and amortized latency on CIFAR10 dataset.
+                             92        ResNet20
+                                                                                         We benchmark the performance of ResNet and VGGNet back-
+                             91                                 MPCNN                    bones on CIFAR10 and CIFAR100 datasets, as shown in
+                                  ResNet32
+                                                                AESPA                    Table 4. For TFHE baseline REDsec, it reported 81.9% ci-
+                             90          ResNet44
+                                                                REDsec
+                                                                                         phertext accuracy with latency 1,081s per image and 88.5%
+                             89                                                   BNet   ciphertext accuracy with latency 4,622s per image on CI-
+                                                                AutoFHE
+                                                                                         FAR10 [18]. We have the following observations:
+                             88
+                                  40 80 120 160 200 240          4622
+                                  Amortized Latency (Seconds / Image)                          RNS-CKKS vs TFHE
+
+Figure 5: Comparison of trade-offs between ciphertext ac-                                      Neural networks under RNS-CKKS significantly
+curacy and amortized latency on encrypted CIFAR10. The                                         outperform those under TFHE in terms of both
+latency is evaluated on Amazon AWS r5.24large using 96                                         ciphertext accuracy and latency.
+threads. RNS-CKKS approaches take 96 encrypted images
+as input, while REDsec processes one image at a time. Circle                                From Figure 5, REDsec shows lower ciphertext accuracy
+size is proportional to the number of bootstrapping operations.                          because ternary neural networks (TNNs) enormously com-
+                                                                                         press models [38] compared to real-valued models used by
+                                                                                         RNS-CKKS approaches. Real-valued networks have much
+                                                                                         better representation learning ability than TNNs. In secure
+                                                                                         inference of neural networks, REDsec has to evaluate millions
+Minimax composite polynomial approximation of ReLU                                       to billions of gates [18]. Although evaluating one gate is very
+and reports high ciphertext accuracy (refer to Appendix A).                              fast (10 ∼ 13 ms) [18] on TFHE [54], the latency of the whole
+AESPA applies degree 2 Hermite polynomial to replace                                     network is still extremely high. The most efficient solution
+ReLU, which reduces the multiplicative depth of polynomials                              (ResNet20 with 5 bootstrapping operations) of AutoFHE re-
+and greatly reduces the consumption of bootstrapping. Be-                                ports 9 1 . 9 6 % ciphertext accuracy and 45s latency. Compared
+cause AESPA was originally proposed under secure MPC, we                                 to REDsec BNetS and BNet, AutoFHE improves ciphertext
+implement AESPA under RNS-CKKS (refer to Appendix B).                                    accuracy by + 1 0 . 0 6 % and + 3 . 4 6 %, respectively, while be-
+We use the same training parameters for MPCNN, AESPA and                                 ing 2 4 × and 1 0 3 × faster in terms of amortized latency.
+AutoFHE. We estimate scaling parameters of MPCNN on
+training datasets: 21.26 (ResNet20), 21.99 (ResNet32), 17.80                                   High-Degree vs Low-Degree vs Mixed-Degree
+(ResNet44), 29.82 (VGG11) on CIFAR10 dataset and 63.40
+(ResNet32) and 54.97 (VGG11) on CIFAR100.                                                      High-degree polynomials are suitable for shallow
+   TFHE BASELINE : The fast fully homomorphic encryption                                       and deep neural networks but suffer from high
+scheme over the torus (TFHE) [11] provides very fast boot-                                     latency. Low-degree polynomials can effectively
+strapping by using bootstrapped binary gates. REDsec applies                                   accelerate ciphertext inference but at the cost of a
+efficient ternary networks (TNNs) under TFHE. REDsec re-                                       significant drop in accuracy. Mixed-degree layer-
+ports performance of BNetS and BNet on CIFAR10 under                                           wise polynomials (AutoFHE) lead to a significantly
+CPU TFHE [54]. BNetS and BNet observe ciphertext accu-                                         better trade-off between accuracy and latency.
+racy 81.9% and 88.5%, and latency 1,081 and 4,622 seconds
+per image on CIFAR10 dataset on AWS r5.24large instance                                     From Figure 5 and Table 4, we observe that high-degree
+using 96 CPU threads [18]. The TFHE cryptographic parame-                                MPCNN is able to preserve plaintext accuracy although it
+ters used by REDsec satisfy 128 bits of security [18]. Please                            consumes more levels (14) for AppReLU. Since MPCNN fo-
+note that REDsec uses a different parallel acceleration strat-                           cuses on approximating the ReLU function, it can use weights
+egy. REDsec takes advantage of all 96 CPU threads to process                             from ReLU networks and does not suffer from exploding ac-
+one encrypted image, while RNS-CKKS approaches allocate                                  tivations and gradients in the forward and backward passes of
+one thread to each image. Therefore, REDsec has the same                                 data through the network. In summary, MPCNN is a plug-in
+latency and amortized latency. When we evaluate the latency                              approach with high accuracy and high latency. Low-degree
+of AutoFHE, MPCNN and AESPA on AWS r5.24large, we                                        AESPA reduces level consumption of each polynomial by 12
+input 96 encrypted images using 96 CPU threads. The amor-                                compared to MPCNN. AESPA polynomials only consume
+                 1
+tized latency is 96 × as the latency under RNS-CKKS. So, the                             26% and 22% of the bootstrapping operations in MPCNN for
+amortized latency of REDsec and RNS-CKKS approaches is                                   ResNet and VGG, respectively. However, AESPA achieves
+comparable.                                                                              this at the cost of large drops in accuracy, 0.7% ∼ 3.6% on
+
+
+
+2182                         33rd USENIX Security Symposium                                                                         USENIX Association
+                                                     ResNet20                                ResNet32                             ResNet44                               VGG11
+                                        93                                     94                                    94                                     91
+
+
+              Ciphertext Accuracy (%)
+                                                                1.32×                                                                                                             1.8×
+                                                                                                       1.40×                                1.53×           90
+                                                                               93                                    93
+                                                                                                                                                            89
+                                        92                                     92 +2.56                              92
+                                                                                                                                                            88
+                                                                                                                               +2.44                                              MPCNN
+                                                                               91                                    91
+                                                                                                                                                            87                    AESPA
+                                                                                                                                                                                  AutoFHE
+                                        91                                     90                           90                                              86
+                                             50            75            100        70       120       170      90       170                          250     10             35               60
+                                                                                          Amortized Latency (Seconds / Image)
+
+
+    Figure 6: Trade-offs between ciphertext accuracy and amortized latency of ResNet and VGG backbones on CIFAR10.
+
+                                         Backbone                                   MPCNN [33]                                      AESPA [46]                                        AutoFHE
+ Dataset                                                 Plain     Bootst-     Cipher                  Amortized     Bootst-     Cipher                Amortized      Bootst-     Cipher                 Amortized
+             Network                          Params                                       Latency                                          Latency                                          Latency
+                                                         Acc%      rapping     Acc%                     Latency      rapping     Acc%                   Latency       rapping     Acc%                    Latency
+
+                                                                                                                                                                        5         91.96      4,295s        45s
+            ResNet20                          269K       92.66       18         92.59       9,481s        99s             5      91.92      4,554s          47s
+                                                                                                                                                                        11        92.89      7,191s        75s
+                                                                                                                                                                        8         93.16      6,860s        71s
+            ResNet32                          464K       93.46       30         93.39      16,910s       176s             8      90.60      6,841s          71s
+ CIFAR10                                                                                                                                                                19        93.56      12,111s       126s
+                                                                                                                                                                        8         92.55      8,078s        84s
+            ResNet44                          658K       93.72       42         93.57      24,082s       251s             11     90.11      9,345s          97s
+                                                                                                                                                                        22        93.65      15,769s       164s
+                                                                                                                                                                        1         86.78      1,515s        16s
+             VGG11                            123K       90.53       9          90.41       5,221s        54s             2      88.97      2,112s          22s
+                                                                                                                                                                        4         90.69      2,879s        30s
+            ResNet32                          472K       70.81       30         70.59      15,693s       163s             8      68.43      7,171s          75s         16        71.34      10,969s       114s
+ CIFAR100
+             VGG11                            129K       64.64       9          63.95       5,148s        54s             2      62.90      2,225s          23s         7         64.31      4,562s        48s
+
+
+Table 4: AutoFHE under the RNS-CKKS scheme. Latency for 96 images is evaluated on AWS r5.24large using 96 threads.
+Amortized latency is the average latency of each image. We report the ciphertext accuracy of 10,000 encrypted validation images.
+For CIFAR10, we select two solutions with different bootstrapping for each backbone network. Color key: highest ciphertext
+accuracy; lowest (amortized) latency; smallest number of bootstrapping operations.
+
+
+                                                                MPCNN [33]                                                AESPA [46]                                               AutoFHE
+ Dataset    Backbone
+                                             #Boot     Linear(s)  AppReLU(s)               Boot(s)      #Boot      Linear(s)  HerPN(s)         Boot(s)       #Boot     Linear(s)      EvoReLU(s)         Boot(s)
+                                                                                                                                                                  5    2014 ± 11       115 ± 3          2092 ± 37
+            ResNet20                          18       1180 ± 32     1067 ± 45            7138 ± 95      5         2344 ± 9       54 ± 1      2108 ± 14
+                                                                                                                                                                 11    2142 ± 52       388 ± 18         4473 ± 71
+                                                                                                                                                                  8    3540 ± 41        38 ± 1          3107 ± 57
+            ResNet32                          30       2104 ± 84     1708 ± 103          12304 ± 506     8      3582 ± 173        79 ± 2      3234 ± 76
+ CIFAR10                                                                                                                                                         19    2962 ± 95       646 ± 20        8185 ± 142
+                                                                                                                                                                  8    4595 ± 21        42 ± 1          3265 ± 94
+            ResNet44                          42       3084 ± 93     2385 ± 59           18071 ± 433     11        4683 ± 19      110 ± 2     4393 ± 105
+                                                                                                                                                                 22   4447 ± 152       806 ± 41        10256 ± 184
+                                                                                                                                                                  1    1056 ± 6           14 ± 1        402 ± 21
+            VGG11                             9        676 ± 29       639 ± 24            3809 ± 92      2         1281 ± 50      28 ± 1       835 ± 8
+                                                                                                                                                                  4    1019 ± 7           172 ± 3       1661 ± 4
+            ResNet32                          30       2062 ± 64     1621 ± 51           11815 ± 123     8         3754 ± 20      79 ± 2      3225 ± 78          16    3602 ± 25       620 ± 16        6528 ± 131
+ CIFAR100
+            VGG11                             9        685 ± 17      645 ± 24             3752 ± 82      2         1330 ± 6       28 ± 1       835 ± 9            7    1145 ± 15       338 ± 18         3027 ± 39
+
+
+Table 5: Latency of operations under the RNS-CKKS scheme. We report the mean and standard deviation of latency of 96 images
+in Table 4. Linear layers include Conv, BN, Downsample, AvgPool, and FC.
+
+
+
+CIFAR10 and 1.7% ∼ 2.4% on CIFAR100 compared to the                                                                   MPCNN on CIFAR10, AutoFHE accelerates encrypted im-
+corresponding plaintext backbone models.                                                                              age inference by 1 . 3 2 × ∼ 1 . 8 × while improving accuracy
+                                                                                                                      by + 0 . 0 8 % ∼ 0 . 3 % in comparison to MPCNN. Similarly, on
+   AutoFHE takes advantage of layerwise mixed-degree poly-
+                                                                                                                      CIFAR100, AutoFHE speeds up inference by 1 . 1 × ∼ 1 . 4 ×
+nomials to reduce bootstrapping consumption while main-
+                                                                                                                      while increasing accuracy by + 0 . 3 6 % ∼ 0 . 7 5 %. From Fig-
+taining high accuracy. From Figure 6 and Table 4, Aut-
+                                                                                                                      ure 6, compared to AESPA, AutoFHE improves ciphertext ac-
+oFHE shows a better trade-off between ciphertext accu-
+                                                                                                                      curacy by + 2 . 5 6 % and + 2 . 4 4 % for ResNet32 and ResNet44
+racy and latency than MPCNN and AESPA. Compared to
+
+
+
+USENIX Association                                                                                                                                33rd USENIX Security Symposium                             2183
+backbones on CIFAR10 with similar amortized latency. How-        to HerPN, e.g. ResNet32 with eight bootstrapping, ResNet44
+ever, AESPA’s low-degree polynomials lead to an increasing       with eight bootstrapping and VGG11 with one bootstrapping.
+drop in accuracy with model depth. This starkly contrasts        In MPCNN, bootstrapping dominates latency with 74 ∼ 77%
+with plaintext models, where deeper models are known to          of total inference time. In AESPA, linear layers and bootstrap-
+improve performance. AutoFHE can improve performance             ping operations consume similar runtime.
+with depth while maintaining the same latency as AESPA. As          The latency of AutoFHE is similar to AESPA for
+such, we observe from Figure 5 and Table 4 that AutoFHE          low-bootstrapping solutions and to MPCNN for high-
+enjoys a much better trade-off between accuracy and latency.     bootstrapping solutions. Linear operations of MPCNN are
+   In summary, the challenge of navigating the vast joint de-    faster than AESPA and AutoFHE since they are being eval-
+sign space of polynomial approximations of non-linear acti-      uated at a lower level. For example, MPCNN ConvBN al-
+vation functions and homomorphic evaluation architectures        ways takes level 2 ciphertext as input. The evaluation of
+limits manual approaches like MPCNN and AESPA to sim-            low-level ciphertexts is faster than high-level ciphertexts. For
+plify solutions like approximating non-linear activation func-   AESPA and AutoFHE, polynomial activations (HerPN and
+tions and uniform placement of bootstrapping operations. In      EvoReLU) have smaller multiplicative depth, and their linear
+contrast, AutoFHE algorithmically navigates the design space     operations take ciphertexts at higher levels as input. From
+and identifies solutions that significantly pareto dominate      Table 5, we observe that i) AutoFHE can effectively accel-
+manual approaches in accuracy, latency, or both.                 erate neural network inference on RNS-CKKS by remov-
+                                                                 ing time-consuming bootstrapping operations; ii) Layerwise
+   Approximation vs Training vs Adaptation                       mixed-degree EvoReLU effectively explores how to reduce
+                                                                 the multiplicative depth of polynomials and further decrease
+    High-precision function approximation can pre-               consumption of bootstrapping operations.
+    serve plaintext accuracy without training, while
+    low-precision function approximation with training
+    leads to a loss in accuracy. AutoFHE is a hybrid             4.2     Layerwise AutoFHE
+    method that inherits the representation learning
+    ability of ReLU networks and adapts the network’s            Depth Distribution: To analyze the layerwise mixed-degree
+    learnable weights to layerwise polynomials.                  EvoReLU discovered by AutoFHE, we study (see Figure 7)
+                                                                 the distributions of multiplicative depth for different back-
+                                                                 bones on CIFAR10. In contrast to the uniform allocation used
+   On the one hand, MPCNN has a drop in accuracy of
+                                                                 by MPCNN and AESPA, the optimal layerwise allocation
+0.07 ∼ 0.15% and 0.22 ∼ 0.69% compared to plaintext back-
+                                                                 of EvoReLU discovered by AutoFHE is highly non-uniform.
+bone models on CIFAR10 and CIFAR100, respectively. This
+                                                                 Such a distribution is challenging to design manually, thus
+demonstrates that high-degree polynomials still introduce
+                                                                 further motivating the need for automated design of layer-
+slight approximation errors. On the other hand, AESPA has a
+                                                                 wise mixed-degree polynomial approximations of activation
+significant drop in accuracy, especially for deeper networks,
+                                                                 functions. From the distribution in Figure 7, we identify the
+which was also observed by AESPA’s authors [46]. The re-
+                                                                 following design principles that can guide the design of poly-
+sults demonstrate that the representation learning ability of
+                                                                 nomial neural networks under RNS-CKKS.
+(low-degree) polynomial neural networks is inferior to ReLU
+networks [37]. Unlike AESPA, AutoFHE inherits the rep-
+                                                                       Observation 1
+resentation learning ability from ReLU networks by using
+pretrained weights and transferring knowledge. Furthermore,            Low and high bootstrapping solutions share a simi-
+we fine-tune polynomial networks using very small learn-               lar distribution of multiplicative depth.
+ing rates to adapt learnable network weights to layerwise
+mixed-degree polynomial EvoReLU. Therefore, AutoFHE
+                                                                    In Figure 7, we provide two solutions with low and high
+can achieve the high-accuracy of ReLU networks and the
+                                                                 bootstrapping operations for each backbone. These two so-
+low-latency of low-degree polynomial networks. As such,
+                                                                 lutions share similar depth distributions. Specifically, high-
+compared to MPCNN and AESPA, AutoFHE improves both
+                                                                 degree polynomials are preferred in the same layers of low
+prediction accuracy and reduces inference latency over all
+                                                                 and high bootstrapping solutions.
+ResNet and VGG backbones.
+Operations under RNS-CKKS: Table 5 shows the latency of                Observation 2
+different operations under RNS-CKKS. AppReLU is a high-
+degree polynomial, so its evaluation latency is higher than            Depth distribution is linearly scalable.
+degree 2 HerPN. The latency of EvoReLU is roughly between
+AppReLU and HerPN. Low-bootstrapping solutions of Aut-             Consider the depth distributions of VGG11(4) and
+oFHE further speed up evaluation of polynomial compared          ResNet20(5), ResNet20(11) and ResNet32(19) in Figure 7.
+
+
+
+2184   33rd USENIX Security Symposium                                                                      USENIX Association
+               VGG11(1)       2    2          2   2       2        2
+                                                                                                                                                                    Prune                  Degree=2                   Degree>2
+                                          0           0        0       0
+
+
+                              10   11
+                                          9
+                                              5                    6
+               VGG11(4)                           2   3   2    2       2
+
+
+
+
+                              6    7
+                                              5                        5
+           ResNet20(5)                    0
+                                                  2   2
+                                                          0
+                                                               2   2
+                                                                           0    0
+                                                                                      4
+                                                                                            2
+                                                                                                0
+                                                                                                     2    2   2   2
+
+
+
+                                   8          8   8                                         8   8         9   9
+                              6           6                    6   7                  7              6
+                                                                       5        5
+           ResNet20(11)                               2
+                                                          0                0
+                                                                                                                  2
+
+
+
+
+           ResNet32(8)        0
+                                   2      2   2
+                                                  0
+                                                      2
+                                                          0    0   0
+                                                                       2
+                                                                           0
+                                                                                2     2     2
+                                                                                                0
+                                                                                                     2
+                                                                                                          0   0   0
+                                                                                                                      2
+                                                                                                                          0
+                                                                                                                               2
+                                                                                                                                   0
+                                                                                                                                       2   2
+                                                                                                                                               0   0
+                                                                                                                                                        2   2
+                                                                                                                                                                0
+                                                                                                                                                                    2
+
+
+                                                          12                    12              11
+                                   9    10            9                                              10                   9                9            9
+                                              8                                             8                                                  8   7        8   7
+                                                                       5                                              6            5   5
+           ResNet32(19)       0                   0            0   0       0          0                   0
+                                                                                                              2
+                                                                                                                  0
+                                                                                                                               2
+                                                                                                                                                                    0
+
+
+
+
+           ResNet44(8)        0
+                                   2
+                                          0
+                                              2
+                                                  0   0   0    0   0   0
+                                                                           2
+                                                                                0     0
+                                                                                            2
+                                                                                                0
+                                                                                                     2
+                                                                                                          0   0   0
+                                                                                                                      2
+                                                                                                                          0
+                                                                                                                               2
+                                                                                                                                   0
+                                                                                                                                       2
+                                                                                                                                           0   0   0
+                                                                                                                                                        2
+                                                                                                                                                            0
+                                                                                                                                                                2
+                                                                                                                                                                    0    0
+                                                                                                                                                                              2
+                                                                                                                                                                                  0    0
+                                                                                                                                                                                           2   2    2
+                                                                                                                                                                                                         0
+                                                                                                                                                                                                             2
+                                                                                                                                                                                                                 0    0
+                                                                                                                                                                                                                           2
+
+
+                                                                                     13                                                                                                                                    14
+                                                                                                                                                   11                             12           11
+                                                                                            9                                  9                                         10                         10       9        10
+                                                                                                7    8        8   8                    8       8                              7
+                                                                                6                                                                       6
+           ResNet44(22)       0    0      0   0   0   0   0    0   0   0   0                              0           0   0        0       0                0
+                                                                                                                                                                3
+                                                                                                                                                                    0                  0
+                                                                                                                                                                                           2
+                                                                                                                                                                                                         0       0
+
+                              0                                            10                                             20                                        30                                           40
+                                                                                                          EvoReLU Layer Index
+
+                                    Figure 7: Multiplicative depth of layerwise mixed-degree EvoReLU layers.
+
+
+ 1                                                                                                                            degree EvoReLU functions (layer 3, 5, 8) observe oscillation
+0.5                                                                                                                           but still are very close to ReLU. Degree 2 EvoReLU is a
+ 0                                                                                                                            quadratic function and introduces more approximation errors
+ 1                                                                                                                            compared to high-degree and medium-degree functions. For
+0.5                                                                                                                           high-degree and medium-degree polynomials, input will be
+ 0                                                                                                                            scaled to [−1, 1] so we can prevent exploding activations. Fig-
+      -1   0       1 -1   0        1 -1           0        1 -1        0             1 -1            0        1
+                                                                                                                              ure 8 qualitatively shows that high-degree and medium-degree
+Figure 8: EvoReLU functions of AutoFHE for VGG11 with                                                                         EvoReLU functions can precisely approximate ReLU, and we
+4 bootstrapping operations. The top row shows EvoReLU for                                                                     can use gradients of ReLU in PAT to prevent exploding gradi-
+layer 0 ∼ 4, and the bottom row shows layer 5 ∼ 9.                                                                            ents during backpropagation. Since degree 2 EvoReLU has a
+                                                                                                                              relatively big approximation error, we use SGD rather than
+                                                                                                                              approximate gradients from ReLU (refer to Equation 13).
+They have different numbers of layers. If we scale their dis-
+tributions horizontally to match the number of layers, their
+depth distributions are very similar. This demonstrates that                                                                  5        Related Work
+the number of layers and position of activations are the most
+important factors affecting the sensitivity of layerwise ap-                                                                  In this paper, we focus on secure inference under FHE. Se-
+proximation. Therefore, the depth distributions are linearly                                                                  cure multiparty computation (MPC) is an alternative approach
+scalable to the neural network’s depth.                                                                                       for secure inference [19, 29, 30, 40, 42, 45, 47]. It is usually
+                                                                                                                              employed in a hybrid protocol involving both MPC and HE.
+       Observation 3                                                                                                          MPC primitives include secret sharing, Yao’s garbled circuits
+                                                                                                                              [2, 59], and Beaver’s multiplicative triples [1], etc. For ex-
+       Consecutive linear layers can be integrated into a
+                                                                                                                              ample: (1) Gazelle [29] adopts packed additively homomor-
+       single operation to reduce multiplicative depth.
+                                                                                                                              phic encryption (PAHE) to evaluate linear layers (Conv and
+                                                                                                                              FC layers) and garbled circuits to evaluate non-linear layers
+  Many networks have consecutive linear (depth 0) layers,                                                                     (ReLU and MaxPooling layers). (2) Delphi [45] uses Gar-
+especially ResNet44(22). In this case, it is possible to inte-                                                                bled circuits to evaluate ReLU, and Beaver’s multiplicative
+grate successive linear layers into a single linear layer, which                                                              triples to evaluate the polynomial approximation x2 of ReLU.
+decreases the multiplicative depth and removes bootstrap-                                                                     (3) Iron [23] employs the Brakerski-Fan-Vercauteren (BFV)
+ping operations. Table 5 demonstrates that reducing linear                                                                    scheme [5, 16] for matrix multiplication. Non-linear opera-
+operations is an effective way to further accelerate inference.                                                               tions, like SoftMax, GELU, and LayerNorm, are evaluated
+Layerwise EvoReLU: Figure 8 shows layerwise mixed-                                                                            through secret sharing.
+degree EvoReLU functions for VGG11 with 4 bootstrap-                                                                             Secure MPC-based approaches for secure inference must
+ping operations. High-degree EvoReLU functions can pre-                                                                       carefully consider the trade-off between computation and
+cisely approximate ReLU, e.g. layer 0, 1 and 2. Medium-                                                                       communication [29] since both the customer and the Cloud
+
+
+
+USENIX Association                                                                                                                                              33rd USENIX Security Symposium                                   2185
+perform computations. In some practical scenarios, sufficient      and improve accuracy by 3.46% compared to models under
+communication and computing resources on the client side           TFHE (REDsec).
+may not be available. Pure FHE-based approaches provide               Our results demonstrate the effectiveness of automated
+customers a fire-and-forget [18] service, where they are not in-   search-based algorithms in navigating the large search
+volved in the computations and simply wait for the encrypted       space of adapting convolution neural networks for inference
+result. However, FHE-based approaches may have higher la-          over FHE ciphertexts and discovering networks that Pareto-
+tency and memory footprint than secure MPC approaches.             dominate manually designed ones. In summary, an integrated
+   In terms of polynomial neural networks, FHE approaches          and automated design of polynomial approximations and ho-
+have to replace all ReLU activations with polynomials since        momorphic evaluation architecture is an effective and flexible
+FHE only supports multiplications and additions. Secure            approach for seamlessly adapting CNNs for inference on FHE
+MPC approaches usually replace only a fraction of ReLUs to         ciphertexts.
+reduce online communication and computation costs and re-
+tain a few ReLU layers to preserve accuracy, e.g. Delphi [45]      References
+and SAFENet [42]. These approaches, however, only use low-
+degree polynomials and observe a significant drop in accuracy       [1] Donald Beaver. Precomputing oblivious transfer. In
+when most ReLU activations are replaced. AutoFHE can also               Annual International Cryptology Conference, pages 97–
+be employed for secure MPC schemes by changing the search               109, 1995. https://link.springer.com/chapter/
+objective from the number of bootstrapping operations to                10.1007/3-540-44750-4_8.
+online communication or computation costs of secure MPC.
+                                                                    [2] Mihir Bellare, Viet Tung Hoang, and Phillip Rogaway.
+                                                                        Foundations of garbled circuits. In Proceedings of
+6   Conclusion                                                          the 2012 ACM Conference on Computer and Com-
+                                                                        munications Security, pages 784–796, 2012. https:
+Non-interactive end-to-end inference of homomorphically en-
+                                                                        //eprint.iacr.org/2012/265.pdf.
+crypted ciphertext images over convolutional networks is an
+attractive solution for mitigating the security and privacy con-    [3] Yoshua Bengio, Nicholas Léonard, and Aaron Courville.
+cerns of cloud-based MLaaS offerings. Adapting CNNs for                 Estimating or propagating gradients through stochastic
+inference over FHE ciphertexts presents several challenges,             neurons for conditional computation. arXiv preprint
+including the optimal design of polynomial approximations               arXiv:1308.3432, 2013. https://arxiv.org/pdf/
+of non-linear activation functions and associated homomor-              1308.3432.pdf.
+phic evaluation architecture. Existing solutions primarily rely
+                                                                    [4] Jean-Philippe Bossuat, Christian Mouchet, Juan
+on manual designs, which are neither scalable nor flexible
+                                                                        Troncoso-Pastoriza, and Jean-Pierre Hubaux. Effi-
+enough to be applied to any architecture and cater to the
+                                                                        cient bootstrapping for approximate homomorphic
+needs of different MLaaS customers.
+                                                                        encryption with non-sparse keys. In Annual Interna-
+   To overcome these challenges, this paper introduced Aut-
+                                                                        tional Conference on the Theory and Applications
+oFHE, an automated approach for adapting any convolutional
+                                                                        of Cryptographic Techniques, pages 587–617, 2021.
+neural network for secure inference under RNS-CKKS. It
+                                                                        https://link.springer.com/chapter/10.1007/
+is a multi-objective search algorithm that generates a set of
+                                                                        978-3-030-77870-5_21.
+polynomial networks and their associated homomorphic eval-
+uation architecture under FHE by trading off accuracy and           [5] Zvika Brakerski. Fully homomorphic encryption
+latency. It exploits layerwise mixed-degree polynomial activa-          without modulus switching from classical gapsvp.
+tions across different layers in a network and jointly searches         In Annual Cryptology Conference, pages 868–886,
+for placement of bootstrapping operations for evaluation un-            2012. https://link.springer.com/chapter/10.
+der RNS-CKKS. We designed a custom search space for                     1007/978-3-642-32009-5_50.
+layerwise mixed-degree polynomials and adopted multiple
+                                                                    [6] Alon Brutzkus, Ran Gilad-Bachrach, and Oren Elisha.
+objectives for optimization. We also proposed a combination
+                                                                        Low latency privacy preserving inference. In Interna-
+of search and training algorithms, including multi-objective
+                                                                        tional Conference on Machine Learning, pages 812–
+search algorithm MOS, composite polynomial coefficient op-
+                                                                        821, 2019. http://proceedings.mlr.press/v97/
+timization method R-CCDE, and polynomial aware network
+                                                                        brutzkus19a/brutzkus19a.pdf.
+training strategy PAT. We extensively evaluate AutoFHE on
+ResNets and VGGNets over encrypted CIFAR datasets. Com-             [7] Jung Hee Cheon, Kyoohyung Han, Andrey Kim, Mi-
+pared to high-degree MPCNN, AutoFHE accelerates infer-                  ran Kim, and Yongsoo Song. Bootstrapping for ap-
+ence by 1.32× ∼ 1.8×. Compared to low-degree AESPA,                     proximate homomorphic encryption. In Annual In-
+AutoFHE improves accuracy by up to 2.56%. Finally, models               ternational Conference on the Theory and Applica-
+under RNS-CKKS (AutoFHE) accelerate inference by 103×                   tions of Cryptographic Techniques, pages 360–384,
+
+
+
+2186    33rd USENIX Security Symposium                                                                     USENIX Association
+     2018. https://link.springer.com/chapter/10.                [16] Junfeng Fan and Frederik Vercauteren. Somewhat prac-
+     1007/978-3-319-78381-9_14.                                      tical fully homomorphic encryption. Cryptology ePrint
+                                                                     Archive, 2012. https://ia.cr/2012/144.
+ [8] Jung Hee Cheon, Kyoohyung Han, Andrey Kim, Miran
+     Kim, and Yongsoo Song. A full RNS variant of approx-       [17] Alhussein Fawzi, Matej Balog, Aja Huang, Thomas
+     imate homomorphic encryption. In International Con-             Hubert, Bernardino Romera-Paredes, Mohammadamin
+     ference on Selected Areas in Cryptography, pages 347–           Barekatain, Alexander Novikov, Francisco J R Ruiz,
+     368, 2018. https://link.springer.com/chapter/                   Julian Schrittwieser, Grzegorz Swirszcz, et al. Dis-
+     10.1007/978-3-030-10970-7_16.                                   covering faster matrix multiplication algorithms with
+                                                                     reinforcement learning.       Nature, 610(7930):47–
+ [9] Jung Hee Cheon, Minki Hhan, Seungwan Hong, and
+                                                                     53, 2022.     https://www.nature.com/articles/
+     Yongha Son. A hybrid of dual and meet-in-the-middle
+                                                                     s41586-022%20-05172-4.
+     attack on sparse and ternary secret LWE. IEEE Access,
+     7:89497–89506, 2019. https://ieeexplore.ieee.
+                                                                [18] Lars Wolfgang Folkerts, Charles Gouert, and Nektar-
+     org/stamp/stamp.jsp?tp=&arnumber=8747481.
+                                                                     ios Georgios Tsoutsos. REDsec: Running encrypted
+[10] Jung Hee Cheon, Andrey Kim, Miran Kim, and Yong-                discretized neural networks in seconds. In Network
+     soo Song. Homomorphic encryption for arithmetic                 and Distributed System Security Symposium, 2023.
+     of approximate numbers.    In International Con-                https://www.ndss-symposium.org/wp-content/
+     ference on the Theory and Application of Cryp-                  uploads/2023/02/ndss2023_f34_paper.pdf.
+     tology and Information Security, pages 409–437,
+     2017. https://link.springer.com/chapter/10.                [19] Zahra Ghodsi, Nandan Kumar Jha, Brandon Reagen, and
+     1007/978-3-319-70694-8_15.                                      Siddharth Garg. Circa: Stochastic relus for private deep
+                                                                     learning. In Advances in Neural Information Processing
+[11] Ilaria Chillotti, Nicolas Gama, Mariya Georgieva, and           Systems, volume 34, pages 2241–2252, 2021. https:
+     Malika Izabachène. TFHE: Fast fully homomor-                    //proceedings.neurips.cc/paper/2021/file/
+     phic encryption over the torus. Journal of Cryptol-             11eba2991cc62daa4a85be5c0cfdae97-Paper.pdf.
+     ogy, 33(1):34–91, 2020. https://eprint.iacr.org/
+     2018/421.pdf.                                              [20] Ran Gilad-Bachrach, Nathan Dowlin, Kim Laine,
+                                                                     Kristin Lauter, Michael Naehrig, and John Wernsing.
+[12] Edward Chou, Josh Beal, Daniel Levy, Serena Yeung,              CryptoNets: Applying neural networks to encrypted
+     Albert Haque, and Li Fei-Fei. Faster CryptoNets: Lever-         data with high throughput and accuracy. In Interna-
+     aging sparsity for real-world encrypted inference. arXiv        tional Conference on Machine Learning, pages 201–
+     preprint arXiv:1811.09953, 2018. https://arxiv.                 210, 2016. http://proceedings.mlr.press/v48/
+     org/pdf/1811.09953.pdf.                                         gilad-bachrach16.pdf.
+[13] Kalyanmoy Deb, Amrit Pratap, Sameer Agarwal, and
+                                                                [21] David E Goldberg and Kalyanmoy Deb.            A
+     Tamt Meyarivan.      A fast and elitist multiobjec-
+                                                                     comparative analysis of selection schemes used
+     tive genetic algorithm: NSGA-II. IEEE Transac-
+                                                                     in genetic algorithms.    In Foundations of Ge-
+     tions on Evolutionary Computation, 6(2):182–197,
+                                                                     netic Algorithms, volume 1, pages 69–93. Elsevier,
+     2002.      https://ieeexplore.ieee.org/stamp/
+                                                                     1991. https://www.sciencedirect.com/science/
+     stamp.jsp?tp=&arnumber=996017.
+                                                                     article/abs/pii/B9780080506845500082.
+[14] Jacob Devlin, Ming-Wei Chang, Kenton Lee, and
+     Kristina Toutanova. BERT: pre-training of deep bidirec-    [22] Priya Goyal, Piotr Dollár, Ross Girshick, Pieter Noord-
+     tional transformers for language understanding. arXiv           huis, Lukasz Wesolowski, Aapo Kyrola, Andrew Tul-
+     preprint arXiv:1810.04805, 2018. https://arxiv.                 loch, Yangqing Jia, and Kaiming He. Accurate, large
+     org/abs/1810.04805.                                             minibatch sgd: Training imagenet in 1 hour. arXiv
+                                                                     preprint arXiv:1706.02677, 2017. https://arxiv.
+[15] Alexey Dosovitskiy, Lucas       Beyer, Alexander                org/abs/1706.02677.
+     Kolesnikov, Dirk Weissenborn, Xiaohua Zhai,
+     Thomas Unterthiner, Mostafa Dehghani, Matthias             [23] Meng Hao, Hongwei Li, Hanxiao Chen, Pengzhi Xing,
+     Minderer, Georg Heigold, Sylvain Gelly, et al.                  Guowen Xu, and Tianwei Zhang. Iron: Private infer-
+     An image is worth 16x16 words: Transformers                     ence on transformers. In Advances in Neural Infor-
+     for image recognition at scale.  In International               mation Processing Systems, volume 35, pages 15718–
+     Conference on Learning Representations, 2020.                   15731, 2022. https://openreview.net/forum?id=
+     https://openreview.net/pdf?id=YicbFdNTTy.                       deyqjpcTfsG.
+
+
+
+USENIX Association                                                               33rd USENIX Security Symposium        2187
+[24] Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian         [32] Eunsang Lee, Joon-Woo Lee, Young-Sik Kim, and Jong-
+     Sun. Deep residual learning for image recognition.             Seon No. Minimax approximation of sign function by
+     In Proceedings of the IEEE Conference on Computer              composite polynomial for homomorphic comparison.
+     Vision and Pattern Recognition, pages 770–778, 2016.           IEEE Transactions on Dependable and Secure Comput-
+     https://openaccess.thecvf.com/content_cvpr_                    ing, 2021. https://ieeexplore.ieee.org/stamp/
+     2016/papers/He_Deep_Residual_Learning_CVPR_                    stamp.jsp?tp=&arnumber=9517029.
+     2016_paper.pdf.
+                                                               [33] Eunsang Lee, Joon-Woo Lee, Junghyun Lee, Young-
+[25] Geoffrey Hinton, Oriol Vinyals, and Jeff Dean. Distill-        Sik Kim, Yongjune Kim, Jong-Seon No, and Woosuk
+     ing the knowledge in a neural network. arXiv preprint          Choi. Low-complexity deep convolutional neural net-
+     arXiv:1503.02531, 2015. https://arxiv.org/abs/                 works on fully homomorphic encryption using mul-
+     1503.02531.                                                    tiplexed parallel convolutions. In International Con-
+                                                                    ference on Machine Learning, pages 12403–12422,
+[26] Benoit Jacob, Skirmantas Kligys, Bo Chen, Meng-                2022.     https://proceedings.mlr.press/v162/
+     long Zhu, Matthew Tang, Andrew Howard, Hartwig                 lee22e/lee22e.pdf.
+     Adam, and Dmitry Kalenichenko.          Quantization
+     and training of neural networks for efficient integer-    [34] Joon-Woo Lee, HyungChul Kang, Yongwoo Lee,
+     arithmetic-only inference. In IEEE Conference on               Woosuk Choi, Jieun Eom, Maxim Deryabin, Eun-
+     Computer Vision and Pattern Recognition, 2018.                 sang Lee, Junghyun Lee, Donghoon Yoo, Young-
+     https://openaccess.thecvf.com/content_                         Sik Kim, et al. Privacy-preserving machine learn-
+     cvpr_2018/papers/Jacob_Quantization_and_                       ing with fully homomorphic encryption for deep
+     Training_CVPR_2018_paper.pdf.                                  neural network.   IEEE Access, 10:30039–30054,
+                                                                    2022.     https://ieeexplore.ieee.org/stamp/
+[27] Nandan Kumar Jha, Zahra Ghodsi, Siddharth Garg, and            stamp.jsp?tp=&arnumber=9734024.
+     Brandon Reagen. DeepReDuce: ReLU reduction for
+     fast private inference. In International Conference on    [35] Joon-Woo Lee, Eunsang Lee, Yongwoo Lee, Young-Sik
+     Machine Learning, pages 4839–4849, 2021. http://               Kim, and Jong-Seon No. High-precision bootstrapping
+     proceedings.mlr.press/v139/jha21a.html.                        of rns-ckks homomorphic encryption using optimal min-
+                                                                    imax polynomial approximation and inverse sine func-
+[28] John Jumper, Richard Evans, Alexander Pritzel, Tim             tion. In Annual International Conference on the Theory
+     Green, Michael Figurnov, Olaf Ronneberger, Kathryn             and Applications of Cryptographic Techniques, pages
+     Tunyasuvunakool, Russ Bates, Augustin Žídek, Anna              618–647, 2021. https://eprint.iacr.org/2020/
+     Potapenko, et al. Highly accurate protein structure            552.pdf.
+     prediction with alphafold. Nature, 596(7873):583–
+     589, 2021. https://www.nature.com/articles/               [36] Junghyun Lee, Eunsang Lee, Joon-Woo Lee, Yongjune
+     s41586-021-03819-2.                                            Kim, Young-Sik Kim, and Jong-Seon No. Precise
+                                                                    approximation of convolutional neural networks for
+[29] Chiraag Juvekar, Vinod Vaikuntanathan, and Anantha             homomorphically encrypted data.     arXiv preprint
+     Chandrakasan. GAZELLE: A low latency framework                 arXiv:2105.10879, 2021. https://arxiv.org/pdf/
+     for secure neural network inference. In USENIX                 2105.10879.pdf.
+     Security Symposium, pages 1651–1669, 2018. https:
+     //www.usenix.org/system/files/conference/                 [37] Moshe Leshno, Vladimir Ya Lin, Allan Pinkus, and
+     usenixsecurity18/sec18-juvekar.pdf.                            Shimon Schocken. Multilayer feedforward networks
+                                                                    with a nonpolynomial activation function can approx-
+[30] Brian Knott, Shobha Venkataraman, Awni Han-                    imate any function. Neural Networks, 6(6):861–867,
+     nun, Shubho Sengupta, Mark Ibrahim, and Laurens                1993. https://www.sciencedirect.com/science/
+     van der Maaten.     CrypTen: Secure multi-party                article/pii/S0893608005801315.
+     computation meets machine learning.      In Ad-
+     vances in Neural Information Processing Sys-              [38] Fengfu Li, Bin Liu, Xiaoxing Wang, Bo Zhang, and
+     tems, volume 34, pages 4961–4973, 2021. https:                 Junchi Yan. Ternary weight networks. arXiv preprint
+     //proceedings.neurips.cc/paper/2021/file/                      arXiv:1605.04711, 2016. https://arxiv.org/pdf/
+     2754518221cfbc8d25c13a06a4cb8421-Paper.pdf.                    1605.04711.pdf.
+[31] Alex Krizhevsky, Geoffrey Hinton, et al. Learn-           [39] Hanxiao Liu, Karen Simonyan, and Yiming Yang. Darts:
+     ing multiple layers of features from tiny im-                  Differentiable architecture search. In International Con-
+     ages. 2009. https://www.cs.toronto.edu/~kriz/                  ference on Learning Representations, 2018. https:
+     learning-features-2009-TR.pdf.                                 //openreview.net/pdf?id=S1eYHoC5FX.
+
+
+
+2188   33rd USENIX Security Symposium                                                                  USENIX Association
+[40] Jian Liu, Mika Juuti, Yao Lu, and Nadarajah Asokan.             differential evolution algorithm for continuous op-
+     Oblivious neural network predictions via minionn trans-         timization and classification problems.      Neural
+     formations. In Proceedings of the 2017 ACM SIGSAC               Computing and Applications, 33(17):10841–10867,
+     Conference on Computer and Communications Security,             2021. https://link.springer.com/article/10.
+     pages 619–631, 2017. https://eprint.iacr.org/                   1007/s00521-021-06216-y.
+     2017/452.pdf.
+                                                                [49] Julian Schrittwieser, Ioannis Antonoglou, Thomas Hu-
+[41] Qian Lou and Lei Jiang. HEMET: A homomorphic-                   bert, Karen Simonyan, Laurent Sifre, Simon Schmitt,
+     encryption-friendly privacy-preserving mobile neu-              Arthur Guez, Edward Lockhart, Demis Hassabis, Thore
+     ral network architecture.    In International Con-              Graepel, et al. Mastering atari, go, chess and shogi by
+     ference on Machine Learning, pages 7102–7110,                   planning with a learned model. Nature, 588(7839):604–
+     2021.      http://proceedings.mlr.press/v139/                   609, 2020. https://www.nature.com/articles/
+     lou21a/lou21a.pdf.                                              s41586-020-03051-4.
+
+[42] Qian Lou, Yilin Shen, Hongxia Jin, and Lei Jiang.          [50] SEAL. Microsoft SEAL (3.6). Microsoft Research,
+     SAFENet: A secure, accurate and fast neural network             2020. https://github.com/Microsoft/SEAL.
+     inference. In International Conference on Learning Rep-
+     resentations, 2020. https://openreview.net/pdf?            [51] David Silver, Thomas Hubert, Julian Schrittwieser, Ioan-
+     id=Cz3dbFm5u-.                                                  nis Antonoglou, Matthew Lai, Arthur Guez, Marc Lanc-
+                                                                     tot, Laurent Sifre, Dharshan Kumaran, Thore Graepel,
+[43] Xiaoliang Ma, Xiaodong Li, Qingfu Zhang, Ke Tang,               et al. A general reinforcement learning algorithm that
+     Zhengping Liang, Weixin Xie, and Zexuan Zhu. A sur-             masters chess, shogi, and go through self-play. Science,
+     vey on cooperative co-evolutionary algorithms. IEEE             362(6419):1140–1144, 2018. https://www.science.
+     Transactions on Evolutionary Computation, 23(3):421–            org/doi/full/10.1126/science.aar6404.
+     441, 2018. https://ieeexplore.ieee.org/stamp/
+     stamp.jsp?tp=&arnumber=8454482.                            [52] Nidamarthi Srinivas and Kalyanmoy Deb. Muiltiobjec-
+                                                                     tive optimization using nondominated sorting in genetic
+[44] Yi Mei, Mohammad Nabi Omidvar, Xiaodong Li, and
+                                                                     algorithms. Evolutionary Computation, 2(3):221–248,
+     Xin Yao. A competitive divide-and-conquer algorithm
+                                                                     1994. https://ieeexplore.ieee.org/abstract/
+     for unconstrained large-scale black-box optimization.
+                                                                     document/6791727.
+     ACM Transactions on Mathematical Software, 42(2):1–
+     24, 2016. https://dl.acm.org/doi/pdf/10.1145/
+                                                                [53] Mingxing Tan and Quoc Le. EfficientNetV2: Smaller
+     2791291.
+                                                                     models and faster training. In International Conference
+[45] Pratyush Mishra, Ryan Lehmkuhl, Akshayaram Srini-               on Machine Learning, volume 139, pages 10096–10106,
+     vasan, Wenting Zheng, and Raluca Ada Popa. Delphi:              2021.
+     A cryptographic inference service for neural networks.
+                                                                [54] TFHE. Tfhe v1.1. 2020. https://github.com/tfhe/
+     In USENIX Security Symposium, pages 2505–2522,
+                                                                     tfhe.
+     2020. https://www.usenix.org/system/files/
+     sec20-mishra_0.pdf.
+                                                                [55] Ilya O Tolstikhin, Neil Houlsby, Alexander Kolesnikov,
+[46] Jaiyoung Park, Michael Jaemin Kim, Wonkyung Jung,               Lucas Beyer, Xiaohua Zhai, Thomas Unterthiner,
+     and Jung Ho Ahn. AESPA: Accuracy preserving                     Jessica Yung, Andreas Steiner, Daniel Keysers, Jakob
+     low-degree polynomial activation for fast private infer-        Uszkoreit, et al. MLP-Mixer: An all-mlp architecture for
+     ence. arXiv preprint arXiv:2201.06699, 2022. https:             vision. In Advances in Neural Information Processing
+     //arxiv.org/abs/2201.06699.                                     Systems, volume 34, pages 24261–24272, 2021. https:
+                                                                     //proceedings.neurips.cc/paper/2021/file/
+[47] Deevashwer Rathee, Mayank Rathee, Rahul Kranti Ki-              cba0a4ee5ccd02fda0fe3f9a3e7b89fe-Paper.pdf.
+     ran Goli, Divya Gupta, Rahul Sharma, Nishanth Chan-
+     dran, and Aseem Rastogi. SiRnn: a math library for         [56] Ashish Vaswani, Noam Shazeer, Niki Parmar,
+     secure rnn inference. In IEEE Symposium on Se-                  Jakob Uszkoreit, Llion Jones, Aidan N Gomez,
+     curity and Privacy, pages 1003–1020, 2021. https:               Łukasz Kaiser, and Illia Polosukhin. Attention is
+     //eprint.iacr.org/2021/459.pdf.                                 all you need. In Advances in Neural Information
+                                                                     Processing Systems, volume 30, 2017.      https:
+[48] Hafiz Tayyab Rauf, Waqas Haider Khan Bangyal,                   //proceedings.neurips.cc/paper/2017/file/
+     and M Ikramullah Lali.    An adaptive hybrid                    3f5ee243547dee91fbd053c1c4a845aa-Paper.pdf.
+
+
+
+USENIX Association                                                               33rd USENIX Security Symposium        2189
+[57] Lilian Weng.   How to train really large mod-                while default modulus is set to 46 bits. These cryptographic
+     els on many gpus?    lilianweng.github.io, 2021.             parameters satisfy 128 bits of security [9].
+     https://lilianweng.github.io/posts/                             (5) M ULTIPLICATIVE D EPTH : The multiplicative depth
+     2021-09-25-train-large/.                                     of Bootstrapping (i.e., K), AppReLU, ConvBN, DownSam-
+                                                                  pling, AvgPool, FC layers are 14, 14, 2, 1, 1, 1 respectively.
+[58] Zhenyu Yang, Ke Tang, and Xin Yao. Large scale               Statistically, when using MPCNN to homomorphically evalu-
+     evolutionary optimization using cooperative coevo-           ate ResNet-18/32/44 on CIFAR10 or CIFAR100, AppReLUs
+     lution. Information Sciences, 178(15):2985–2999,             consume ∼ 50% of total levels, and bootstrapping operations
+     2008. https://www.sciencedirect.com/science/                 consume > 70% of latency.
+     article/pii/S002002550800073X.
+
+[59] Andrew Chi-Chih Yao.      How to generate and                B     AESPA under RNS-CKKS
+     exchange secrets.    In 27th Annual Symposium
+     on Foundations of Computer Science, pages 162–               AESPA [46] proposes HerPN to replace ReLU and Batch-
+     167, 1986. https://ieeexplore.ieee.org/stamp/                norm. HerPN is the approximation of ReLU using Hermite
+     stamp.jsp?tp=&arnumber=4568207.                              polynomials followed by basis-wise normalization. The Her-
+                                                                  mite approximation is f (x) = ∑∞   i=0 f̂ i hi (x) where normal-
+                                                                                                                              √
+[60] Barret Zoph and Quoc V Le. Neural architecture               ized probabilist’s Hermite polynomial hi (x) = Hn (x)/ n!
+                                                                                                          2
+                                                                  and coefficient f̂i = −∞ f (x)hi (x)e−x /2 . Given tensor x ∈
+                                                                                       R∞
+     search with reinforcement learning. arXiv preprint
+     arXiv:1611.01578, 2016. https://arxiv.org/abs/               RN×C×H×W , HerPN is defined as:
+     1611.01578.
+                                                                                                d
+                                                                                                     hi (xx) − µ i
+                                                                                    f (xx) = γ ∑ f̂i q             +β          (14)
+A      MPCNN under RNS-CKKS                                                                    i=0        σ 2i + ε
+
+MPCNN [33] is the state-of-the-art framework for homo-            where mean µ i ∈ RC and standard variance σ i ∈ RC are com-
+morphically evaluating deep CNNs on encrypted data under          puted over output of each Hermite polynomial, hi (xx). γ ∈ RC
+RNS-CKKS with high accuracy. Its salient features are as          and β ∈ RC are learnable parameters. AESPA uses the first
+follows.                                                          three Hermite bases, i.e., d = 2. Hermite bases and coeffi-
+   (1) C OMPACT PACKING : All channels of a tensor are            cients are:
+packed into a single ciphertext via multiplexed packing. Fur-
+                                                                                                                      x2 − 1
+thermore, multiplexed parallel (MP) convolution was pro-               h0 (x) = 1         h1 (x) = x        h2 (x) = √         (15)
+posed to process the ciphertext efficiently. Multiplexed pack-                                                            2
+ing can effectively avoid wasting slots due to strided convolu-                   1                  1                  1
+                                                                           fˆ0 = √             fˆ1 =            fˆ3 = √        (16)
+tions.                                                                            2π                 2                  4π
+   (2) H OMOMORPHIC E VALUATION A RCHITECTURE : To
+                                                                  HerPN can be cast as a second-degree polynomial to reduce
+refresh zero-level ciphertexts, bootstrapping operations are
+                                                                  multiplicative depth, namely:
+placed after every ConvBN (as shown in Figure 2), except
+for the first one. This hand-crafted homomorphic evaluation                          γ                γ
+architecture for ResNets is determined by the choice of cryp-         f (xx) = q              x2 + q          x + β+
+tographic parameters, the level consumption of operations,                       8π(σσ22 + ε)      2 σ 21 + ε
+and ResNet’s architectures.                                                                                      √        
+   (3) A PP R E LU: It replaces all ReLUs with the same high-                   1 − µ0            µ           1 + 2µµ2 
+                                                                         γ q              − q 1         −q                  (17)
+degree Minimax composite polynomial [32, 36] of degrees                             2
+                                                                                  σ0 + ε) 2 σ 1 + ε
+                                                                               2π(σ                 2             σ22 + ε)
+                                                                                                               8π(σ
+{15, 15, 27}. By noting that ReLU(x) = x·(0.5+0.5·sgn(x)),
+where sgn(x) is the sign function, the approximated ReLU          From Equation 17, the depth of HerPN is 2. Hence, 4 Conv-
+(AppReLU) is modeled as AppReLU(x) = x · (0.5 + 0.5 ·             HerPN layers should be followed by one bootstrapping opera-
+pα (x)), x ∈ [−1, 1]. pα (x) is the composite Minimax poly-       tion. AESPA was originally proposed for secure MPC [46].
+nomial. The precision α is defined as |pα (x) − sgn(x)| ≤ 2−α .   Our paper adopts AESPA as a low-degree baseline under
+AppReLU is expanded to arbitrary domains x ∈ [−B, B] of           RNS-CKKS. We design the homomorphic evaluation archi-
+pre-activations in CNNs by scaling it as B · AppReLU(x/B).        tecture of AESPA under RNS-CKKS as shown in Figure 2.
+B can be estimated on the training dataset.                       We build its C++ implementation on top of MPCNN by using
+   (4) C RYPTOGRAPHIC PARAMETERS : MPCNN sets N =                 its implementations of Conv, BN, Downsample, AvgPool, and
+216 , L = 30 and Hamming weight h = 192. Base modulus,            FC layers.
+special modulus, and bootstrapping modulus are set to 51 bits,
+
+
+
+2190    33rd USENIX Security Symposium                                                                         USENIX Association
+

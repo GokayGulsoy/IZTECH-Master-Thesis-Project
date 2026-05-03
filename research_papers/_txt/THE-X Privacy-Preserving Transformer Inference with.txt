@@ -1,0 +1,773 @@
+              THE-X: Privacy-Preserving Transformer Inference with
+                           Homomorphic Encryption
+         Tianyu Chen¨ © ? , Hangbo Baoª , Shaohan Huangª , Li Dongª , Binxing Jiao« ,
+                  Daxin Jiang« , Haoyi Zhou¨ © , Jianxin Li¨ © ) , Furu Weiª
+                              BDBC, Beihang University, China¨
+                             SKLSDE, Beihang University, China©
+                     Microsoft Researchª NLP Group, Microsoft STCA«
+                              {tianyuc, zhouhy,lijx}@buaa.edu.cn
+              {t-habao,shaohanh, lidong1, binxjia, djiang, fuwei}@microsoft.com
+                      Abstract
+                                                                                             Encrypt (data, key)
+
+    As more and more pre-trained language mod-
+    els adopt on-cloud deployment, the privacy is-                                            Decrypt (res, key)
+
+    sues grow quickly, mainly for the exposure of
+                                                                                 Cloud Service                        User
+    plain-text user data (e.g., search history, medi-         Finetuned Model                                      (plain text)
+                                                                                （encrypted text)
+    cal record, bank account). Privacy-preserving
+    inference of transformer models is on the de-             Figure 1: An overview of our THE-X. The transformer-
+    mand of cloud service users. To protect pri-              based model could inference on encrypted data with
+    vacy, it is an attractive choice to compute               our THE-X, enabling theory-guaranteed privacy protec-
+    only with ciphertext in homomorphic encryp-               tion for users.
+    tion (HE). However, enabling pre-trained mod-
+    els inference on ciphertext data is difficult due
+    to the complex computations in transformer
+    blocks, which are not supported by current HE             privacy challenges due to the sensitive nature of
+    tools yet. In this work, we introduce THE-X,              user data. For example, the input text or even text
+    an approximation approach for transformers,               vector representations in user requests can leak pri-
+    which enables privacy-preserving inference                vate information, which may cause the specific user
+    of pre-trained models developed by popular                to be identified (Schwartz and Solove, 2011; Zhu
+    frameworks. THE-X proposes a workflow to
+                                                              and Han, 2020). This lack of privacy guarantees
+    deal with complex computation in transformer
+    networks, including all the non-polynomial                may impede privacy-conscious users from releas-
+    functions like GELU, softmax, and Layer-                  ing their data to service providers. Thus, service
+    Norm. Experiments reveal our proposed THE-                providers may suffer from the deficiency of evolv-
+    X can enable transformer inference on en-                 ing models with user data. Besides, unintended
+    crypted data for different downstream tasks,              data disclosure and other privacy breaches may
+    all with negligible performance drop but enjoy-           result in litigation, fines, and reputation damages
+    ing the theory-guaranteed privacy-preserving              for service providers. These concerns spark our
+    advantage.
+                                                              proposal of THE-X, to enable privacy-preserving
+                                                              inference of transformer.
+1   Introduction
+                                                                 Specifically, we identify two challenges for the
+Accompanying the revolution of pre-trained mod-               privacy-preserving inference of pre-trained mod-
+els in many NLP applications, such as senti-                  els. The first challenge is how to protect users’
+ment analysis (Xu et al., 2019a), question an-                plain text data from access by third-party service
+swering (Yang et al., 2019b), information re-                 providers. (e.g., the clinic record or shopping his-
+trieval (Yang et al., 2019c), and text genera-                tory). Prior work has applied Differential Privacy
+tion (Raffel et al., 2020), many related technologies         (DP) (Dwork et al., 2006) and its variants to address
+have been deployed on the cloud to process user               similar privatization issues - originally for statis-
+data from personal customers, small businesses,               tical databases and more recently for DL (Abadi
+and large enterprises by industrial service providers.        et al., 2016) and NLP (Qu et al., 2021; Basu et al.,
+However, the convenience of the on-cloud pre-                 2021b; Fernandes et al., 2019; Lyu et al., 2020;
+training technology also comes with a series of               Basu et al., 2021a). However, this solution may
+    ?
+      Contribution during internship at MSRA. ) The corre-    suffer from eavesdropping attackers. A handful of
+sponding author is Jianxin Li <lijx@buaa.edu.cn>.             research (Zhu and Han, 2020; Zhao et al., 2020)
+                                                         3510
+                 Findings of the Association for Computational Linguistics: ACL 2022, pages 3510 - 3520
+                           May 22-27, 2022 c 2022 Association for Computational Linguistics
+demonstrated it possible to recover raw data from            preserving transformer inference with HE.
+gradient leakage. Also, privacy protection could
+                                                           • We design a practical and effective approxi-
+never be theory-guaranteed. The second challenge
+                                                             mation workflow for converting transformer-
+is the performance concern, recent works like Tex-
+                                                             based models into a function that consists of
+tHide (Huang et al., 2020) and FedNLP (Lin et al.,
+                                                             fully HE operations.
+2021) leverages the federated learning (Yang et al.,
+2019a) to train model on encrypted data, at cost           • A thorough set of experiments confirms the
+of considerable performance dropping. Focusing               negligible performance reduction with our
+on the privacy of training data, they have not fully         proposed THE-X approximation.
+explored privacy-preserving inference.
+   To solve the concerns above, we depict one prac-    2     Background
+tice of privacy-preserving inference in Figure 1,      2.1    Security and Privacy Concern of
+where a fine-tuned language model could be con-               Pre-trained Models
+verted into the cloud service mode with THE-X,
+and process users’ data with its eyes blind. During    Pre-trained models like BERT (Devlin et al., 2019)
+inference, the content of the user query is anony-     and GPT-3 (Brown et al., 2020) rely heavily on
+mous to the transformer model. The results of          the use of plain text data to get human-like perfor-
+computation are also ciphertext, which only can be     mance. Despite the remarkable achievements of
+decrypted by the user’s private key.                   pre-trained models, these state-of-the-art models
+                                                       can not directly answer some sensitive use cases, in-
+   In addition, we need a theory-guaranteed en-
+                                                       cluding the medical record (Christoph et al., 2015),
+cryption solution like the homomorphic encryp-
+                                                       search history (Shen et al., 2007) and other person-
+tion (HE) (Gentry, 2009) to convince both service
+                                                       ally identifiable information (PII).
+providers and users of the privacy security in pro-
+                                                          To avoid the direct computation on plain-text
+duction scenarios. The semantic security of HE
+                                                       data, recent works like TextHide (Huang et al.,
+is guaranteed by lattice-based cryptography, and
+                                                       2020) and DP-finetuning (Kerrigan et al., 2020)
+the HE computation results on ciphertext could be
+                                                       introduce the classical federated learning and dif-
+decrypted to the same results in plaintext, prevent-
+                                                       ferential privacy (DP) to protect the sensitive data.
+ing performance reduction cost. The basic idea of
+                                                       However, TextHide (Huang et al., 2020) can only
+homomorphic encryption is to perform computa-
+                                                       be applied to sentence-level tasks. Due to the mix-
+tions on encrypted data without first decrypting it,
+                                                       up operation, TextHide fails to model token-level
+which could fully ensure privacy in cloud-serving
+                                                       tasks like named entity recognition or semantic
+scenarios. It allows user data to be encrypted and
+                                                       role labelling. DP-finetuning would greatly sacri-
+out-sourced to commercial cloud environments for
+                                                       fice the performance of fine-tuned model by 20%
+processing.
+                                                       perplexity for a generation model like GPT-2.
+   However, due to the complex operations (e.g.,
+GELU activation) in transformer-based models, the      2.2    Practical Homomorphic Encryption
+popular partially homomorphic encryption solu-
+                                                       The classic definition of homomorphic encryption
+tion, which only supports addition or multiplica-
+                                                       is a form of encryption that permits users to per-
+tion, can not easily be adapted into scenarios of
+                                                       form computations on its encrypted data without
+pre-trained models. Based on HE transformer back-
+                                                       first decrypting it. These computations results are
+end (Boemer et al., 2019b,a, 2020), we designed a
+                                                       retained in an encrypted form, which could be de-
+series of approximation components to fulfill the
+                                                       crypted into identical output produced by the same
+whole inference pipeline of the mainstream trans-
+                                                       computations on the unencrypted data. Let F be a
+former backbone. We evaluate THE-X for BERT-
+                                                       function or the entire pre-trained model, E as an
+tiny on the GLUE benchmark (Wang et al., 2019)
+                                                       encryption function, D as a decryption function.
+and the CONLL2003 task (Tjong Kim Sang and
+                                                       Then for any allowed plain text input x, we have:
+De Meulder, 2003). Our results show that THE-X
+can achieve the privacy-preserving inference with
+                                                                      F (x) = D(g(E(x)),                (1)
+the averaged performance reduction of only 1.49%.
+   Our contributions include:                          where g is a constructed function to play the same
+                                                       role of function F , except on encrypted data. Fig-
+   • We are the first work to explore the privacy-     ure 1 shows how a user performs inference using
+                                                   3511
+a cloud-deployed pre-trained model which is not           Algorithm 1: Approximation Workflow
+trusted. First, the pre-trained model receives a ci-       Data: labeled task data D.
+phertext encrypted by the user private key and per-        Input: pre-trained Transformer model M,
+forms inference function g on the ciphertext. Then,                 softmax estimation model S.
+the server will send an encrypted result to the user,    1 Mc ← M (S, ReLU ).
+which can only be decrypted by the user key. At no                    // replace GELU and Softmax
+point does the cloud service provider gain access        2 while not done do
+to the plain text.                                       3     sample batches (xi , yi ) from D,
+   The Intel HE transformer for nGraph (Boemer           4     let (xi , yi ) optimize M
+                                                                                       c with S frozen.
+et al., 2019b,a) is a Homomorphic Encryption
+                                                           end
+backend to the deep learning models. Currently,
+                                                         5 M̃ ← M   c ⊕ Ñ .
+it supports the CKKS (Cheon et al., 2017) en-
+cryption scheme, implemented by the Simple En-              // add the layernorm approximation
+                                                         6 while not done do
+crypted Arithmetic Library (SEAL) (SEAL) from
+Microsoft Research. It is a research tool to demon-      7     sample batches (xi , yi ) from D,
+strate the feasibility of HE on deep learning.           8     freeze the parameters of M̃ except Ñ .
+                                                         9     compute k-th layernorm output Ok , O˜k .
+2.3 Challenges of Transformer Inference                 10     compute loss `k = MSELoss(Ok , O˜k ).
+    with HE                                             11
+                                                                                           P
+                                                               update Ñ with loss L = k `k .
+Some HE schemes only support a single alge-                end
+braic operation, such as addition or multiplica-        12 M̄ ← M̃         N.
+tion. These are known as "partially homomor-                    // discard the origin layernorm
+phic" schemes (PHE). Other schemes, called "fully          return M̄.
+homomorphic"(FHE), support two such as addi-
+tion and multiplication. Note that composing
+addition and multiplication suffices to construct       downstream data, we aim to produce a fully HE
+polynomial functions, and hence polynomial ap-          supported M̄ which is fine-tuned and ready for
+proximations to non-polynomial functions such as        deployment.
+GELU (Hendrycks and Gimpel, 2016) or Layer-                The two-stage optimization of algorithm 1 aims
+Norm (Xu et al., 2019b). Notably, this limitation       to find the best approximation checkpoint. For com-
+prevents the exact computation of any comparison-       putation efficiency, pre-trained models can also be
+based operations such as Max, Min, as well as           fine-tuned together with the layernorm approxima-
+common functions such as exponential or sigmoid.        tion, and it needs only a single optimization loop.
+Finally, "leveled homomorphic" schemes (LHE)            We will discuss the schedule of the different ap-
+support addition and multiplication, only up to a       proximation workflow in Sec 4.6. There are three
+fixed computational depth.                              major non-polynomial functions in the transformer
+                                                        block, where we will study in detail.
+3   THE-X: Formal Description
+                                                        3.1.1   Gaussion Error Linear Units (GLEU)
+There are two core ideas in THE-X. The first one is     With a computation of Gaussian error, Gaussian Er-
+to incorporate the user device into the HE inference,   ror Linear Units (GLEUs) (Hendrycks and Gimpel,
+and the second is using "simplified computation"        2016) is not suitable to serve as an active func-
+to approximate the non-polynomial functions.            tion in HE state. The Gaussian kernel includes
+   In the following, we will describe how to enable     unsupported functions like exponential. While in
+homomorphic encryption of transformer-based             the implementation of the transformer, GELU is
+models with THE-X.                                      defined as a fast approximated version, where the
+                                                        tanh function is still non-polynomial, unsupported
+3.1 Approximation Workflow
+                                                        by HE.
+First, we present the approximation workflow of
+THE-X, which consists of two stages: Standard                              p
+Finetuning and LN Distill as depicted in Figure 2.      G(x) = 0.5x(1+tanh[ 2/π(x+0.044715x3 )]).
+Given a pre-trained model M and corresponding                                                (2)
+                                                    3512
+                           Drop Pooler                        Add LN Approximation                     Drop Origin LN
+                                             Standard
+                                                                                      LN Distill
+                          Replace Softmax   Fine-tuning         Keep Original LN                       HE-transformer
+                           Replace GeLU
+
+     Pre-trained                                                                                                               Fine-tuned
+  Transformer Model                                                                                                        Transformer Model
+(Input with plain text)                                                                                                 (Input with cypher text)
+
+
+Figure 2: The Approximation Workflow of THE-X. To replace the non-polynomial operations, we split the fine-
+tuning stage into several subphases. Given a pre-trained checkpoint, we drop the pooler of the pre-trained model
+and replace softmax and GeLU. Afterward, we follow the standard fine-tuning for classification or regression tasks.
+We add LayerNorm approximation into the fine-tuned model and distill knowledge from original LN layers. After
+dropping the original LN, we convert the model into fully HE-supported ops with the HE transformer.
+
+
+                                GELU vs ReLU                                   The first thought to approximate softmax is to
+ 3
+
+
+
+
+                                                                            find alternatives of softmax operation in trans-
+                                                                            former, which include Taylor series approxima-
+ 2
+
+
+
+
+                                                                            tion (Vincent et al., 2015), softmax-free linear at-
+
+                                                          ——
+ 1
+
+
+
+
+                                                                            tention (Lu et al., 2021). However, both of them
+ 。
+
+
+
+
+                                                                ReLU        have some limitations. The Taylor series approxi-
+                                            。
+
+
+
+
+                                                                GELU
+                                                                            mation can only approximate the exponential oper-
+                                                1
+
+
+
+                                                          2
+
+
+
+                                                                    3
+
+
+
+
+       -3           -2         -1                                           ation. Softmax-free linear attention utilizes newton-
+                                                                            inverse to approximate division, but the approxi-
+Figure 3: The activation results of GELU compared
+                                                                            mation error is unbounded in full-scale attention
+with ReLU. With an input around zero, the activation
+results are very close. With a larger or smaller input
+                                                                            settings.
+value, the activation results tend to converge.                                For these considerations, we have no choice but
+                                                                            to design an estimation network with addition and
+                                                                            multiplication.
+   We illustrate the numerical comparison between
+GELU and RELU in Figure 3 , where the outputs                                                      X
+of GELU are very close to RELU. Hence, we pro-                                 S(xi ) = xi ∗ T (        ReLU (((xj )/2 + 1)3 )). (4)
+pose to replace the GELU layer in the model with a                                                 j
+ReLU activation function. Despite the M ax func-
+                                                                               Equation 4 is the formal description of our soft-
+tion in ReLU, other computations are well sup-
+                                                                            max estimation network. Same as the approxima-
+ported by HE. To enable the computation of M ax,
+                                                                            tion of GELU, ReLU operation here is realized
+we implement the first key idea, incorporating the
+                                                                            by communication with the client. Instead of a
+user device into the inference. The server will
+                                                                            division operation, we approximate reciprocal op-
+convey ciphertext input to the user for local M ax
+                                                                            eration with a three-layer linear neural network
+computation. Once received the connection, a user
+                                                                            denoted as T .
+device decrypts the ciphertext input and calls the
+                                                                               To get a better estimation of softmax, we ran-
+local M ax function to get the results and return
+                                                                            domly generate input tensors whose values are be-
+re-encrypted results to the server. Despite the com-
+                                                                            tween [−3, 3] and use their softmax scores as MSE
+munication cost, no plaintext is leaked during the
+                                                                            targets. Then we optimize the T for 100k steps
+TLS connection and semantic security is guaran-
+                                                                            with a learning rate of 1e-3 until the MSE loss drop
+teed.
+                                                                            down to 1e-6.
+3.1.2 Softmax                                                                  An under-explored problem here is the Infinite
+The second non-polynomial function is softmax,                              value of Masked Attention, where the input of soft-
+which includes the exponential and division com-                            max is always the masked attention scores. To
+putation.                                                                   prevent the attention of masked tokens, the origin
+                                                                            transformer model fills the masked attention scores
+                                  exp(xi )                                  with negative infinity before softmax. When fed
+                 Sof tmax(xi ) = P           .                     (3)
+                                  j exp(xj )                                with an infinite value, the softmax estimation model
+                                                                        3513
+may face numerical disaster. We will discuss this             of √1d into the weights of query projection
+                                                                     k
+phenomenon and the corresponding solution in Sec              layer.
+4.5.
+                                                            • We use a fully kernel convolution layer in-
+3.1.3 LayerNorm                                               stead of linear projection due to the lack of
+Recall that the layer normalization (Ba et al., 2016)         supported dense operation.
+in transformer is implemented over a mini-batch of
+inputs, which could be formulated as:                       • All matrix multiplication will be converted
+                                                              into the element-wise style.
+              x − E[x]
+           y=p            ∗ γ + β.               (5)        • We drop the pooler layer for the unsupported
+              V ar[x] + 
+                                                              operation of tanh.
+   The mean and standard deviation are calculated
+over division operations where the approximation        3.2    Privacy-preserving Inference
+is needed. γ and β are learnable affine transform       In this section, we describe the behavior of HE
+parameters. To avoid the introduction of new pa-        models during privacy-preserving inference. Note
+rameters, we keep the learnable parameters while        that inference is completed by the joint effort of the
+leaving the mean and standard deviation achieved        server and the user device.
+by regression.
+                                                         Algorithm 2: Inference with HE
+                  ŷ = x ◦ γ + β.                (6)      Input: user plain text query Pq , private key
+   The new parameter γ predicts the value of stan-                K generated under server protocol,
+dard deviation by regression from origin γ̂. We find              encrypted server model M.
+                                                        1 client computes embeddings: Eq ← Pq .
+the simple linear replacement is enough for values
+                                                        2 client encrypts query embeddings:
+with a small scale of bias. Here γ, β ∈ R and ◦
+denotes the Hadamard product.                              Cq ← Encrypt(Eq , K).
+                                                        3 server forwards the model: Ci = M(Cq ).
+   The layer normalization will be applied in each
+                                                        4 client handles activation: Ca = ReLU (Ci ).
+multi-head attention block and after the output
+                                                        5 server continues forwarding: Co = M(Ca ).
+dense layer. So the approximation error tends to
+                                                        6 client decrypts results:
+accumulate when the transformer stacks with too
+many layers.                                               Po = Decrypt(Co , K).
+   We treat the layernorm approximation as an indi-
+vidual stage in Figure 1 as LN-Distill to learn from       In Algorithm 2, notably absent is the support
+origin LN layers. A challenge here is the Attention     of ReLU operations, where the server exchanges
+Overflow, where the input attention score before        the activation results with the client. However, all
+normalization may have an unbounded scale, lead-        the communication between client and server is in
+ing to numerical problems. We will discuss the          ciphertext, ensuring the privacy of user queries and
+detail of Attention Overflow in Sec 4.5.                may prevent eavesdropping attackers from recover-
+3.1.4 Other Practical Replacement                       ing private text data.
+After the approximation workflow, a fine-tuned          4     Experiments
+model consists of only addition and multiplication
+operations, which is fully compatible with homo-        In this section, we design both sequence-level and
+morphic encryption. We power the model by HE            token-level tasks to evaluate the approximation per-
+transformer backend. Since the HE transformer           formance of our THE-X solution. We also discuss
+backend could only work for TensorFlow check-           several identified factors which greatly affect ap-
+point, any pre-trained transformers inherited from      proximation workflow.
+PyTorch building version need to be converted into
+                                                        4.1    Evaluation Tasks
+TensorFlow format first. There are some other de-
+tails worth mentioning here.                            GLUE (Wang et al., 2019), the General Language
+                            T
+                                                        Understanding Evaluation benchmark, is a collec-
+   • For the sof tmax( QK
+                       √
+                         dk
+                            )V operation in atten-      tion of tools for evaluating the performance of
+     tion score computation, we absorb the value        models across a diverse set of existing NLU tasks.
+                                                    3514
+Table 1: Performance on the GLUE1 tasks for both baseline (standard finetuning) and THE-X with BERT-tiny,
+measured on the development sets. We report the best results by hyper-parameter search. |D| denotes the number
+of training examples. THE-X only suffers average utility performance loss: < 1.5% in most tasks. ‘P/S corr.’ is
+Pearson/Spearman correlation and ‘m/mm’ denotes the accuracy scores on matched/mismatched set.
+
+  Tasks     |D|       Type       Metrics       Baseline             ReLU         ReLU-S       ReLU-S-L         HE          Perf ↓
+ SST-2      67k    Sentiment       Acc.          82.45               82.40         82.34         82.11         82.11         0.34
+ MRPC      3.7k    Paraphrase    F1/Acc.      81.57/70.10         81.69/70.34   80.81/69.85   79.93/68.87   79.94/68.87   1.63/1.23
+ STS-B       7k    Similarity    P/S corr.    72.83/73.66         72.89/73.03   74.19/74.27   68.38/70.96   68.39/70.97   4.44/2.69
+  QQP      364k    Paraphrase       F1        80.28/84.03         79.55/82.89   79.38/83.36   78.28/83.75   78.33/83.63   1.95/0.40
+ MNLI      393k       NLI         m/mm        69.75/70.75         69.51/70.60   68.61/69.13   68.59/69.41   68.47/69.08   1.28/1.67
+ QNLI      108k       NLI         ACC.           78.38               78.35         78.33         78.33         78.20         0.18
+  RTE      2.5k       NLI         ACC.           58.56               58.32         58.27         58.12         58.12         0.44
+              Average Perf ↓                       0.00              0.25          0.34          1.42          1.48         1.48
+
+
+Table 2: Performance on the CONLL2003 task for both                      et al., 2019) as our demo model, which is a stan-
+baseline and THE-X with BERT-tiny, measured on the                       dard transformer-based language model with only
+development sets. We find that the replacement with
+                                                                         2 layers and a hidden size of 128. We provide four
+ReLU has a slight effect on performance and even gets
+a better F1 score by 0.12 than original GELU activa-                     settings to evaluate different parts of our approxi-
+tion.                                                                    mation components.
+                                                                            • Baseline. In this setting, we make no replace-
+    Metrics       Precision     Recall        F1      Perf ↓
+                                                                              ment or approximation. We use the raw pre-
+    Raw             82.34       84.85        83.57           0                trained checkpoint to fine-tune on downstream
+    ReLU            82.29       85.13        83.69        -0.12               tasks.
+   ReLU-S           82.08       84.73        83.38         0.19
+  ReLU-S-L          79.65       83.79        81.67         1.90             • ReLU. We fine-tune the pre-trained model
+     HE             79.65       83.79        81.67         1.90               with all GELU activation replaced with ReLU.
+                                                                            • ReLU-S. In addition to ReLU, we fine-tune
+We choose a subset of GLUE1 tasks, which in-                                  the model with the softmax operation replaced
+clude: MRPC (Dolan and Brockett, 2005), SST-                                  by the softmax estimation model.
+2 (Socher et al., 2013), QQP2 , STS-B (Cer et al.,                          • ReLU-S-L. We implement full approximation
+2017), MNLI (Williams et al., 2018), QNLI (Ra-                                including a layer normalization replacement.
+jpurkar et al., 2016), and RTE (Dagan et al., 2005;
+Haim et al., 2006; Giampiccolo et al., 2007; Ben-                           • HE. We convert the fine-tuned checkpoint
+tivogli et al., 2009).                                                        with HE-transformer and power the inference
+   Following previous work (Devlin et al., 2019;                              with SEAL backend.
+Turc et al., 2019), we exclude the WNLI task from
+                                                                            Implementation. To reduce the variance of re-
+the GLUE benchmark. We also use the famous
+                                                                         sults under different settings, we choose hyper-
+CoNLL-2003 (Tjong Kim Sang and De Meulder,
+                                                                         parameters from a fixed set during approximation
+2003) named entity recognition task as our addi-
+                                                                         fine-tuning and HE inference runtime.
+tional token-level evaluation. In conclusion, we
+include the most varieties of NLU tasks, covering                           • For fine-tuning the approximation compo-
+both sequence-level and sentence-level tasks, in                              nents, we choose a batch size from {4, 8, 16,
+both regression and classification format.                                    32, 128} and a learning rate from 1e-4, 3e-
+                                                                              4, 3e-5, 5e-5 as mentioned in the initial bert
+4.2 Experiment Settings                                                       code (Turc et al., 2019). We use an Adam op-
+For computation efficiency and energy-saving con-                             timizer with weight decay chosen from {0.05,
+sideration, we use the released BERT-tiny (Turc                               0.1, 0.2, 0.4, 0.5}
+   1
+     CoLA task is not reported because of the limited capacity              • For HE evaluation, we use the HE-transformer
+of BERT-tiny.
+   2
+     https://www.quora.com/profile/Ricky-Riche-2/First-                       backend, where two parameters are recom-
+Quora-Dataset-Release-Question-Pairs                                          mended searching by Intel, the poly modules
+                                                                    3515
+    and coeff-modules. We choose the poly mod-
+    ules degree from {1024, 2048, 4096, 8192,
+    16384} and choose the coeff-modules from
+    {20, 30, 60}.
+
+4.3 Approximation Results
+Table 1 shows the results of the baseline and THE-
+X on the GLUE benchmark. The averaged perfor-
+mance reduction of THE-X is 1.48% when com-
+pared to the baseline model. We observe the most
+performance reduction comes from the approxi-
+                                                       Figure 4: Performance on CONLL2003 task with dif-
+mation of layernorm, which incurs a reduction of
+                                                       ferent mask values. We find the “Negative Infinity”
+1.08%. The softmax estimation model contributes        value of the 0 mask greatly reduces approximation per-
+the least performance drop among the approxima-        formance. In THE-X using a mask value in [-3, -5]
+tion components, for only 0.09% on average, in-        might be a default choice.
+dicating the softmax function could be well imi-
+tated by neural networks. We also find the average
+performance reduction of HE is quite negligible,       attention mask values, the approximation method
+where the slight drop may be due to the sequence       is extremely sensitive to the numerical changes.
+truncation.                                            We assume the softmax estimation model fails to
+   The results of THE-X on token-level NER task        deal with large input values and leads to a credi-
+are reported in Table 2. The replacement of GELU       ble performance drop. However, when the value
+with ReLU even improves the performance of the         of the attention mask becomes too small, it serves
+F1 score. We assume the slight improvement may         as a bias to attention scores, which also leads to a
+come from unexpected bias. However, the layer-         certain performance drop. We recommend using a
+norm approximation incurs the most performance         moderate mask value between -2 and -5.
+reduction. We assume token-level tasks need a
+more detailed pattern in attention score. After all,   4.5   Attention Overflow
+THE-X still works well in the token-level task with
+a merely F1 reduction of 1.9%.                         Another challenge of THE-X is the attention score
+   Across different types of tasks, we find our THE-   input of layer normalization. In most cases, the
+X yields the best performance on the classification    scale of multi-head attention output is very dense
+tasks, including paraphrase, sentiment and NLI.        around [−1, 1]. However, before normalization, we
+Among the classification tasks, the performance        also observe the attention scores are scarily sparse,
+of QNLI drops the least, for only 0.18%. We also       with some extreme values reaching 1e4, which is
+find the performance drops most on the regression      difficult for our LN-distill stage. To prevent the
+tasks, such as the similarity task STS-B, for 4.44%    overflow attention scores, we use the weight decay
+pearson correlation and 2.69% spearman correla-        of Adam optimizer as regularization.
+tion. We assume the regression task needs a higher        In Figure 5, we present the attention overflow
+numerical precision than the classification task.      phenomenon across different tasks. Without any
+                                                       regularization, our approximation method yields
+4.4 Negative Infinity                                  uncontrolled attention scores, leading to poor per-
+Recall in Equation 4, we replace softmax with a        formance. As the weight decay increases, the at-
+neural estimation model. To prevent the attention      tention scores tend to converge and benefit better
+of masked tokens, the origin transformer model         approximation results. We also observe that the
+fills the masked attention scores with negative in-    larger weight decay may harm the performance
+finity before softmax, where the numerical disas-      on NLI tasks, where the regularization could be
+ter occurs in our approximation method. In Fig-        seen as trade-off between better approximation re-
+ure 4, to solve this problem, we give an empiri-       sults and higher performance upper bound. For the
+cal study of how "negative" the masked attention       NER task, larger weight decay may even benefit
+scores should be. Despite the indistinguishable F1     the performance and also boost our approximation
+score change of raw model fine-tune with different     method.
+                                                   3516
+Figure 5: Performance on all tasks with different weight decay values, measured on the development sets. Metrics
+are marked on the y-axis and weight decay values are marked on the x-axis.
+
+
+4.6 Schedule of Approximation workflow                    100
+                                                                   -     Two Stages   -     Joint FT S   一 Joint FT LN     -    Joint FT S+LN
+
+
+There are still doubts about how to organize the sev-       80
+
+
+eral optimization steps for the best approximation            60
+
+performance. We investigate four schedule plans:
+                                                              40
+
+
+   • Two Stages. Where we freeze the softmax                  20
+
+     estimation model during standard fine-tuning.
+                                                               。
+
+
+
+
+     We select the best checkpoint to implement                        多飞一？    沁邸；        多－8     Q咄      愤\_\    Q~\..\       «t     ｀饺
+     the second stage - distill the layer normaliza-
+     tion network.                                        Figure 6: Performance on all tasks with different or-
+                                                          ganizations of approximation workflow. Jointly fine-
+   • Joint FT S. We optimize the softmax estima-          tuning the softmax estimation model or approximated
+                                                          layernorm leads to a performance drop across all tasks.
+     tion model during standard fine-tuning and
+     apply the LN-distillation after.
+                                                          it is hard to achieve satisfying results. In conclu-
+   • Joint FT LN. We apply one-pass optimiza-             sion, the softmax estimation model and the approx-
+     tion with the softmax estimation model frozen        imated layernorm are both critical components to
+     but update the other parameters including            the performance of THE-X, deserving individual
+     layer normalization network. No further LN-          optimization.
+     distill will be implemented.
+                                                          5        Conclusions
+   • Joint FT S + LN. A total one-pass optimiza-
+     tion with all approximation parameters up-          We present THE-X, a practical approach to enable
+     dated with the model together.                      pre-trained transformer models to infer under ho-
+                                                         momorphic encryption. It requires several approxi-
+   As illustrated in Figure 6, we observe that fine-     mation components to replace the original opera-
+tuning the different approximation components in-        tions in the transformer model. It imposes a slight
+dividually (aka. "Two stages") may be a good de-         burden in terms of performance cost but enjoys the
+fault to keep the best performance of approxima-         full advantage of homomorphic encryption - the
+tion. For the regression task STS-B, jointly fine-       theory-guaranteed user privacy.
+tuning the softmax estimation model and approx-             We see this as a first step in combing homomor-
+imated layernorm even fails to fulfill the approxi-      phic encryption to address emerging privacy issues
+mation pipeline, pulling the performance down to         in pre-trained models. We hope our work motivates
+0.4%. We assume fine-tuning different components         further research, including better approximation so-
+may fall into a bi-level optimization problem and        lutions on different NLP applications.
+                                                     3517
+6   Acknowledgments                                             2019, Alghero, Italy, April 30 - May 2, 2019, pages
+                                                                3–13. ACM.
+This paper is supported in part by the NSFC
+through grant No.U20B2053. We also thanks the                Tom B. Brown, Benjamin Mann, Nick Ryder, Melanie
+support from Beijing Advanced Innovation Center                Subbiah, Jared Kaplan, Prafulla Dhariwal, Arvind
+                                                               Neelakantan, Pranav Shyam, Girish Sastry, Amanda
+for Future Blockchain and Privacy Computing.                   Askell, Sandhini Agarwal, Ariel Herbert-Voss,
+                                                               Gretchen Krueger, Tom Henighan, Rewon Child,
+                                                               Aditya Ramesh, Daniel M. Ziegler, Jeffrey Wu,
+References                                                     Clemens Winter, Christopher Hesse, Mark Chen,
+                                                               Eric Sigler, Mateusz Litwin, Scott Gray, Benjamin
+Martín Abadi, Andy Chu, Ian J. Goodfellow, H. Bren-
+                                                               Chess, Jack Clark, Christopher Berner, Sam Mc-
+ dan McMahan, Ilya Mironov, Kunal Talwar, and
+                                                               Candlish, Alec Radford, Ilya Sutskever, and Dario
+ Li Zhang. 2016. Deep learning with differential pri-
+                                                               Amodei. 2020. Language models are few-shot learn-
+ vacy. In Proceedings of the 2016 ACM SIGSAC Con-
+                                                               ers. In Advances in Neural Information Processing
+ ference on Computer and Communications Security,
+                                                               Systems 33: Annual Conference on Neural Informa-
+ Vienna, Austria, October 24-28, 2016, pages 308–
+                                                               tion Processing Systems 2020, NeurIPS 2020, De-
+ 318. ACM.
+                                                               cember 6-12, 2020, virtual.
+Lei Jimmy Ba, Jamie Ryan Kiros, and Geoffrey E.
+  Hinton. 2016.   Layer normalization.   CoRR,               Daniel Cer, Mona Diab, Eneko Agirre, Iñigo Lopez-
+  abs/1607.06450.                                              Gazpio, and Lucia Specia. 2017. SemEval-2017
+                                                               task 1: Semantic textual similarity multilingual and
+Priyam Basu, Tiasa Singha Roy, Rakshit Naidu, and              crosslingual focused evaluation. In Proceedings
+   Zumrut Muftuoglu. 2021a. Privacy enabled finan-             of the 11th International Workshop on Semantic
+   cial text classification using differential privacy and     Evaluation (SemEval-2017), pages 1–14, Vancouver,
+   federated learning. In Proceedings of the Third             Canada. Association for Computational Linguistics.
+  Workshop on Economics and Natural Language Pro-
+   cessing, pages 50–55, Punta Cana, Dominican Re-           Jung Hee Cheon, Andrey Kim, Miran Kim, and
+   public. Association for Computational Linguistics.          Yong Soo Song. 2017. Homomorphic encryption for
+                                                               arithmetic of approximate numbers. In Advances in
+Priyam Basu, Tiasa Singha Roy, Rakshit Naidu, Züm-             Cryptology - ASIACRYPT 2017 - 23rd International
+   rüt Müftüoglu, Sahib Singh, and Fatemehsadat                Conference on the Theory and Applications of Cryp-
+   Mireshghallah. 2021b. Benchmarking differential             tology and Information Security, Hong Kong, China,
+   privacy and federated learning for BERT models.             December 3-7, 2017, Proceedings, Part I, volume
+   CoRR, abs/2106.13973.                                       10624 of Lecture Notes in Computer Science, pages
+                                                               409–437. Springer.
+Luisa Bentivogli, Bernardo Magnini, Ido Dagan,
+  Hoa Trang Dang, and Danilo Giampiccolo. 2009.              J Christoph, L Griebel, I Leb, I Engel, F Köpcke,
+  The fifth PASCAL recognizing textual entailment              D Toddenroth, H-U Prokosch, J Laufer, K Mar-
+  challenge. In Proceedings of the Second Text Analy-          quardt, and M Sedlmayr. 2015. Secure secondary
+  sis Conference, TAC 2009, Gaithersburg, Maryland,            use of clinical data with cloud-based nlp services.
+  USA, November 16-17, 2009. NIST.                             Methods of information in medicine, 54(03):276–
+Fabian Boemer, Rosario Cammarota, Daniel Demm-                 282.
+  ler, Thomas Schneider, and Hossein Yalame. 2020.
+  MP2ML: A mixed-protocol machine learning frame-            Ido Dagan, Oren Glickman, and Bernardo Magnini.
+  work for private inference. In PPMLP’20: Proceed-             2005. The PASCAL recognising textual entail-
+  ings of the 2020 Workshop on Privacy-Preserving               ment challenge. In Machine Learning Challenges,
+  Machine Learning in Practice, Virtual Event, USA,            Evaluating Predictive Uncertainty, Visual Object
+  November, 2020, pages 43–45. ACM.                            Classification and Recognizing Textual Entailment,
+                                                               First PASCAL Machine Learning Challenges Work-
+Fabian Boemer, Anamaria Costache, Rosario Cam-                  shop, MLCW 2005, Southampton, UK, April 11-
+  marota, and Casimir Wierzynski. 2019a. ngraph-               13, 2005, Revised Selected Papers, volume 3944 of
+  he2: A high-throughput framework for neural net-             Lecture Notes in Computer Science, pages 177–190.
+  work inference on encrypted data. In Proceedings of           Springer.
+  the 7th ACM Workshop on Encrypted Computing &
+  Applied Homomorphic Cryptography, WAHC@CCS                 Jacob Devlin, Ming-Wei Chang, Kenton Lee, and
+  2019, London, UK, November 11-15, 2019, pages                 Kristina Toutanova. 2019. BERT: Pre-training of
+  45–56. ACM.                                                   deep bidirectional transformers for language under-
+                                                                standing. In Proceedings of the 2019 Conference
+Fabian Boemer, Yixing Lao, Rosario Cammarota, and               of the North American Chapter of the Association
+  Casimir Wierzynski. 2019b. ngraph-he: a graph                 for Computational Linguistics: Human Language
+  compiler for deep learning on homomorphically en-            Technologies, Volume 1 (Long and Short Papers),
+  crypted data. In Proceedings of the 16th ACM In-              pages 4171–4186, Minneapolis, Minnesota. Associ-
+  ternational Conference on Computing Frontiers, CF             ation for Computational Linguistics.
+
+                                                         3518
+William B. Dolan and Chris Brockett. 2005. Automati-          Ren, and Salman Avestimehr. 2021. Fednlp: A re-
+  cally constructing a corpus of sentential paraphrases.      search platform for federated learning in natural lan-
+  In Proceedings of the Third International Workshop          guage processing. CoRR, abs/2104.08815.
+  on Paraphrasing, IWP@IJCNLP 2005, Jeju Island,
+  Korea, October 2005, 2005. Asian Federation of           Jiachen Lu, Jinghan Yao, Junge Zhang, Xiatian
+  Natural Language Processing.                                Zhu, Hang Xu, Weiguo Gao, Chunjing Xu, Tao
+                                                              Xiang, and Li Zhang. 2021.      SOFT: softmax-
+Cynthia Dwork, Frank McSherry, Kobbi Nissim, and              free transformer with linear complexity. CoRR,
+  Adam D. Smith. 2006. Calibrating noise to sensi-            abs/2110.11945.
+  tivity in private data analysis. In Theory of Cryp-
+  tography, Third Theory of Cryptography Conference,       Lingjuan Lyu, Xuanli He, and Yitong Li. 2020. Differ-
+  TCC 2006, New York, NY, USA, March 4-7, 2006,              entially private representation for NLP: formal guar-
+  Proceedings, volume 3876 of Lecture Notes in Com-          antee and an empirical study on privacy and fair-
+  puter Science, pages 265–284. Springer.                    ness. In Findings of the Association for Compu-
+                                                             tational Linguistics: EMNLP 2020, Online Event,
+Natasha Fernandes, Mark Dras, and Annabelle McIver.          16-20 November 2020, volume EMNLP 2020 of
+  2019. Generalised differential privacy for text docu-      Findings of ACL, pages 2355–2365. Association for
+  ment processing. In Principles of Security and Trust       Computational Linguistics.
+ - 8th International Conference, POST 2019, Held
+  as Part of the European Joint Conferences on The-        Chen Qu, Weize Kong, Liu Yang, Mingyang Zhang,
+  ory and Practice of Software, ETAPS 2019, Prague,          Michael Bendersky, and Marc Najork. 2021. Natu-
+  Czech Republic, April 6-11, 2019, Proceedings, vol-        ral language understanding with privacy-preserving
+  ume 11426 of Lecture Notes in Computer Science,            bert. Proceedings of the 30th ACM International
+  pages 123–148. Springer.                                   Conference on Information & Knowledge Manage-
+                                                             ment.
+Craig Gentry. 2009. Fully homomorphic encryption us-
+                                                           Colin Raffel, Noam Shazeer, Adam Roberts, Katherine
+  ing ideal lattices. In Proceedings of the 41st Annual
+                                                             Lee, Sharan Narang, Michael Matena, Yanqi Zhou,
+  ACM Symposium on Theory of Computing, STOC
+                                                             Wei Li, and Peter J. Liu. 2020. Exploring the limits
+  2009, Bethesda, MD, USA, May 31 - June 2, 2009,
+                                                             of transfer learning with a unified text-to-text trans-
+  pages 169–178. ACM.
+                                                             former. J. Mach. Learn. Res., 21:140:1–140:67.
+Danilo Giampiccolo, Bernardo Magnini, Ido Dagan,           Pranav Rajpurkar, Jian Zhang, Konstantin Lopyrev, and
+  and Bill Dolan. 2007. The third PASCAL recog-              Percy Liang. 2016. Squad: 100, 000+ questions for
+  nizing textual entailment challenge. In Proceedings        machine comprehension of text. In Proceedings of
+  of the ACL-PASCAL@ACL 2007 Workshop on Tex-                the 2016 Conference on Empirical Methods in Nat-
+  tual Entailment and Paraphrasing, Prague, Czech            ural Language Processing, EMNLP 2016, Austin,
+  Republic, June 28-29, 2007, pages 1–9. Association         Texas, USA, November 1-4, 2016, pages 2383–2392.
+  for Computational Linguistics.                             The Association for Computational Linguistics.
+R Bar Haim, Ido Dagan, Bill Dolan, Lisa Ferro, Danilo      Paul M Schwartz and Daniel J Solove. 2011. The pii
+  Giampiccolo, Bernardo Magnini, and Idan Szpektor.          problem: Privacy and a new concept of personally
+  2006. The second pascal recognising textual entail-        identifiable information. NYUL rev., 86:1814.
+  ment challenge. In Proceedings of the Second PAS-
+  CAL Challenges Workshop on Recognising Textual           SEAL. 2020. Microsoft SEAL (release 3.6). https:
+  Entailment.                                                //github.com/Microsoft/SEAL. Microsoft
+                                                             Research, Redmond, WA.
+Dan Hendrycks and Kevin Gimpel. 2016. Bridging
+  nonlinearities and stochastic regularizers with gaus-    Xuehua Shen, Bin Tan, and ChengXiang Zhai. 2007.
+  sian error linear units. CoRR, abs/1606.08415.             Privacy protection in personalized search. SIGIR Fo-
+                                                             rum, 41(1):4–17.
+Yangsibo Huang, Zhao Song, Danqi Chen, Kai Li, and
+  Sanjeev Arora. 2020. TextHide: Tackling data pri-        Richard Socher, Alex Perelygin, Jean Wu, Jason
+  vacy in language understanding tasks. In Findings          Chuang, Christopher D. Manning, Andrew Y. Ng,
+  of the Association for Computational Linguistics:          and Christopher Potts. 2013. Recursive deep mod-
+  EMNLP 2020, pages 1368–1382, Online. Associa-              els for semantic compositionality over a sentiment
+  tion for Computational Linguistics.                        treebank. In Proceedings of the 2013 Conference
+                                                             on Empirical Methods in Natural Language Process-
+Gavin Kerrigan, Dylan Slack, and Jens Tuyls. 2020.           ing, EMNLP 2013, 18-21 October 2013, Grand Hy-
+  Differentially private language models benefit from        att Seattle, Seattle, Washington, USA, A meeting of
+  public pre-training. In Proceedings of the Second          SIGDAT, a Special Interest Group of the ACL, pages
+  Workshop on Privacy in NLP, pages 39–45, Online.           1631–1642. ACL.
+  Association for Computational Linguistics.
+                                                           Erik F. Tjong Kim Sang and Fien De Meulder.
+Bill Yuchen Lin, Chaoyang He, Zihang Zeng, Hulin              2003. Introduction to the CoNLL-2003 shared task:
+  Wang, Yufen Huang, Mahdi Soltanolkotabi, Xiang              Language-independent named entity recognition. In
+
+                                                       3519
+  Proceedings of the Seventh Conference on Natu-              for Computational Linguistics: Human Language
+  ral Language Learning at HLT-NAACL 2003, pages              Technologies, NAACL-HLT 2019, Minneapolis, MN,
+  142–147.                                                    USA, June 2-7, 2019, Demonstrations, pages 72–77.
+                                                              Association for Computational Linguistics.
+Iulia Turc, Ming-Wei Chang, Kenton Lee, and Kristina
+   Toutanova. 2019. Well-read students learn better:       Wei Yang, Haotian Zhang, and Jimmy Lin. 2019c. Sim-
+   On the importance of pre-training compact models.         ple applications of BERT for ad hoc document re-
+   arXiv preprint arXiv:1908.08962.                          trieval. CoRR, abs/1903.10972.
+
+Pascal Vincent, Alexandre de Brébisson, and Xavier         Bo Zhao, Konda Reddy Mopuri, and Hakan Bilen.
+  Bouthillier. 2015. Efficient exact gradient update         2020. idlg: Improved deep leakage from gradients.
+  for training deep networks with very large sparse tar-     CoRR, abs/2001.02610.
+  gets. In Advances in Neural Information Processing
+  Systems 28: Annual Conference on Neural Informa-         Ligeng Zhu and Song Han. 2020. Deep leakage from
+  tion Processing Systems 2015, December 7-12, 2015,         gradients. In Qiang Yang, Lixin Fan, and Han Yu,
+  Montreal, Quebec, Canada, pages 1108–1116.                 editors, Federated Learning - Privacy and Incentive,
+                                                             volume 12500 of Lecture Notes in Computer Sci-
+Alex Wang, Amanpreet Singh, Julian Michael, Felix            ence, pages 17–31. Springer.
+  Hill, Omer Levy, and Samuel R. Bowman. 2019.
+  GLUE: A multi-task benchmark and analysis plat-
+  form for natural language understanding. In 7th
+  International Conference on Learning Representa-
+  tions, ICLR 2019, New Orleans, LA, USA, May 6-9,
+  2019. OpenReview.net.
+
+Adina Williams, Nikita Nangia, and Samuel R. Bow-
+  man. 2018. A broad-coverage challenge corpus
+  for sentence understanding through inference. In
+  Proceedings of the 2018 Conference of the North
+  American Chapter of the Association for Computa-
+  tional Linguistics: Human Language Technologies,
+  NAACL-HLT 2018, New Orleans, Louisiana, USA,
+  June 1-6, 2018, Volume 1 (Long Papers), pages
+  1112–1122. Association for Computational Linguis-
+  tics.
+
+Hu Xu, Bing Liu, Lei Shu, and Philip S. Yu. 2019a.
+  BERT post-training for review reading comprehen-
+  sion and aspect-based sentiment analysis. In Pro-
+  ceedings of the 2019 Conference of the North
+  American Chapter of the Association for Computa-
+  tional Linguistics: Human Language Technologies,
+  NAACL-HLT 2019, Minneapolis, MN, USA, June 2-
+  7, 2019, Volume 1 (Long and Short Papers), pages
+  2324–2335. Association for Computational Linguis-
+  tics.
+
+Jingjing Xu, Xu Sun, Zhiyuan Zhang, Guangxiang
+   Zhao, and Junyang Lin. 2019b. Understanding and
+   improving layer normalization. In Advances in Neu-
+   ral Information Processing Systems 32: Annual Con-
+   ference on Neural Information Processing Systems
+   2019, NeurIPS 2019, December 8-14, 2019, Vancou-
+   ver, BC, Canada, pages 4383–4393.
+
+Qiang Yang, Yang Liu, Yong Cheng, Yan Kang, Tian-
+  jian Chen, and Han Yu. 2019a. Federated Learning.
+  Synthesis Lectures on Artificial Intelligence and Ma-
+  chine Learning. Morgan & Claypool Publishers.
+
+Wei Yang, Yuqing Xie, Aileen Lin, Xingyu Li, Luchen
+ Tan, Kun Xiong, Ming Li, and Jimmy Lin. 2019b.
+  End-to-end open-domain question answering with
+  bertserini. In Proceedings of the 2019 Conference
+  of the North American Chapter of the Association
+
+                                                       3520
+

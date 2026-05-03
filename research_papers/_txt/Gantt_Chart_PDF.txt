@@ -1,0 +1,105 @@
+Untitled Gantt Project                                 Mar 23, 2026
+                                                             http://
+
+
+
+Project manager
+Project dates            Mar 16, 2026 - Jul 31, 2027
+
+Completion               0%
+Tasks                    25
+Resources                0
+Untitled Gantt Project                                                       Mar 23, 2026
+                                                                                       2
+Tasks
+  Name                                               Begin date   End date
+  Phase 1: Foundation & Tooling                      3/16/26      6/5/26
+  Study CKKS Math & FHE Cryptography                 3/16/26      4/24/26
+  Setup Local Env (Python/PyTorch/TenSEAL)           3/16/26      4/3/26
+  Literature Review on Polynomial Approximations     4/6/26       5/15/26
+  Phase 2: Plaintext Prototyping                     5/15/26      8/6/26
+  Implement BERT-Tiny Baseline                       5/18/26      6/12/26
+  Develop Custom Approximations (Softmax/GELU)       6/15/26      7/10/26
+  Baseline NLP Benchmarking (Perplexity/BLEU)        7/13/26      8/7/26
+  Phase 3: Cryptographic Integration                 7/14/26      11/16/26
+  Encrypt Feed-Forward Networks                      8/10/26      9/18/26
+  Encrypt Self-Attention Mechanism                   9/21/26      11/13/26
+  Integrate Full Ciphertext Transformer Block        11/16/26     12/11/26
+  Phase 4: Local Hardware Optimization (32GB RAM)    10/12/26     1/1/27
+  Profile RAM Bottlenecks & Ciphertext Expansion     12/14/26     1/8/27
+  Tune CKKS Parameters (Polynomial Degree/Modulus)   1/11/27      2/5/27
+  Implement Layer-wise SSD Offloading Script         2/8/27       3/5/27
+  Phase 5: Cloud Scaling (Colab A100 GPU)            12/11/26     3/4/27
+  Provision Cloud Env & CUDA Integration             3/8/27       3/26/27
+  Port Models to GPU-Accelerated FHE (Concrete-ML)   3/29/27      4/30/27
+  Quantize LLM Weights to Mitigate VRAM Limits       5/3/27       5/28/27
+  Phase 6: Evaluation & Thesis Writing               2/9/27       4/5/27
+  Final Data Collection & Comparative Analysis       5/31/27      6/18/27
+  Draft Chapter 4 (Experiments & Results)            6/21/27      7/2/27
+  Draft Chapter 5 (Conclusion & Future Work)         7/5/27       7/16/27
+  Final Review & Thesis Defense Prep                 7/19/27      7/30/27
+Untitled Gantt Project                                                                                Mar 23, 2026
+                                                                                                                      3
+Gantt Chart
+                                                                                         2026
+
+                                                                                         January   February   March       April
+                                 Name              Begin date        End date
+
+Phase 1: Foundation & Tooling                              3/16/26              6/5/26
+
+Study CKKS Math & FHE Cryptography                         3/16/26          4/24/26
+
+Setup Local Env (Python/PyTorch/TenSEAL)                   3/16/26              4/3/26
+
+Literature Review on Polynomial Approximations              4/6/26          5/15/26
+
+Phase 2: Plaintext Prototyping                             5/15/26              8/6/26
+
+Implement BERT-Tiny Baseline                               5/18/26          6/12/26
+
+Develop Custom Approximations (Softmax/GELU)               6/15/26          7/10/26
+
+Baseline NLP Benchmarking (Perplexity/BLEU)                7/13/26              8/7/26
+
+Phase 3: Cryptographic Integration                         7/14/26         11/16/26
+
+Encrypt Feed-Forward Networks                              8/10/26          9/18/26
+
+Encrypt Self-Attention Mechanism                           9/21/26         11/13/26
+
+Integrate Full Ciphertext Transformer Block               11/16/26         12/11/26
+
+Phase 4: Local Hardware Optimization (32GB RAM)           10/12/26              1/1/27
+
+Profile RAM Bottlenecks & Ciphertext Expansion            12/14/26              1/8/27
+
+Tune CKKS Parameters (Polynomial Degree/Modulus)           1/11/27              2/5/27
+
+Implement Layer-wise SSD Offloading Script                  2/8/27              3/5/27
+
+Phase 5: Cloud Scaling (Colab A100 GPU)                   12/11/26              3/4/27
+
+Provision Cloud Env & CUDA Integration                      3/8/27          3/26/27
+
+Port Models to GPU-Accelerated FHE (Concrete-ML)           3/29/27          4/30/27
+
+Quantize LLM Weights to Mitigate VRAM Limits                5/3/27          5/28/27
+
+Phase 6: Evaluation & Thesis Writing                        2/9/27              4/5/27
+
+Final Data Collection & Comparative Analysis               5/31/27          6/18/27
+
+Draft Chapter 4 (Experiments & Results)                    6/21/27              7/2/27
+
+Draft Chapter 5 (Conclusion & Future Work)                  7/5/27          7/16/27
+
+Final Review & Thesis Defense Prep                         7/19/27          7/30/27
+Untitled Gantt Project                                       Mar 23, 2026
+                                                                       4
+Resources Chart
+                                        2026
+
+                                        January   February   March          Apr
+             Name        Default role
+

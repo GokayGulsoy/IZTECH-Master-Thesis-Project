@@ -1,0 +1,67 @@
+Literature Review Blueprint: FHE Polynomial
+Approximations
+Goal: Expand Section 2.3 (The Non-Linearity Bottleneck) and Section 3.3 (Polynomial
+Approximations) of the Master's thesis.
+
+Step 1: The Polynomial Baseline & CryptoNets
+Before tackling modern Large Language Models, the thesis must establish the historical context
+of replacing non-linear activation functions in neural networks.
+ ●​ Target Paper: CryptoNets: Applying Neural Networks to Encrypted Data with High
+    Throughput and Accuracy (Gilad-Bachrach et al., 2016).
+ ●​ What to extract for Chapter 2:
+    ○​ The justification for replacing the ReLU function.
+    ○​ The introduction of the lowest-degree approximation: $f(x) = x^2$.
+    ○​ The trade-off observed between this simple polynomial and the model's predictive
+        accuracy.
+
+Step 2: The Softmax and Attention Bottleneck
+Moving from basic neural networks to Transformers, the complexity of the functions increases
+drastically. The thesis must detail how researchers handle the division and exponentiation inside
+the self-attention mechanism.
+ ●​ Target Papers: * Iron: Homomorphic Evaluation of Transformer-based Models (Hao et al.,
+    2023).
+    ○​ THE-X: Privacy-Preserving Transformer Inference with Homomorphic Encryption (Chen
+        et al., 2023).
+ ●​ What to extract for Chapters 2 & 3:
+    ○​ How the Softmax denominator (the sum of exponentials) is approximated to avoid FHE
+        division.
+    ○​ The use of Taylor Series expansions for $e^x$ and where they fail (Taylor series only
+        approximate well near zero; attention scores often fall outside this radius).
+    ○​ The impact of these approximations on natural language perplexity and BLEU scores.
+
+Step 3: Advanced Mathematical Optimization (Minimax & Chebyshev)
+This is the core theoretical contribution of your methodology. The thesis must prove that finding
+the optimal polynomial is a rigorous mathematical process, not guesswork.
+ ●​ Target Papers: * Look for recent papers from the Zama research team (e.g., Ilaria Chillotti)
+    or search specifically for "Minimax approximation for homomorphic encryption machine
+    learning."
+ ●​ What to extract for Chapter 3:
+    ○​ Chebyshev Interpolation: Why it solves the "Runge's phenomenon" (wild oscillations
+       at the edges) that plagues Taylor series.
+    ○​ The Remez Algorithm (Minimax): How this algorithm finds a polynomial $P(x)$ that
+       minimizes the maximum absolute error compared to the true GELU/Softmax function
+       over a specific interval $[-a, a]$.
+
+Step 4: The Compiler Architecture
+Since the implementation relies on concrete-ml executing on an RTX 5070 Ti, the thesis must
+explain how these cryptographic circuits are actually compiled and optimized under the hood.
+ ●​ Target Paper: CHET: An Optimizing Compiler for Fully-Homomorphic Neural-Network
+    Inferencing (Dathathri et al., 2019).
+ ●​ What to extract for Chapter 3:
+     ○​ How FHE compilers automate tensor routing and parameter selection.
+     ○​ The process of quantizing floating-point weights into integers before FHE circuit
+         generation.
+
+
+
+Meta-Prompt for Your Copilot Agent
+Copy and paste the text below along with the PDFs of the papers when you talk to Claude:
+
+      "I am writing a Master's thesis on Secure Inference in LLMs using Homomorphic
+      Encryption (specifically the CKKS scheme). Attached are the core research papers
+      for my literature review. Using the 'Literature Review Blueprint' provided above,
+      please draft the LaTeX code for Section 2.3 (The Non-Linearity Bottleneck) and
+      Section 3.3 (Polynomial Approximations). Ensure you cite these specific papers,
+      include the mathematical formulations for the Taylor and Minimax approximations,
+      and maintain a rigorous, graduate-level academic tone."
+

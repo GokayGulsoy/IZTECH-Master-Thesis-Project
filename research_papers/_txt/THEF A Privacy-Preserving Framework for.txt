@@ -1,0 +1,573 @@
+                                                                                                                                                                                                         2024 IEEE 23rd International Conference on Trust, Security and Privacy in Computing and Communications (TrustCom)
+2024 IEEE 23rd International Conference on Trust, Security and Privacy in Computing and Communications (TrustCom) | 979-8-3315-0620-9/24/$31.00 ©2024 IEEE | DOI: 10.1109/TrustCom63139.2024.00233
+
+
+
+
+                                                                                                                                                                                                                THEF: A Privacy-Preserving Framework for
+                                                                                                                                                                                                               Transformer Inference leveraging HE and TEE
+                                                                                                                                                                                                                                               Zehao Li∗† , Jiachun Liao† , Jinhao Yu† , Lei Zhang†
+                                                                                                                                                                                                                     ∗
+                                                                                                                                                                                                                         Department of Computer Science and Engineering, Shanghai Jiao Tong University, Shanghai, China
+                                                                                                                                                                                                                                                             lizehao cs@sjtu.edu.cn
+                                                                                                                                                                                                                                         †
+                                                                                                                                                                                                                                           Big Data Research Center, Nanhu Laboratory, Jiaxing, China
+                                                                                                                                                                                                                                                   {jliao, yujinhao1996, zl}@nanhulab.ac.cn
+
+
+                                                                                                                                                                                                           Abstract—The transformer has profoundly driven the devel-                    due to their expensive communication primitives. HE can
+                                                                                                                                                                                                        opment of natural language processing and computer vision                       compute encrypted data without decrypting the ciphertext, and
+                                                                                                                                                                                                        tasks. However, their widespread deployment has raised concerns                 obtaining encrypted results that match plaintext calculations.
+                                                                                                                                                                                                        about the potential leakage of data privacy. To address the
+                                                                                                                                                                                                        issue, homomorphic encryption (HE) is employed as a secure                      HE also supports non-interactive operations to reduce the sig-
+                                                                                                                                                                                                        technique to process user private inputs over ciphertexts. As                   nificant communication costs compared with MPC. Therefore,
+                                                                                                                                                                                                        HE only supports linear operations, non-linear functions are                    HE is considered as an appropriate option for secure inference
+                                                                                                                                                                                                        required to be approximated into polynomials, which leads to                    of transformer-based models.
+                                                                                                                                                                                                        heavy communication and computation overhead. In this paper,                       While HE provides computing flexibility and convenience,
+                                                                                                                                                                                                        we propose THEF (Tee-and-HE-based Framework), an efficient
+                                                                                                                                                                                                        and secure inference framework for transformer inference, which                 it also causes a significant amount of computing overhead.
+                                                                                                                                                                                                        uses HE to ensure data security and leverages Trusted Execution                 Applying HE to secure transformer inference presents two
+                                                                                                                                                                                                        Environment (TEE) to reduce communication and computation                       principal challenges. Firstly, transformer inference consists of
+                                                                                                                                                                                                        cost. We also design a number of optimization methods, including                lots of large-scale matrix multiplications, necessitating a more
+                                                                                                                                                                                                        expanding encoding matrix multiplication scheme, batch accel-                   efficient implementation for linear functions. Secondly, the
+                                                                                                                                                                                                        eration and adaptive scheme, to improve performances of the
+                                                                                                                                                                                                        THEF. Finally, we compare the performances of THEF and the                      calculation of non-linear functions in HE is costly, as the
+                                                                                                                                                                                                        state-of-the-art methods. The experimental results demonstrate                  non-linear functions must be approximated into a polynomial
+                                                                                                                                                                                                        that THEF maintains a level of accuracy close to that of plaintext              that only consists of multiplication and addition operations.
+                                                                                                                                                                                                        model, reduces end-to-end communication cost by 80% and                         Additionally, transformer-based models employ more complex
+                                                                                                                                                                                                        achieves significant improvement in end-to-end run-time.                        non-linear functions with thousands of inputs, which can
+                                                                                                                                                                                                           Index Terms—homomorphic encryption, transformer, privacy-
+                                                                                                                                                                                                        preserving, trusted execution environment                                       significantly increase communication cost [12].
+                                                                                                                                                                                                                                                                                           Some works propose the use of TEE (Trusted Execution
+                                                                                                                                                                                                                                I. I NTRODUCTION                                        Environment) to accelerate the HE-based secure inference of
+                                                                                                                                                                                                                                                                                        traditional ML models [8] [7]. Nevertheless, existing works
+                                                                                                                                                                                                           In recent years, transformer-based models, such as GPT [1],                  that combine HE and TEE have not yet addressed the chal-
+                                                                                                                                                                                                        have demonstrated remarkable performance in a variety of                        lenge for large-scale matrix multiplications. To address the
+                                                                                                                                                                                                        real-world tasks. Currently, ChatGPT [2] is one of the most                     issue, we propose an expanding encoding scheme to enhance
+                                                                                                                                                                                                        widely used commercial general-purpose models globally. As                      the efficiency of matrix multiplications. Existing works that
+                                                                                                                                                                                                        an example of machine learning as a service (MLaaS), the                        introduce TEE for acceleration also cause the extra commu-
+                                                                                                                                                                                                        model provider (OpenAI) hosts its own model on CSP (cloud                       nication cost between the server and TEE and time cost for
+                                                                                                                                                                                                        service provider) such as Azure Cloud, AWS, and users need to                   encryption and decryption. To address the problem, we present
+                                                                                                                                                                                                        upload their data to the cloud server to obtain model inference                 batch acceleration, which summits multiple tasks to TEE at
+                                                                                                                                                                                                        results. However, transformer-based models present a potential                  once to reduce communication rounds. Additionally, we also
+                                                                                                                                                                                                        vulnerability to data breaches. In the event of a compromise                    implement the adaptive scheme to reduce the overhead of
+                                                                                                                                                                                                        of the cloud server by an adversary, the user’s inputs and                      frequent encryption and decryption by selecting appropriate
+                                                                                                                                                                                                        inference results may be accessed, raising concerns about data                  parameters for the HE scheme.
+                                                                                                                                                                                                        privacy.                                                                           Our contributions are as follows:
+                                                                                                                                                                                                           To guarantee the safety of user data in machine learning
+                                                                                                                                                                                                                                                                                           1) We propose THEF, an efficient framework using HE for
+                                                                                                                                                                                                        (ML) tasks, recent works have proposed some secure inference
+                                                                                                                                                                                                                                                                                               secure inference of transformer and TEE for accelera-
+                                                                                                                                                                                                        protocols based on multi-party secure computation (MPC) [5]
+                                                                                                                                                                                                                                                                                               tion. In the framework, expanding encoding scheme is
+                                                                                                                                                                                                        and homomorphic encryption (HE) [6]. Although MPC-based
+                                                                                                                                                                                                                                                                                               proposed for efficient large-matrix multiplications and
+                                                                                                                                                                                                        protocols can be employed for general operations, they can
+                                                                                                                                                                                                                                                                                               several optimization methods are designed to increase
+                                                                                                                                                                                                        result in significant communication and computing overhead
+                                                                                                                                                                                                                                                                                               the accuracy and efficiency of non-linear functions and
+                                                                                                                                                                                                          Corresponding author: Lei Zhang. This work was supported by National                 reduce the communication and time cost for transformer
+                                                                                                                                                                                                        Key R&D Program of China (2022YFB4501500, 2022YFB4501502).                             inferences.
+
+
+                                                                                                                                                                                                     2324-9013/24/$31.00 ©2024 IEEE                                              1693
+                                                                                                                                                                                                     DOI 10.1109/TrustCom63139.2024.00233
+                                                                                                                                                                                           Authorized licensed use limited to: ULAKBIM UASL - IZMIR YUKSEK TEKNOLOJI ENSTITUSU. Downloaded on March 23,2026 at 12:09:25 UTC from IEEE Xplore. Restrictions apply.
+              2) We achieve a number of optimizations in THEF, in-
+                 cluding noise elimination, batch acceleration for less
+                 communication cost, adaptive scheme for efficient HE
+                 calculation and less overhead of encryption and decryp-
+                 tion.
+              3) We implement THEF using CKKS [15] as HE scheme
+                 and Intel SGX [16] as TEE, and evaluate its accu-
+                 racy, communication cost and run-time performance on
+                 BERT-base model of transformers. The results show that
+                 THEF achieves the accuracy close to plaintext model
+                 results, at least 5× less communication cost and 10×
+                 faster run-time on end-to-end performance compared
+                 with state-of-the-art methods.
+                                  II. R ELATED W ORK
+           A. Privacy-Preserving Machine Learning combining TEE and
+           HE
+              In order to enhance the efficiency of HE in private machine
+           learning inference tasks, some works propose utilising TEE
+           to accelerate HE operations. [17] proposes using Intel SGX
+           (A well-known TEE) to reduce approximate calculations in
+           HE to improve performance. [18] proposes a privacy neural
+           network prediction framework that combines HE and TEE,                               Fig. 1. Transformer inference high-level architecture.
+           and defines security models at different security levels. [4]
+           proposes a hybrid framework that combines HE with Intel
+           SGX and implements the data-oblivious execution block base                  the dimension of the polynomial ring N , the plaintext modulus
+           on oblivious primitives to prevent leakage of memory access                 p, and the ciphertext modulus t. κ is the security parameter.
+           information. Slalom [8] runs Deep Neural Networks (DNNs)                    The HE scheme typically includes the following algorithms:
+           in an Intel SGX enclave and selectively divides works to an                 HE supports efficient linear calculations, including addition
+           untrusted GPU.                                                              HE.Add and multiplication HE.Mult. For non-linear calcula-
+                                                                                       tions, HE scheme needs to use polynomial approximation to
+           B. Private Transformer Inference Frameworks
+                                                                                       calculate by the operations start with HE.Eval, which will
+              There are many existing works for secure inference of                    consume the number of multiplications depth approxDepth.
+           transformers in different classifications of privacy protocols.             The higher approxDepth signifies a larger degree of the
+           1) HE-based: Iron [11] and Bolt [12]; 2) Secret-Sharing-                    approximation polynomial, which can obtain a more accurate
+           based: MPCFormer [19], SIGMA [20] 3) Garbled-Circuit-                       calculation result. However, it will increase the calculation
+           based: Primer [21]. HE-based protocols attract attention due to             overhead and consume more multiplication depth of ciphertext.
+           its good applicability, but it also causes a lot of computation             HE.EvalDivide(x) can calculate x1 with multiplications depth
+           overhead. Thus, we propose THEF framework to accelerate                     approxDepth.
+           HE operations in secure transformer inference leveraging TEE.
+           To the best of our knowledge, we first introduce TEE to
+                                                                                       B. Transformers
+           accelerate the HE-based protocols for private transformer
+           inference. Based on TEE, we further design the adaptive                        While THEF supports various transformer models, we
+           scheme that selects appropriate parameters and switch between               concentrate on BERT (Bidirectional Encoder Representations
+           different computation tasks automatically. THEF provides a                  from Transformers) [23], which is one of the most widely
+           more convenient and efficient approach for secure inference                 used transformer [22] models. The high-level architecture of
+           of transformers.                                                            the Bert is illustrated in Fig. 1. The transformer tokenizes the
+                                                                                       user input with input embedding and positional encoding, then
+                                  III. P RELIMINARIES
+                                                                                       processes the data with B consecutive encoder blocks, and
+           A. Homomorphic Encryption                                                   finally sends the results to the tanh and classification layer.
+              Homomorphic encryption represents a crucial cryptographic                The functions of the different layers are as follows:
+           primitive that permits the calculation of ciphertext, with the ci-             Multi-head Attention. Given number of heads H and the
+           phertext result matching the plaintext calculation. This makes              parameter of the linear projection W O , Multi-head Attention
+           it an ideal solution for secure outsourcing computing scenarios.            computes:
+           In this paper, we use CKKS [15] homomorphic encryption
+           scheme. The primary public parameters of HE schemes include                     M ultiHead(x) = Concat(head1 , ..., headH )W O                (1)
+
+
+
+
+                                                                                1694
+
+Authorized licensed use limited to: ULAKBIM UASL - IZMIR YUKSEK TEKNOLOJI ENSTITUSU. Downloaded on March 23,2026 at 12:09:25 UTC from IEEE Xplore. Restrictions apply.
+             For each attention head, given a query Q and weight                          range of side-channel attacks. The majority of these attacks
+           matrices K, V , attention function computes:                                   are performed by executing data dependent code (e.g. random
+                                                                                          memory access and branching) in the enclave that can be
+                                                QK T
+                 Attention(Q, K, V ) = Sof tmax( √ ) · V                     (2)          concurrently observed by other processes running on the same
+                                                  d                                       host [3]. Nonetheless, these side-channel vulnerabilities pose
+           where the Softmax function computes:                                           a minor threat to our framework because the computations of
+                                             exp(x[i])                                    transformers in THEF are data-oblivious, which apply uniform
+                           Sof tmax(x)[i] = P                                (3)          operations irrespective of the specific input data.
+                                              i exp(x[i])
+
+                                              vector x ∈ Rd , µ =                         B. Framework structure and workflow
+            P Layer Normalization. For input
+               x[i]
+                    is the mean of x and σ = i (x[i] − µ)2 ∈ R is the
+             i
+                                            P
+              d
+           variance, the result of computing the attention is normalized
+           across the layer:
+                                           γ · (x − µ)
+                         LayerN orm(x) =               +β           (4)
+                                                σ
+              where γ ∈ Rd and β ∈ Rd are two parameters.
+              Feed-forward. The feed-forward network consists of two
+           linear projections and an activation function between them,
+           which computes F eedF orward(X) = W1 · GELU (W0 X).
+           The activation function GELU used in Transformer computes:
+                                           x          x
+                           GELU (x) =        · (Erf ( √ ) + 1)               (5)
+                                           2           2
+                                                        Rx    2
+             where Gauss error function is Erf (x) = √2π 0 e−t dt.
+             Tanh. The tanh function is a hyperbolic function used
+           before classification, which computes:
+                                           e2x − 1
+                                  T hah(x) =                                 (6)
+                                           e2x + 1
+                     IV. S ECURE I NFERENCE F RAMEWORK FOR
+                                 T RANSFORMERS
+                                                                                                     Fig. 2. THEF framework structure and workflow.
+           A. Security Analysis
+              Security in THEF. The framework workflow comprises                             As illustrated in Fig.2, the THEF framework comprises three
+           three entities: Client (launch HE task), Server (compute HE                    parties: the client, the server, and the TEE. Specifically, the
+           operations), TEE (accelerate HE computing). The client gener-                  entire private transformer inference process can be divided into
+           ates a public and private key pair to encrypt and decrypt data.                multiple tasks, including Matmul(linear), Softmax, GELU,
+           The client encrypts input data locally and sends ciphertexts                   LayerNorm and Tanh functions respectively. Each task consists
+           to the server. The server can only receive the encrypted data                  of execution code related to function and its configuration.
+           and learn nothing about the plaintext corresponding to the                     THEF executes the first phase of linear functions by HE oper-
+           ciphertext. The server does not have private key, so it cannot                 ations over ciphertexts in the server (§IV-E1), and executes the
+           decrypt any intermediate results in HE computation. The client                 second phase of linear function, Softmax, GELU, LayerNorm
+           sends the private key to TEE via a secure channel. TEE and                     and Tanh over plaintexts in TEE. TEE and the server process
+           server send data encrypted with public key to each other.                      the tasks cooperatively through the task scheduler. For the
+           Therefore, the security of THEF (regardless TEE hardware) is                   concern about the limitation of executed resource in TEE, we
+           equivalent to the security of the CKKS algorithm. The CKKS                     also implement four non-linear functions by HE operations,
+           algorithm is based on cryptographic assumptions proven to be                   which supports executing HE code of non-linear functions in
+           secure. So THEF satisfies security outside TEE hardware.                       the server over ciphertexts. We will introduce more details of
+              Details in TEE security of SGX. THEF uses Intel SGX as                      the configuration of each task and adaptive scheme in §IV-D1,
+           TEE, which is one of the most representative TEEs. Attacks on                  and specific implementations of functions in §IV-E.
+           SGX enclaves are widely studied and included in most kinds                        The specific execution process of the framework is as
+           of attacks on TEEs [9]. SGX enclaves execute programs in                       follows: 1) The client generates private and public key pair,
+           a process space that is completely isolated from the host (in-                 then sends the private key to the TEE after remote attestation
+           cluding a potentially malicious operation system). Specifically,               via secure channel; 2) The client encrypts the input data
+           the memory of enclaves is totally encrypted and authenticated,                 into ciphertexts with public key, then submits the cipher-
+           and its integrity is guaranteed. However, SGX is risk from a                   texts, public key and the task list of {task execute code,
+
+
+
+
+                                                                                   1695
+
+Authorized licensed use limited to: ULAKBIM UASL - IZMIR YUKSEK TEKNOLOJI ENSTITUSU. Downloaded on March 23,2026 at 12:09:25 UTC from IEEE Xplore. Restrictions apply.
+           task configuration} pairs to the server; 3) The server encrypts              We introduce the detailed configuration of each function
+           model parameters with public key into ciphertexts (optional),             on the evaluation of THEF. For all non-linear functions, we
+           and execute tasks in the task list sequentially; 4) According to          enable TEE for acceleration. TEE-enabled of linear functions
+           the configuration of each executed task, the task scheduler               is set to false, for it is efficient to execute multiplication in
+           selects to submit its plaintext code, input ciphertexts and               HE and reduces communication cost between server and TEE.
+           configuration of next task to TEE for execution acceleration,             Encryption security parameter of all functions is set default
+           or execute the HE code locally; 5) For the tasks submitted                value 128bit. The remaining parameters related to adaptive
+           to TEE, TEE decrypts the ciphertexts with private key and                 scheme are demonstrated in §IV-D1.
+           executes task in plaintext; 6) TEE regenerates public and
+           private key pair and encrypts the results with parameters based                                       TABLE I
+           on the configuration of next task; 7) TEE stores the new private              T HE PARAMETERS RELATED TO ADAPTIVE SCHEME OF FUNCTIONS
+           key locally, and sends the task result ciphertext and new public
+                                                                                             Function      Max Columns   Ring Degree    Mul. Depth
+           key back to the server; 8) Repeat steps 3) to 7) until all tasks
+           in the task list are completed, then the server returns the final                Linear (1-5)       768           2048            1
+           result ciphertext to the client; 9) The client receives the latest                Softmax           768           2048           18
+           private key from TEE via secure channel, and decrypts the                           Tanh           3072           8192           16
+           result ciphertext to get the final plaintext result.                               GELU            3072           8192           20
+                                                                                            LayerNorm          768           2048           12
+           C. Configuration of Task
+              Each task has its own configuration, which consists of differ-         D. Optimizations
+           ent parameters. Task scheduler will choose the task executed                 To improve the efficiency and convenience of the frame-
+           environment (Server/TEE) based on the configuration. If a                 work, we implement some optimizations in THEF. We will
+           task is submitted to TEE, the new encryption parameters will              present expanding encoding scheme to improve the perfor-
+           depend on the configuration of next task. Each parameter can              mance of matrix multiplication in §IV-E1. In addition, adaptive
+           be set by user manually , while some parameters can be set by             scheme and noise elimination are used to improve the effi-
+           adaptive scheme(§IV-D1) automatically. The parameters that                ciency of executing HE code, and batch acceleration is used
+           can be configured for each task are described as follows:                 to submit multiple tasks to TEE to decrease the communication
+              1) TEE-enabled: Enable TEE to accelerate task computing.               rounds, encryption and decryption times. Details of these
+           If the parameter is false, the server will execute the HE code            optimizations are shown as follows:
+           of task locally. Considering the concerns for data security in               1) Adaptive scheme: Adaptive scheme is used to optimize
+           TEE(§IV-A), the executing resource of TEE and the commu-                  the execution of HE code, which supports selecting appro-
+           nication cost between server and TEE, the parameter can be                priate values for both ring degree and multiplication depth
+           set to false. Optional values: true(default) / false.                     based on max columns automatically. On the premise of
+              2) Encryption security parameter: The security level of                meeting HE parameter requirements(§IV-C4), less values of
+           encryption. The higher security parameter will bring higher the           both parameters have better calculation performance. For ring
+           security of the ciphertext, but the size of ciphertext will also          degree, THEF will choose the power of 2 that is closest
+           be larger. Optional values: 128bit (default) / 192bit / 256bit.           to and greater than upper bound of columns as ring degree
+              3) Upper bound of columns (max columns): The maximum                   when the parameter is auto. Specifically, we set Ring Degree
+           number of plaintexts that can be packed in ciphertext, which              = 2m , where Max Columns <= 2(m−1) and 2(m−2) < Max
+           needs to be less than half of the ring degree. A higher upper             Columns. For multiplication Depth, THEF will calculate the
+           bound of columns means that more plaintext data can be                    sum of the number of multiplications required in each task as
+           carried in the ciphertext and calculated simultaneously, but the          multiplication depth when the parameter is auto.
+           cost of all HE calculations will also increase. Optional values:             The specific parameters related to adaptive scheme are
+           manual (positive integers).                                               shown on Table I. Max columns is set according to the
+              4) Ring degree: The degree of the encryption polynomial                parameter size of each function in Bert. Ring degree and mul-
+           used in the CKKS algorithm, which must be larger than double              tiplication depth are provided by adaptive scheme according
+           max columns. Optional values: manual (positive integers) /                to above rules. The multiplication depth of each function is
+           auto.                                                                     related to the detailed HE implementation of functions, which
+              5) Multiplication Depth: The maximum number of multi-                  is described in §IV-E and §IV-F.
+           plications that can be calculated for a fresh ciphertext before              2) Noise Elimination: Noise elimination is used to increase
+           the ciphertext noise exceeds the limit. The higher depth can              the remind remaining multiplication depth in the ciphertext.
+           reduce the number of bootstrapping (operation to eliminate                When the server executes HE code, noise in ciphertext will
+           noise in ciphertext), but it will also increase the encryption            increase and the number of remaining multiplications will
+           and decryption and HE calculation overhead. Optional values:              decrease. The ciphertext cannot be decrypted correctly if
+           manual (positive integers) / auto.                                        the noise exceeds the limitation (the number of remaining
+
+
+
+
+                                                                                1696
+
+Authorized licensed use limited to: ULAKBIM UASL - IZMIR YUKSEK TEKNOLOJI ENSTITUSU. Downloaded on March 23,2026 at 12:09:25 UTC from IEEE Xplore. Restrictions apply.
+           multiplications less than zero). Using the parameter of multi-               Specifically, we execute multiplication phase in the server.
+           plication depth provided by adaptive scheme can avoid the                 For matrix multiplication Z = X · Y , matrices X and Y can
+           noise elimination, but the parameter set by user may still                be encoded by expanding into one-dimensional vectors. X is
+           require to execute noise elimination.                                     a × b matrix and Y is b × c matrix. For matrix X, each row
+              Therefore, before executing each homomorphic computation               is repeated c times in row order. For matrix Y , repeat Y in
+           that consumes multiplications, THEF will detect the noise                 column order for a times. The result is
+           of ciphertext by checking whether the remaining number                           Xe = {X1: , ..., X1: , X2: , ..., X2: , ..., Xa: , ..., Xa: }
+           of multiplications in ciphertext is sufficient. If not, the task                         | {z } | {z }                        | {z }           (7)
+                                                                                                          c times          c times              c times
+           scheduler will send the ciphertext to TEE, then TEE decrypts
+           the ciphertext and encrypt it to get fresh ciphertext. Finally,
+           TEE sends the new ciphertext back to the server and the server              Ye = {Y:1 , Y:2 , ..., Y:c , Y:1 , Y:2 , ..., Y:c , ..., Y:1 , Y:2 , ..., Y:c }
+                                                                                                                                                                   } (8)
+           continues to execute HE computation. Compared with the
+                                                                                             |                                 {z
+                                                                                                                           a times
+           common approach by bootstrapping [10], THEF can eliminate
+           noise in HE ciphertext automatically and efficiently. More                   The server encrypts X,e Ye with homomorphic encryption
+           evaluation details of noise elimination are shown in §V-B.                algorithm, then executes the homomorphic multiplication Z
+                                                                                                                                             e=
+                                                                                     Xe · Ye :
+              3) Batch Acceleration: When multiple consecutive tasks
+           need to be accelerated in TEE, the task scheduler will send                 Ze = X  e · Ye
+           these tasks and their ciphertext inputs to TEE simultaneously.                  = {X1: · Y:1 , ..., X1: · Y:c , ..., Xa: · Y:1 , ..., Xa: · Y:c } (9)
+           TEE executes these tasks in sequence and returns the final                         |           {z           }        |           {z           }
+           encrypted results to the server. Batch acceleration can reduce                                 c times                           c times
+           the number of communication rounds between TEE and the                       So far the server completes the homomorphic multiplication
+           server, but if the executed functions have too much cipher-               phase, then we need to compute the inner product in TEE. The
+           text inputs, it will cause a lot of encryption and decryption             server sends encrypted results of multiplication phase to TEE.
+           overhead. Therefore, we only use batch acceleration in THEF               TEE decrypts the result ciphertexts Z, e then executes inner
+           when executing continuous non-linear functions.                           product phase. We denote the n-th element of vector Ze as
+              Specifically, we divide the linear function into multiplication        Z[n]. For any Ẑi,j , we have:
+           and inner product two phases by expanding encoding scheme
+           (§IV-E1). After the multiplication phase executed, we submit                                b
+                                                                                                       X
+           the inner product phase and next non-linear task to TEE at                        Ẑi,j =         e − 1) ∗ b ∗ c + (j − 1) ∗ b + k]
+                                                                                                             Z[(i                                                 (10)
+           once. For the final inference process of LayerNorm and Tanh                                 k=1
+           functions, we send them to TEE for acceleration simultane-
+           ously.                                                                       Thus, by summing the adjacent b elements in vector Z,e TEE
+                                                                                     can obtain the element order of the matrix multiplication result
+                                                                                     Ẑ.
+           E. Implementation of transformer functions in THEF
+                                                                                        In the implementation of our framework, matrix multi-
+              As illustrated in Fig. 1, despite the multitude of calculation         plications are always followed by non-linear functions that
+           layers and blocks involved in the transformer inference pro-              need to be accelerated in TEE. So we submit the inner
+           cess, they primarily comprise fundamental functions, including            product calculation and next task to TEE, then calculate
+           MatMul, Softmax, Tanh, GELU and LayerNorm functions.                      inner product before the non-linear task in TEE. By this
+           As shown in Fig. 2, task scheduler selects to execute HE                  way, we can compute the inner product in plaintext, avoiding
+           code in the server or plaintext code in TEE for each function             the large overhead of homomorphic computation, and reduce
+           according to its configuration. Appropriate HE parameters                 the number of homomorphic multiplications by redundantly
+           of functions will be set before executed in the server by                 encoding the matrix.
+           adaptive scheme(§IV-D1). For the case that the inner product                 2) Non-linear function: In THEF, we execute all non-linear
+           of linear function or non-linear function followed by a non-              functions over plaintexts in TEE, including Softmax, Tanh,
+           linear function, we submit them together to TEE by applying               GELU, LayerNorm. The plaintext implementation of each
+           batch acceleration(§IV-D3). In this section, we will introduce            function is similar to its common implementation running on
+           the detailed implementation of transformer functions in THEF.             plaintext data, as shown in §III-B. The server sends ciphertext
+              1) Expanding Encoding Matrix Multiplication: In THEF,                  inputs and executed code of a batch of tasks to TEE by
+           we implement the expanding encoding scheme for efficient                  batch acceleration, while extra encrypted parameter γ and β
+           matrix multiplication. This scheme divides the matrix multi-              also be sent to TEE for LayerNorm function. TEE decrypts
+           plication into two phases: multiplication and inner product. It           ciphertexts, execute tasks in batch order, regenerates private
+           encodes the plaintext matrix into a redundant matrix over ci-             and public key pair. Finally, TEE encrypts the results with
+           phertext, which allows the multiplication result to be obtained           parameters of linear functions and send back to the server.
+           by only one homomorphic multiplication, then calculating                     Although we execute plaintext code in TEE for non-linear
+           inner product after decryption in TEE.                                    functions in THEF for evaluation, considering data security
+
+
+
+
+                                                                                1697
+
+Authorized licensed use limited to: ULAKBIM UASL - IZMIR YUKSEK TEKNOLOJI ENSTITUSU. Downloaded on March 23,2026 at 12:09:25 UTC from IEEE Xplore. Restrictions apply.
+           concern and the executing resource limitation of TEE, THEF                  Algorithm 3 The HE implementation for GELU.
+           also supports executing HE code of non-linear functions in the                  Input: The ciphertext input X.
+           server. We will introduce the HE implementation of non-linear                1: square x = HE.Mult(X, X)
+           functions in the §IV-F.                                                      2: cubic x = HE.Mult(X, square x)
+           F. HE implementations of non-linear functions                                3: res = HE.Mult(cubic x, 0.044715)
+                                                                                        4: res = HE.Add(res, X)
+              Using TEE to accelerate the calculation of non-linear func-                                     p
+                                                                                        5: res = HE.Mult(res,   2/π)
+           tions will also cause new issues. Increasing the number of
+                                                                                        6: res = Tanh(res)                                      ▷ §IV-F2
+           functions executed in TEE may raise the concern of exceed
+                                                                                        7: res = HE.Add(res, 1)
+           the TEE limitation of computational resource. Therefore, we
+                                                                                           return: HE.Mult(res, X/2)
+           implement the HE implementations of non-linear functions,
+           which support executing non-linear functions with HE opera-
+           tions in the server. For all non-linear functions in THEF, we               Algorithm 4 The HE implementation for LayerNorm.
+           choose approxDepth = 8 (§III-A).                                                Input: The ciphertext input X, ciphertext model param-
+              1) Softmax: Softmax (cf. Eq. 3) requires evaluating the                      eters β, γ.
+           exponential and division function, and the inner product of                  1: sum x = HE.InnerSum(X)
+           all columns in the ciphertext. The HE scheme supports cal-                   2: diff x = HE.Sub(X - sum x)
+           culating the inner product by function HE.InnerSum. The HE                   3: sigma x = HE.Mult(diff x, diff x)
+           implementation of Softmax is shown in Algorithm 1.                           4: div sigma x = HE.EvalDivide(sigma x)
+                                                                                        5: res = HE.Mult(div sigma x, diff x)
+           Algorithm 1 The HE implementation for Softmax.                               6: res = HE.Mult(res, γ)
+               Input: The ciphertext input X.                                              return: HE.add(res, β)
+            1: exp x = HE.EvalFunc(exp, X, approxDepth)
+            2: sum exp x = HE.InnerSum(exp x)
+            3: div sum exp x = HE.EvalDivide(sum exp x)                                                      V. E XPERIMENTS
+               return: HE.Mult(exp x, div sum exp x)
+                                                                                          In this section, we first introduce the setup of our ex-
+                                                                                       periments. Then we evaluate noise elimination performance
+             2) Tanh: Tanh is a hyperbolic function commonly used in                   comparing to traditional approach bootstrapping. To the best
+                                                             2x
+           neural networks, which evaluates T anh(x) = ee2x −1  +1 . It also           of we know, Bolt [12] is the state-of-the-art system of secure
+           requires evaluating the exponential and division function. The              transformer inference, and Iron [11] is well-known system that
+           HE implementation of Tanh is shown in Algorithm 2.                          investigates how to keep data privacy in transformer inference.
+                                                                                       And we conduct the experiments on accuracy, communication
+           Algorithm 2 The HE implementation for Tanh.
+                                                                                       cost and run-times for different functions and end-to-end
+               Input: The ciphertext input X.                                          process, comparing with Bolt and Iron.
+            1: double x = HE.Mult(X, 2)
+            2: exp 2x = HE.EvalFunc(exp, double x)                                     A. Experiment Setup
+            3: exp 2x a1 = HE.Add(exp 2x, 1)
+                                                                                          1) Implement Details: In the experiments, we use CKKS
+            4: exp 2x s1 = HE.Sub(exp 2x, 1)
+                                                                                       algorithm provided by OpenFHE open-source library as HE
+            5: div exp 2x a1 = HE.EvalDivide(exp 2x a1)
+                                                                                       scheme. The OpenFHE library supports to generate the relin-
+               return: HE.Mult(exp 2x s1, div exp 2x a1)
+                                                                                       earization key for ciphertext multiplications and bootstrap key
+                                                                                       for noise elimination by its APIs. The configuration we used
+              3) GELU: Iron [11] proposes the accurate polynomial                      in the experiment for funtions in THEF is shown on Table
+           approximation for GELU using the following equation:                        I. For all functions in THEF, we set the configuration of the
+                                                                                       encryption security parameter to 128bit.
+                                          r
+                            x                2
+              GELU (x) = (1 + T anh(           (x + 0.044715x3 ))) (11)                   2) Dataset: To demonstrate the accuracy and efficiency of
+                            2                π
+                                                                                       our framework, we conduct an experiment on the datasets
+           We evaluate GELU with the above equation and the Tanh                       from the GLUE benchmark [13], which is widely used to test
+           function in §IV-F2. The HE implementation of GELU for HE-                   the performance of NLP models. The datasets included in the
+           case is shown in Algorithm 3.                                               experiment were RTE, STS-B, SST-2 and MRPC. We evaluate
+              4) LayerNorm: LayerNorm (cf. Eq. 4) requires to calculate                the accuracy, communication cost and run-time performance
+           division function and the inner product of columns in the                   of linear and non-linear functions and compare THEF with the
+           ciphertext. Unlike other non-linear functions that only require             HE-based models Iron [11], Bolt [12] with the data from the
+           input data, LayerNorm also requires two model parameters                    above datasets.
+           γ and β. So task scheduler will encrypt γ and β as the the
+                                                                                          3) Environment Setting: The experiments are conducted
+           input of the HE executed code. The HE implementation of
+                                                                                       on a TEE-enabled computer (equipped with Intel SGX sup-
+           LayerNorm is shown in Algorithm 4.
+                                                                                       port), which contains an Intel(R) Xeon(R) Gold 5318S CPU
+
+
+
+
+                                                                                1698
+
+Authorized licensed use limited to: ULAKBIM UASL - IZMIR YUKSEK TEKNOLOJI ENSTITUSU. Downloaded on March 23,2026 at 12:09:25 UTC from IEEE Xplore. Restrictions apply.
+                                                 Fig. 3. Run-times of functions and end-to-end on Iron, Bolt and THEF
+
+
+
+           2.10GHz with 96 cores and 512GB memory. The operating                                                     TABLE III
+           system is Ubuntu 20.04.6 LTS.                                                                      ACCURACY OF FOUR MODELS
+
+           B. Noise elimination                                                                    Dataset     Plaintext     Iron      Bolt    THEF
+                                                                                                     RTE        71.20       70.76      69.68    71.15
+                                         TABLE II                                                   MRPC        90.23       89.87      90.53    90.49
+                     HE CIPHERTEXT NOISE ELIMINATION PERFORMANCE
+                                                                                                    SST-2       92.95       92.77      91.74    92.82
+              Ring degree                   Pre-computation    Time                                 STS-B       89.93       89.41      87.97    89.65
+                            Bootstrapping         7.73s        9.92s
+                 8192                                                                  maximum accuracy loss of 0.28% on the STS-B dataset. We
+                               THEF                 /          0.017s (583×)
+                            Bootstrapping        35.45s        17.20s                  also achieve better accuracy on most items compared with
+                16,384
+                               THEF                 /          0.036s (478×)           Bolt and Iron, with the maximum accuracy improvement of
+                            Bootstrapping        78.66s        26.74s                  1.68% to Bolt on STS-B dataset. For non-linear functions, Bolt
+                32,768
+                               THEF                 /          0.081s (330×)           and Iron use polynomials to approximate, which loses some
+                            Bootstrapping       154.22s        47.39s                  precision. We execute non-linear functions in plaintext in TEE
+                65,536
+                               THEF                /           0.148s (320×)           to achieve higher efficiency and accuracy. And homomorphic
+                                                                                       computation of linear layers causes less accuracy loss, so
+              Ciphertext multiplication will increase the noise in cipher-
+                                                                                       THEF can achieve precision close to plaintext model approach.
+           text and consume the multiplication depths in HE scheme.
+           Bootstrapping [10] is commonly used to decrease the noise                   D. Communication Analysis
+           and recovery the multiplication depths of ciphertext in HE
+           scheme, but it will cause a lot of computational overhead.
+           In THEF, we replace the bootstrapping with the decryption                                            TABLE IV
+                                                                                           C OMMUNICATION OVERHEAD COMPARING WITH I RON AND B OLT
+           and re-encryption process in the TEE. Noise elimination can
+           be done automatically by THEF without manually executing                                                          Comm. (MB)
+           bootstrapping, and efficiency is greatly improved. As shown                            Function
+                                                                                                                    Iron             Bolt       THEF
+           in table II, the bootstrapping process requires a significant
+                                                                                                   Linear 1       4844.14            7.06        83.61
+           amount of pre-computation time. In the ring degree of 65,536,                           Linear 2       4918.38            9.88       102.26
+           the pre-computation time exceeds 150 seconds. In comparison                             Linear 3        47.65             4.51        61.92
+           to the bootstrapping approach, THEF is 583× faster in 8192                              Linear 4        95.40             9.01        58.15
+                                                                                                   Linear 5        95.21            13.52        64.88
+           ring degree, 478× faster in 16384 ring degree, and more than
+           320× faster in higher ring degrees. THEF achieves a notable                             Softmax        3596.32       1447.65         157.34
+           enhancement in the efficiency of both the pre-computation and                             Tanh          20.67            16.64       11.82
+           execution phases for noise elimination.                                                  GELU          7960.00       1471.67         178.73
+           C. Accuracy                                                                           LayerNorm         871.46           599.40      109.44
+
+             We compare the accuracy of floating-point results, Iron,                            End-to-End      280.99 GB      59.61 GB       11.76 GB
+           Bolt and THEF in Table III. Similar to previous works, we
+           choose the accuracy for RTE, the F1 score for MRPC, the                        Table IV shows the communication cost of different func-
+           accuracy for SST-2 and the Pearson correlation for STS-                     tions in a encoder block and end-to-end in consecutive B = 12
+           B as evaluation results. The plaintext results in the second                encoder blocks. For linear functions, we achieve 58× and
+           column are provided by [14]. On four datasets, the accuracy                 48× less communication on Linear 1 and Linear 2 comparing
+           of THEF is close to the plaintext model results, with the                   with Iron. Since Bolt proposes and applies a more efficient
+
+
+
+
+                                                                                  1699
+
+Authorized licensed use limited to: ULAKBIM UASL - IZMIR YUKSEK TEKNOLOJI ENSTITUSU. Downloaded on March 23,2026 at 12:09:25 UTC from IEEE Xplore. Restrictions apply.
+           compact encoding ciphertext multiplication, and the expanding                         [6] Hao Chen, Wei Dai, Miran Kim, and Yongsoo Song. 2019. Efficient
+           encoding scheme used in THEF improves performance while                                   Multi-Key Homomorphic Encryption with Packed Ciphertexts with
+                                                                                                     Application to Oblivious Neural Network Inference. Conference on
+           increasing the number of ciphertexts, Bolt achieves less com-                             Computer and Communications Security (CCS ’19). Association for
+           munication cost on linear functions. For non-linear functions,                            Computing Machinery, New York, NY, USA, 395–412.
+           THEF has less communication cost up to 44× on GELU                                    [7] Hanieh Hashemi, et al. 2021. DarKnight: An Accelerated Framework
+                                                                                                     for Privacy and Integrity Preserving Deep Learning Using Trusted
+           compared with Iron, and up tp 9× on Softmax compared                                      Hardware. In MICRO-54: 54th Annual IEEE/ACM International Sym-
+           with Bolt. Through efficient calculation of non-linear functions                          posium on Microarchitecture (MICRO ’21). Association for Computing
+           based on TEE acceleration, THEF achieves 24× and 5× less                                  Machinery, New York, NY, USA, 212–224.
+                                                                                                 [8] Florian Tramèr, Dan Boneh. Slalom: Fast, Verifiable and Private Ex-
+           communication cost in total end-to-end process comparing                                  ecution of Neural Networks in Trusted Hardware. 7th International
+           with Iron and Bolt respectively.                                                          Conference on Learning Representations, ICLR 2019, New Orleans, LA,
+                                                                                                     USA, May 6-9, 2019.
+           E. Time Cost                                                                          [9] M. Sabt, M. Achemlal and A. Bouabdallah, ”Trusted Execution En-
+                                                                                                     vironment: What It is, and What It is Not,” 2015 IEEE Trust-
+              We present the run-time results of different functions and                             com/BigDataSE/ISPA, Helsinki, Finland, 2015, pp. 57-64.
+                                                                                                [10] Cheon, J.H., Han, K., Kim, A., Kim, M., Song, Y. (2018). Bootstrapping
+           end-to-end on Fig. 3. The network setting of bandwidth and                                for Approximate Homomorphic Encryption. In: Nielsen, J., Rijmen, V.
+           latency are 100 Mbps, 40 ms respectively. THEF achieves                                   (eds) Advances in Cryptology – EUROCRYPT 2018. EUROCRYPT
+           less run-times in all functions comparing with Iron and Bolt,                             2018. Lecture Notes in Computer Science(), vol 10820. Springer, Cham.
+                                                                                                [11] Meng Hao, Hongwei Li, Hanxiao Chen, Pengzhi Xing, Guowen Xu,
+           especially for non-linear functions. Specifically, THEF is 90×                            and Tianwei Zhang. 2024. Iron: private inference on transformers. In
+           faster than Iron on Linear 2 and 1.7× faster than Bolt on                                 Proceedings of the 36th International Conference on Neural Information
+           Linear 3. For non-linear functions, we achieve significant                                Processing Systems (NIPS ’22). Curran Associates Inc., Red Hook, NY,
+                                                                                                     USA, Article 1143, 15718–15731.
+           improvement by TEE acceleration. THEF is 128× faster than                            [12] Q. Pang, J. Zhu, H. Möllering, W. Zheng and T. Schneider, ”BOLT:
+           Iron and 24× faster than Bolt on GELU. For the entire end-                                Privacy-Preserving, Accurate and Efficient Inference for Transformers,”
+           to-end process, we achieve 46× faster than Iron and 10×                                   in 2024 IEEE Symposium on Security and Privacy (SP), San Francisco,
+                                                                                                     CA, USA, 2024 pp. 133-133.
+           than Bolt. Despite the improment under certain experiment                            [13] Alex Wang, et al. 2018. GLUE: A Multi-Task Benchmark and Analysis
+           setting, THEF still significantly outperforms the state-of-the-                           Platform for Natural Language Understanding. In Proceedings of the
+           art approaches for secure transformer inference based on HE                               2018 EMNLP Workshop BlackboxNLP: Analyzing and Interpreting
+                                                                                                     Neural Networks for NLP, pages 353–355, Brussels, Belgium. Asso-
+           protocols.                                                                                ciation for Computational Linguistics.
+                                                                                                [14] O. Zafrir, G. Boudoukh, P. Izsak and M. Wasserblat, ”Q8BERT: Quan-
+                                    VI. C ONCLUSION                                                  tized 8Bit BERT,” in 2019 Fifth Workshop on Energy Efficient Machine
+                                                                                                     Learning and Cognitive Computing - NeurIPS Edition (EMC2-NIPS),
+              We propose THEF, a privacy-preserving and efficient frame-                             Vancouver, BC, Canada, 2019 pp. 36-39.
+           work based on TEE and HE for transformer inference. THEF                             [15] Cheon, J.H., Kim, A., Kim, M., Song, Y. (2017). Homomorphic Encryp-
+                                                                                                     tion for Arithmetic of Approximate Numbers. In: Takagi, T., Peyrin, T.
+           offers a practical approach to protect the safety of user data                            (eds) Advances in Cryptology – ASIACRYPT 2017. ASIACRYPT 2017.
+           during transformer inference. In THEF, the implementation                                 Lecture Notes in Computer Science(), vol 10624. Springer, Cham.
+           of transformers encompasses several tasks, along with their                          [16] Intel Software Guard Extensions. https://www.intel.com/content/www/
+                                                                                                     us/en/developer/tools/software-guard-extensions/overview.html
+           respective configurations and the workflow for conducting                            [17] H. Xiao, Q. Zhang, Q. Pei and W. Shi, ”Privacy-Preserving Neural
+           transformer inference. We design the expanding encoding                                   Network Inference Framework via Homomorphic Encryption and SGX,”
+           scheme for efficient large-scale matrix multiplication and also                           2021 IEEE 41st International Conference on Distributed Computing
+                                                                                                     Systems (ICDCS), DC, USA, 2021, pp. 751-761.
+           several other optimizations, including adaptive scheme, noise                        [18] X. Liu, et al. ”Efficient and Privacy-Preserving Neural Network Predic-
+           elimination and batch acceleration, to improve the perfor-                                tion Scheme with TEE,” ICC 2023 - IEEE International Conference on
+           mance of the THEF. Experimental results demonstrate that                                  Communications, Rome, Italy, 2023, pp. 2306-2311.
+                                                                                                [19] Li, Dacheng et al. “MPCFormer: fast, performant and private Trans-
+           the THEF achieves better accuracy, less communication cost                                former inference with MPC.” 11th International Conference on Learning
+           and less run-times compared to the state-of-the-art methods.                              Representations, ICLR 2023.
+                                                                                                [20] Kanav Gupta, et al. ”SIGMA: Secure GPT Inference with Function
+                                        R EFERENCES                                                  Secret Sharing,” 24th Privacy Enhancing Technologies Symposium
+                                                                                                     (PETS 2024).
+            [1] Tom B. Brown, et al. 2020. Language models are few-shot learners. In            [21] Zheng, Mengxin et al. “Primer: Fast Private Transformer Inference on
+                Proceedings of the 34th International Conference on Neural Information               Encrypted Data.” 2023 60th ACM/IEEE Design Automation Conference
+                Processing Systems (NIPS ’20). Curran Associates Inc., Red Hook, NY,                 (DAC) (2023): 1-6.
+                USA, Article 159, 1877–1901.                                                    [22] Ashish Vaswani, et al. 2017. Attention is all you need. In Proceedings
+            [2] OpenAI ChatGPT. https://openai.com/blog/chatgpt.                                     of the 31st International Conference on Neural Information Processing
+            [3] Victor Costan, Ilia Lebedev, and Srinivas Devadas. 2016. Sanctum: min-               Systems (NIPS’17). Curran Associates Inc., Red Hook, NY, USA,
+                imal hardware extensions for strong software isolation. In Proceedings               6000–6010.
+                of the 25th USENIX Conference on Security Symposium (SEC’16).                   [23] Jacob Devlin, et al. 2019. BERT: Pre-training of Deep Bidirectional
+                USENIX Association, USA, 857–874.                                                    Transformers for Language Understanding. In Proceedings of the 2019
+            [4] Qifan Wang, et al. 2024. HT2ML: An efficient hybrid framework for                    Conference of the North American Chapter of the Association for
+                privacy-preserving Machine Learning using HE and TEE. Comput.                        Computational Linguistics: Human Language Technologies, Volume 1
+                Secur. 135, C (Dec 2023).                                                            (Long and Short Papers), pages 4171–4186, Minneapolis, Minnesota.
+            [5] Y. Wang, et al., ”Characterization of MPC-based Private Inference for                Association for Computational Linguistics.
+                Transformer-based Models,” 2022 IEEE International Symposium on
+                Performance Analysis of Systems and Software (ISPASS), Singapore,
+                Singapore, 2022, pp. 187-197.
+
+
+
+
+                                                                                         1700
+
+Authorized licensed use limited to: ULAKBIM UASL - IZMIR YUKSEK TEKNOLOJI ENSTITUSU. Downloaded on March 23,2026 at 12:09:25 UTC from IEEE Xplore. Restrictions apply.
+

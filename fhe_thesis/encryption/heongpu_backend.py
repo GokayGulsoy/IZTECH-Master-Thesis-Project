@@ -200,12 +200,37 @@ class HEonGPUBackend(CKKSBackend):
             bit <<= 1
         return out
 
-    # ── ops not yet ported (legacy path only) ─────────────────────────
+    # ── high-level ops ────────────────────────────────────────────────
     def polyval(self, ct: Ciphertext, power_coeffs: Sequence[float]) -> Ciphertext:
-        raise NotImplementedError(
-            "HEonGPUBackend.polyval not implemented yet — use the matrix-packed "
-            "polynomial path or call this op via the OpenFHE backend."
-        )
+        """Evaluate p(x) = Σ c_i · x^i via Horner.
+
+        Depth is `deg` levels; we rely on the existing 30-level chain (no
+        bootstrapping) for the BERT-tiny target where polynomial degrees
+        stay ≤ ~5.
+        """
+        coeffs = list(power_coeffs)
+        if not coeffs:
+            return self.mul_plain(ct, [0.0] * self._num_slots)
+        if len(coeffs) == 1:
+            return self.add_plain(
+                self.mul_plain(ct, [0.0] * self._num_slots),
+                [coeffs[0]] * self._num_slots,
+            )
+        # acc starts as plaintext c_d, promoted on first multiplication.
+        acc: Optional[Ciphertext] = None
+        for i in range(len(coeffs) - 2, -1, -1):
+            if acc is None:
+                # c_d * x + c_i
+                acc = self.add_plain(
+                    self.mul_plain(ct, [coeffs[-1]] * self._num_slots),
+                    [coeffs[i]] * self._num_slots,
+                )
+            else:
+                acc = self.add_plain(
+                    self.mul(acc, ct),
+                    [coeffs[i]] * self._num_slots,
+                )
+        return acc  # type: ignore[return-value]
 
     def matmul_plain(
         self,

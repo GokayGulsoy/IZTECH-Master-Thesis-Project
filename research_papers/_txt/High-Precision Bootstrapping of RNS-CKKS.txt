@@ -1,0 +1,2148 @@
+    High-Precision Bootstrapping of RNS-CKKS
+     Homomorphic Encryption Using Optimal
+        Minimax Polynomial Approximation
+            and Inverse Sine Function?
+
+         Joon-Woo Lee1 , Eunsang Lee1 , Yongwoo Lee1 , Young-Sik Kim2 , and
+                                  Jong-Seon No1
+     1
+    Department of Electrical and Computer Engineering, INMC, Seoul National
+                      University, Seoul, Republic of Korea
+2
+  Department of Information and Communication Engineering, Chosun University,
+                          Gwangju, Republic of Korea
+
+
+
+          Abstract. Approximate homomorphic encryption with the residue num-
+          ber system (RNS), called RNS-variant Cheon-Kim-Kim-Song (RNS-CKKS)
+          scheme [12, 13], is a fully homomorphic encryption scheme that sup-
+          ports arithmetic operations for real or complex number data encrypted.
+          Although the RNS-CKKS scheme is a fully homomorphic encryption
+          scheme, most of the applications with the RNS-CKKS scheme use it as
+          the only leveled homomorphic encryption scheme because of the lack
+          of the practicality of the bootstrapping operation of the RNS-CKKS
+          scheme. One of the crucial problems of the bootstrapping operation is its
+          poor precision. While other basic homomorphic operations ensure suffi-
+          ciently high precision for practical use, the bootstrapping operation only
+          supports about 20-bit fixed-point precision at best, which is not high
+          precision enough to be used for the reliable large-depth homomorphic
+          computations until now.
+          In this paper, we improve the message precision in the bootstrapping
+          operation of the RNS-CKKS scheme. Since the homomorphic modular
+          reduction process is one of the most important steps in determining the
+          precision of the bootstrapping, we focus on the homomorphic modular
+          reduction process. Firstly, we propose a fast algorithm of obtaining the
+          optimal minimax approximate polynomial of modular reduction function
+          and the scaled sine/cosine function over the union of the approximation
+          regions, called an improved multi-interval Remez algorithm. In fact, this
+          algorithm derives the optimal minimax approximate polynomial of any
+          continuous functions over any union of the finite number of intervals.
+          Next, we propose the composite function method using the inverse sine
+          function to reduce the difference between the scaling factor used in the
+          bootstrapping and the default scaling factor. With these methods, we
+          reduce the approximation error in the bootstrapping of the RNS-CKKS
+          scheme by 1/1176∼1/42 (5.4∼10.2-bit precision improvement) for each
+          parameter setting. While the bootstrapping without the composite func-
+?
+    This work is supported by Samsung Advanced Institute of Technology.
+2       J. Lee et al.
+
+       tion method has 27.2∼30.3-bit precision at maximum, the bootstrapping
+       with the composite function method has 32.6∼40.5-bit precision.
+
+       Keywords: Approximate homomorphic encryption · Bootstrapping ·
+       Composite function approximation · Fully homomorphic encryption (FHE)
+       · Improved multi-interval Remez algorithm · Inverse sine function · Mini-
+       max approximate polynomial · RNS-variant Cheon-Kim-Kim-Song (RNS-
+       CKKS) scheme
+
+
+1    Introduction
+Fully homomorphic encryption (FHE) is the encryption scheme enabling any log-
+ical operations [6, 14, 16, 19, 30] or arithmetic operations [12, 13] with encrypted
+data. The FHE scheme makes it possible to preserve security in data process-
+ing. However, in the traditional encryption schemes, they are not encrypted to
+enable the processing of encrypted data, which causes clients to be dissuaded
+from receiving services and prevents companies from developing various related
+systems because of the lack of clients’ privacy. FHE solves this problem clearly
+so that clients can receive many services by ensuring their privacy.
+    First, Gentry constructed the FHE scheme by coming up with the idea of
+bootstrapping [18]. After this idea was introduced, cryptographers constructed
+many FHE schemes using bootstrapping. Approximate homomorphic encryp-
+tion, which is also called a Cheon-Kim-Kim-Song (CKKS) scheme [13], is one of
+the promising FHE schemes, which deals with any real and complex numbers.
+The CKKS scheme is particularly in the spotlight for much potential power in
+many applications such as machine learning [2, 3, 5, 7, 15, 23], in that data is usu-
+ally represented by real numbers. Lots of research for the optimization of the
+CKKS scheme have been done actively for practical use. Cheon et al. proposed
+the residue number system (RNS) variant CKKS scheme (RNS-CKKS) [12] so
+that the necessity of an arbitrary precision library can be removed and only use
+the word-size operations. The running time of the homomorphic operations in
+the RNS-CKKS scheme is 10 times faster than that of the original CKKS scheme
+with the single thread, and further, the RNS-CKKS scheme has an advantage in
+parallel computation, which leads to much better running time performance with
+the multi-core environment. Because of the fast homomorphic operations, most
+homomorphic encryption libraries, including SEAL [29] and PALISADE [1], are
+implemented using the RNS-CKKS scheme. Thus, we focus on the RNS-CKKS
+scheme in this paper.
+    Since the CKKS scheme includes noises used to ensure security as the ap-
+proximate error in the message, the use of the RNS-CKKS scheme requires more
+sensitivity to the precision of the message than other homomorphic encryption
+schemes that support accurate decryption and homomorphic evaluation. This
+can be more sensitive for large-depth homomorphic operations because errors
+are likely to be amplified by the operations and distort the data significantly.
+Fortunately, the basic homomorphic operations in the RNS-CKKS scheme can
+ensure sufficiently high precision for practical use, but this is not the case for the
+     High-Precision Bootstrapping of RNS-CKKS Homomorphic Encryption           3
+
+bootstrapping operation. Ironically, while the bootstrapping operation in other
+homomorphic encryption schemes reduces the effect of the errors on messages
+so that they do not distort messages, the bootstrapping operation in the CKKS
+scheme amplifies the errors, which makes it the most major cause of data dis-
+tortion among any other homomorphic operations in the RNS-CKKS scheme.
+Since advanced operations with large depth may require bootstrapping operation
+many times, the message precision problem in the bootstrapping operation is a
+crucial obstacle to applying the RNS-CKKS scheme to advanced applications.
+    Although the RNS-CKKS scheme is currently one of the most potential solu-
+tions to implement privacy-preserving machine learning (PPML) system [2,3,15],
+the methods for the PPML studied so far have mainly been applied to simple
+models such as MNIST, which has such a low depth that bootstrapping is not
+required. Thus, the message precision problem in the bootstrapping operation
+in the RNS-CKKS scheme did not need to be considered in the PPML model
+until now. However, the advanced machine learning model currently presented
+requires a large depth, and thus we should introduce the bootstrapping operation
+and cannot avoid the message precision problem in the bootstrapping operation.
+Of course, the fact that bootstrapping requires longer running time and larger
+depth than other homomorphic operations is also pointed out as a major limita-
+tion of bootstrapping. While these points may be improved by simple parameter
+adjustments and using hardware optimization, the message precision problem in
+bootstrapping is difficult to solve with these simple methods.
+    Most of the works about PPML with FHE focused on the inference process
+rather than the training process because of the large running time. However,
+training neural networks with encrypted data is actually more important from a
+long-term perspective for solving the real security problem in machine learning,
+in that the companies cannot gather sufficiently many important but sensitive
+data, such as genetic or financial information so that they cannot construct the
+deep learning model for them because of the privacy of the data owners. While
+the inference process does not need a high precision number system, the training
+process is affected sensitively by the precision of the number system. Chen et
+al. [9] showed that convolutional neural networks (CNN) learning MNIST could
+not converge when the model is trained using a 16-bit fixed-point number sys-
+tem. When the 32-bit fixed-point number system is used to train the CNN with
+MNIST, the training performance was slightly lower than the case of using the
+single-precision floating-point number system, although all bits except one bit
+representing the sign are used to represent the data in 32-bit fixed-point number
+system, which is much better precision than the single-precision floating-point
+number system, which is 23-bit precision. Although many works proposed to use
+low-precision fixed-point numbers in the training procedure, they used additional
+special techniques, such as stochastic rounding [20] or the dynamic fixed-point
+number system [21], which cannot be supported by the RNS-CKKS scheme until
+now.
+    While most of the deep learning systems use single-precision floating-point
+numbers, the maximum precision achieved with the bootstrapping of the CKKS
+4      J. Lee et al.
+
+scheme in the previous papers was about only 20 bits. Considering that the
+CKKS scheme only supports fixed-point arithmetic, the 20-bit precision is not
+large enough to be applied wholly to the deep learning system. Thus, to apply
+the RNS-CKKS scheme to deep learning systems, it is necessary to achieve a
+precision sufficiently better than the 32-bit fixed-point precision, which requires
+a breakthrough for the bootstrapping in the RNS-CKKS scheme concerning its
+precision.
+
+1.1   Our Contribution
+In this paper, we propose two methods to improve the bootstrapping opera-
+tion of the RNS-CKKS scheme. Firstly, we devise a fast algorithm, called an
+improved multi-interval Remez algorithm, obtaining the optimal minimax ap-
+proximate polynomial of any continuous functions over any union of the finite
+number of intervals, which include the modular reduction function and the scaled
+sine/cosine function over the union of the approximation regions. Although the
+previous works have suggested methods to obtain polynomials that approximate
+the scaled sine/cosine function well from the minimax perspective, which are
+used to approximate the modular reduction function, these methods cannot ob-
+tain the optimal minimax approximate polynomial.
+    The original multi-interval Remez algorithm is not theoretically proven to
+obtain the minimax approximate polynomial, and it is only practically used for
+two or three approximation regions in the finite impulse response filter design,
+while we need to approximate functions over the union of tens of intervals. Fur-
+thermore, it takes impractically much time if this algorithm is used without
+further improvement to obtain a polynomial that can be used for the boot-
+strapping. To make the multi-interval Remez algorithm practical, we modify
+the multi-interval Remez algorithm as the improved multi-interval Remez al-
+gorithm. Then we prove the correctness of the improved multi-interval Remez
+algorithm, including the original multi-interval Remez algorithm, for the union
+of any finite number of intervals. Since it can obtain the optimal minimax ap-
+proximate polynomial in seconds, we can even adaptively obtain the polynomial
+when we abruptly change some parameters on processing the ciphertexts so that
+we have to update the approximate polynomial. All polynomial approximation
+methods proposed in previous works for bootstrapping in the CKKS scheme can
+be replaced with the improved multi-interval Remez algorithm, which ensures
+the best quality of the approximation. It ensures to use the least degree of the
+approximate polynomial for a given amount of error.
+    Next, we propose the composite function method to enlarge the approxima-
+tion region in the homomorphic modular reduction process using the inverse sine
+function. The crucial point in the bootstrapping precision is that the difference
+between the modular reduction function and the sine/cosine function gives a
+significant precision loss. All previous works have used methods that approxi-
+mate the modular reduction function as a part of the sine/cosine functions. This
+approximation has an inherent approximation error so that the limitation of the
+precision occurs. Besides, to ensure that these two functions are significantly
+      High-Precision Bootstrapping of RNS-CKKS Homomorphic Encryption            5
+
+close to each other, the approximation region has to be reduced significantly.
+They set the half-width of one interval in the approximation region as 2−10 ,
+which is equal to the ratio of default scaling factor to the scaling factor used in
+the bootstrapping. The message has to be scaled by multiplying 2−10 to make
+the message into the approximation region, and it is scaled by multiplying 210 at
+the end of the bootstrapping. Thus, the precision error in the computation for
+bootstrapping is amplified by 210 , and the 10-bit precision loss occurs. If we try
+to reduce this precision loss by enlarging the approximation region, the approx-
+imation error by the sine/cosine function becomes large, and thus the overall
+precision becomes lower than before.
+     Therefore, we propose to compose the optimal approximate polynomial of
+the inverse sine function to the sine/cosine function, since composing the inverse
+sine function to the sine/cosine function extends the approximation region of the
+modular reduction function, which makes it possible to improve the precision of
+the bootstrapping. Note that the inverse sine function we use has only one inter-
+val in the approximation region, and thus we can reach the small approximate er-
+ror with relatively low degree polynomials. We obtain the minimax approximate
+polynomials for the scaled cosine function and the inverse sine function with suf-
+ficiently small minimax error by the improved multi-interval Remez algorithm.
+We apply these polynomials in the homomorphic modular reduction process by
+homomorphically evaluating the approximate polynomial for the scaled cosine
+function, several double-angle formulas, and the approximate polynomial for the
+inverse sine function. This enables us to minimize the inevitable precision loss
+by approximating the modular reduction function to the sine/cosine function.
+     Since the previous works do not focus on the maximum precision of the
+bootstrapping of the RNS-CKKS scheme, we check the maximum precision of
+the bootstrapping with the previous techniques. The detailed relation with the
+precision of the bootstrapping and various parameters is analyzed with SEAL
+library. With the proposed methods, we reduce the approximation error in the
+bootstrapping of the RNS-CKKS scheme by 1/1176∼1/42 (5.4∼10.2-bit preci-
+sion improvement) for each parameter setting. While the bootstrapping without
+the composite function method has 27.2∼30.3-bit precision at maximum, the
+bootstrapping with the proposed composite function method has 32.6∼40.5-bit
+precision, which are better precision than 32-bit fixed-point precision.
+
+1.2   Related Works
+The CKKS scheme [13] was firstly proposed without bootstrapping as a some-
+what homomorphic encryption scheme supporting only the finite number of mul-
+tiplications. Cheon et al. [11] firstly suggested bootstrapping operation with
+the homomorphic linear transformation enabling transformation between slots
+and coefficients, and approximation of homomorphic modulus reduction function
+as the sine function with Taylor approximation and the double-angle formula.
+Chen et al. [8] applied a modified fast Fourier transform (FFT) algorithm to
+evaluate homomorphic linear transformation and used Chebyshev interpolation
+and Paterson-Stockmeyer algorithm to approximate the sine function efficiently
+6      J. Lee et al.
+
+in terms of the running time and the depth consumption. Han et al. [22] im-
+proved the homomorphic modular reduction in the bootstrapping operation.
+While Chen et al. approximated the sine function in one interval, Han et al.
+approximated the cosine function only in the separated approximation regions,
+reducing the degree of polynomials and using simpler double-angle formula than
+that of the sine function. Still, their approximate polynomial is also not optimal
+in the minimax aspect.
+    On the other hand, the RNS-CKKS scheme was proposed. Since big integers
+used to represent the ciphertexts in the CKKS scheme cannot be stored with the
+basic data type, the original CKKS scheme had to resort to the arbitrary pre-
+cision data type libraries, such as the number theory library (NTL). To remove
+the reliance on the external libraries for performance improvement, Cheon et
+al. applied the RNS system in the CKKS scheme. Most practical homomorphic
+encryption libraries, such as SEAL and PALISADE, implement the RNS-CKKS
+scheme. The approximate rescaling procedure, which enables using the RNS
+system in the RNS-CKKS scheme, causes more approximation error in the ho-
+momorphic multiplication of the RNS-CKKS scheme than in that of the original
+CKKS scheme. Kim et al. [24] recently suggested the management method for
+the scaling factor in the RNS-CKKS scheme. Thus the approximation error in
+the homomorphic multiplication of the RNS-CKKS scheme was made the same
+as that of the original CKKS scheme.
+    Bossuat et al. [4] optimized various performances of the bootstrapping of
+the RNS-CKKS scheme. Their two main techniques are the scale-invariant poly-
+nomial evaluation and the double hoisting. In the scale-invariant polynomial
+evaluation, the coefficients of an approximate polynomial are slightly adjusted
+by multiplication with some adjustment factor so that the messages in the out-
+put ciphertext are not affected by the approximate rescaling. Also, it always
+ensures optimal depth consumption by introducing additional recursive loops.
+The double hoisting technique optimized the homomorphic evaluation of a linear
+combination of several rotated ciphertexts from the same ciphertext with differ-
+ent rotation steps. Bossuat et al.’s techniques are compatible with our techniques;
+that is, their techniques and our techniques can be applied simultaneously in the
+RNS-CKKS scheme.
+
+1.3   Outline
+The outline of the paper is given as follows. Section 2 deals with some prelim-
+inaries for the RNS-CKKS scheme, approximation theory, and the Remez al-
+gorithm. In Section 3, we propose an improved multi-interval Remez algorithm
+for obtaining the optimal minimax approximate polynomial. The numerical re-
+lation between the message precision and several parameters in the RNS-CKKS
+scheme is dealt with in Section 4, and the upper bound of the message precision
+in the bootstrapping of the RNS-CKKS scheme is also included. In Section 5, we
+propose the composite function method, which makes it possible to reduce the
+difference of the two scaling factors in default operations and in bootstrapping
+operations, and numerically shows the improvement of the message precision
+      High-Precision Bootstrapping of RNS-CKKS Homomorphic Encryption                      7
+
+in the proposed bootstrapping operation in the RNS-CKKS scheme. Section 6
+concludes the paper.
+
+
+2     Preliminary
+2.1    Notation
+Let Z, Q, R, and C be sets of integers, rational numbers, real numbers, and com-
+plex numbers, respectively. Let C[D] be a set of continuous functions on the
+domain D. Let [d] be a set of positive integers less than or equal to d, i.e.,
+{1, 2, · · · , d}. Let round(x) be the function that outputs the integer nearest to x,
+and we do not have to consider the case of tie in this paper. For a power of two,
+M , let ΦM (X) = X N + 1 be an M -th cyclotomic polynomial, where M = 2N .
+Let R = Z[X]/ hΦM (X)i and Rq = R/qR. Let Q[X]/ hΦM (X)i be an M -th cy-
+clotomic field. For positive real number α, DG(α) is defined as the distribution in
+ZN whose entries are sampled independently from discrete Gaussian distribution
+of variance α2 . HW T (h) is a subset of {0, ±1}N with Hamming weight h. ZO(ρ)
+is the distribution in {0, ±1}N whose entries are sampled independently with
+probability ρ/2 for each of ±1 and probability being zero, 1 − ρ. The Chebyshev
+polynomials Tn (x) are defined by cos nθ = Tn (cos θ). The remainder of a divided
+by q is denoted as [a]q . If C = {q0 , q1 , · · · , q`−1 } is the set of positive integers
+                                                  Q`−1
+coprime each other and a ∈ ZQ where Q = i=0 qi , the RNS representation of a
+with regard to C is denoted by [a]C = ([a]q0 , [a]q1 , · · · , [a]q`−1 ) ∈ Zq0 ×· · ·×Zq`−1 .
+The base of logarithm in this paper is two.
+
+2.2    CKKS Scheme and RNS-CKKS Scheme
+It is known that the CKKS scheme supports several operations for encrypted
+data of real numbers or complex numbers. Since it deals with usually real num-
+bers, the noise that ensures the security of the CKKS scheme can be embraced
+in the outside of the significant figures of the data, which is the crucial concept
+of the CKKS scheme.
+    The RNS-CKKS scheme [12] uses the RNS form to represent the ciphertexts
+and to perform the homomorphic operations efficiently. While the power-of-two
+modulus is used in the CKKS scheme, the product of large primes is used for
+ciphertext modulus in the RNS-CKKS scheme so that the RNS system can be
+applied. These large primes are chosen to be similar to the scaling factor, which
+is some power-of-two integer. There is a crucial difference in the rescaling oper-
+ation between the CKKS scheme and the RNS-CKKS scheme. While the CKKS
+scheme can rescale the ciphertext by the exact scaling factor, the RNS-CKKS
+scheme has to rescale the ciphertext by one of the RNS modulus, which is not
+equal to the scaling factor. Thus, the RNS-CKKS scheme allows approximation
+in the rescaling procedure. Detailed procedures in the RNS-CKKS scheme are
+described as follows.
+    Several independent messages are encoded into one polynomial by the canon-
+ical embedding before encryption. The canonical embedding σ embeds a ∈
+8        J. Lee et al.
+
+Q[X]/ hΦM (X)i into an element of CN whose elements are values of a evalu-
+ated at the distinct roots of ΦM (X). It is a well-known fact that the roots of
+ΦM (X) are exactly the power of odd integers of the M -th root of unity, and
+Z∗M = h−1, 5i. Let H = {(zj )j∈Z∗M : zj = z−j }, and π be a natural projection
+from H to CN/2 . Then, it is easily known that the range of σ is exactly H. When
+N/2 complex number messages constitute an element in CN/2 , each coordinate
+is called a slot. The encoding and decoding procedures are given as follows.
+Ecd(z; ∆): For a vector z ∈ CN/2 , return
+                                                 
+                      m(X) = σ −1 ∆ · π −1 (z) σ(R) ∈ R,
+                                              
+
+
+   where ∆ is the scaling factor and π −1 (z) σ(R) denotes the discretization
+                                              
+
+   (rounding) of π −1 (z) into an element of σ(R).
+                                                                N/2
+Dcd(m; ∆): For a polynomial
+                       j      m(X) ∈ m R, return a vector z ∈ C     whose entry
+                                            j
+    of index j is zj = ∆−1 · m(ζM
+                                5
+                                  ) for j ∈ {0, 1, · · · , N/2 − 1}, where ζM is
+    the M -th root of unity.
+
+     Before describing the RNS-CKKS scheme, several basic operations for RNS
+system is defined: Conv, ModUp, and ModDown. Let B = {p0 , p1 , · · · , pk−1 }, C =
+{q0 , q1 , · · · , q`−1 }, and D = {p0 , p1 , · · · , pk−1 , q0 , q1 , · · · , q`−1 }, where pi ’s and
+qj ’s are all distinct primes.
+
+ConvC→B : It converts the RNS bases from C to B without the merge process of
+   Chinese remainder theorem, which is defined as
+                                                               
+                                 `−1
+                                 X
+             ConvC→B ([a]C ) =  [a(j) · q̂j−1 ]qj · q̂j mod pi  ,
+                                          j=0
+                                                                                        0≤i<k
+
+
+   where [a]C = (a(0) , · · · , a(`−1) ) ∈ Zq0 × · · · × Zq`−1 and q̂j = j 0 6=j qj 0 ∈ Z.
+                                                                        Q
+ModUpC→D : It adds other moduli in B to the current RNS bases to expand the
+   modulus space without changing the value as
+                                            `−1
+                                            Y              k−1
+                                                           Y                `−1
+                                                                            Y
+                         ModUpC→D (·) :           Rqj →          R pi ×           Rqj
+                                            j=0            i=0              j=0
+
+                                           : [a]C → (ConvC→B ([a]C ), [a]C ).
+
+                            moduli in B from the current RNS bases with
+ModDownD→C : It removes the Q
+                             k−1
+   dividing the value by P = i=0 pi as
+                                   k−1
+                                   Y              `−1
+                                                  Y             `−1
+                                                                Y
+             ModDownD→C (·) :            R pi ×         Rqj →         Rqj
+                                   i=0            j=0           j=0
+
+                                 : ([a]B , [b]C ) → ([b]C − ConvB→C ([a]B )) · [P −1 ]C .
+        High-Precision Bootstrapping of RNS-CKKS Homomorphic Encryption                                             9
+
+    Then, each procedure of the RNS-CKKS scheme is given as follows.
+
+Setup(q, L; 1λ ): Given a scaling factor ∆, the number of levels L, and a security
+   parameter λ, we choose several parameters as follows.
+      – A power-of-two degree N of the polynomial modulus of the ring is cho-
+         sen so that the number of level L can be supported with the security
+         parameter λ.
+      – A secret key distribution χkey , an encryption key distribution χenc , and
+         an error distribution χerr over R are chosen considering the security pa-
+         rameter λ.
+      – A basis with prime numbers B = {p0 , p1 , · · · , pk−1 } and C = {q0 , q1 , · · · , qL }
+         is chosen so that pi ≡ 1 mod 2N , qj ≡ 1 mod 2N for 0 ≤ i ≤ k − 1, 0 ≤
+         j ≤ L, and |qi −∆| is as small as possible. All prime numbers are distinct
+         and D = B ∪ C. Let C` = {q0 , q1 , · · · , q` } and D` = B ∪ C` for 0 ≤ ` ≤ L.
+                Qk−1              QL            Q
+   Let P =   Q i=0 pi , Q = j=0 qj , p̂i = 0≤i0 ≤k−1,i0 6=i pi0 for 0 ≤ i ≤ k − 1, and
+   q̂`,j = 0≤j 0 ≤`,j 0 6=j qj 0 for 0 ≤ j ≤ ` ≤ L. Then, we compute the following
+   numbers.
+      – [p̂i ]qj and [p̂−1
+                        i ]pi for 0 ≤ i ≤ k − 1, 0 ≤ j ≤ L
+      – [P −1 ]qj for 0 ≤ j ≤ L
+                          −1
+      – [q̂`,j ]pi and [q̂`,j ]qj for 0 ≤ i ≤ k − 1, 0 ≤ j ≤ ` ≤ L
+KSGen(s1 , s2 ): This procedure generates the switching key for switching the
+   secret key s1 to s2 without changing the            message in a ciphertext.
+                                                                                Given
+                                0(0)      0(k+L)
+                                                         Qk−1        QL
+   s1 , s2 ∈ R, sample (a , · · · , a            )←U       i=0 Rpi ×   j=0 Rqj   and an
+    error e0 ← χerr , and generate the switching key swk as
+                                                                                                 k−1
+                                                                                                   Y         L
+                                                                                                             Y
+              (0)          0(0)    0(0)                    (k+L)      0(k+L)    0(k+L)                  2
+        swk         = (b          ,a      ), · · · , swk           = (b        ,a        )       ∈     Rpi ×    Rq2j ,
+                                                                                                   i=0      j=0
+
+
+   where b0(i) ← −a0(i) · s2 + e0 mod pi for 0 ≤ i ≤ k − 1 and b0(k+j) ←
+   −a0(k+j) · s2 + [P ]qj · s1 + e0 mod qj for 0 ≤ j ≤ L.
+KeyGen: This procedure generates the secret key, the evaluation key, and the
+   public key. Sample s ← χkey and set sk ← (1, s) as the secret key. The evalu-
+                                       2                   (0) (1)       (L)
+   ation          by evk ← KSGen(s , s). Also, sample (a , a , · · · , a ) ←
+     Q key is set
+         L
+   U     j=0 Rqj   and e ← χerr and the public key is generated as
+                                                                       
+                                       pk ← pk(j) = (bj , a(j) ) ∈ Rq2j                      ,
+                                                                                    0≤j≤L
+
+   where b(j) ← −a(j) · s + e mod qj for 0 ≤ j ≤ L.
+Encpk (m): For a message slot z ∈ CN/2 , generate the message polynomial by
+   m = Ecd(z; ∆). Then, sample v ← χenc and e0 , e1 ← χerr and generate the
+                                     QL
+   ciphertext ct = (ct(j) )0≤j≤L ∈ j=0 Rq2j , where ct(j) ← v ·pk(j) +(m+e0 , e1 )
+   mod qj for 0 ≤ j ≤ L.
+                                                 Q`
+Decsk (ct): For a ciphertext ct = (ct(j) )0≤j≤` ∈ j=0 Rq2j , compute m̃ = hct(0) , ski
+   mod q0 and output z = Dcd(m̃; ∆).
+10       J. Lee et al.
+                                                 
+                                              (j)
+Add(ct1 , ct2 ): For two ciphertexts ctr = ctr            for r = 1, 2, output the
+                                                  0≤j≤`
+                            (j)                (j)      (j)     (j)
+   ciphertext ctadd = ctadd          , where ctadd ← ct1 + ct2 mod qj for 0 ≤
+                                     0≤j≤`
+   j ≤ `.                                                        
+                                                  (j)   (j) (j)
+Multevk (ct1 , ct2 ): For two ciphertexts ctr = ctr = (cr0 , cr1 )        , compute
+                                                                    0≤j≤`
+                                                      Q`
+   the followings and output the ciphertext ctmult ∈ j=0 Rq2j .
+           (j)       (j) (j)              (j)       (j) (j)      (j) (j)                      (j)
+      – d0 = c00 c10 mod qj , d1 = c00 c11 + c01 c10 mod qj , and d2 =
+          (j) (j)
+        c01 c11 mod qj for 0 ≤ j ≤ `.
+                           (0) (1)          (`)        (0) (1)          (k−1) (0) (1)                (`)
+      – ModUpC` →D` (d2 , d2 , · · · , d2 ) = (d˜2 , d˜2 , · · · , d˜2          , d2 , d2 , · · · , d2 ).
+         ˜ = (ct
+      – ct      ˜ (k+`) = (c̃(j)      (j)                      ˜(i) = d˜(i) · evk(i) mod p and
+                                0 , c̃1 ))0≤j≤k+` , where ct            2                      i
+        ct   ˜
+           (k+j)     (j)
+                  = d2 · evk     (k+j)
+                                          mod qj for 0 ≤ i ≤ k − 1 and 0 ≤j ≤ `.
+        
+            (0) (1)           (`)                         (0) (1)            (k+`)
+      – ĉr , ĉr , · · · , ĉr     = ModDownD` →C` c̃r , c̃r , · · · , c̃r           for r = 0, 1.
+                                                                                        
+                       (j)                        (j)        (j)     (j) (j)         (j)
+      – ctmult = (ctmult )0≤j≤` , where ctmult = ĉ0 + d0 , ĉ1 + d1                       mod qj
+        for 0 ≤ j ≤ `.                                      
+                                                   (j)
+RS(ct): For a ciphertext ct = ct(j) = (c0 , c1 (j))                   , output the ciphertext
+                                                             0≤j≤`                    
+                         0(j) 0(j)                        0(j)               (j)     (`)
+    ct0 = ct0(j) = (c0 , c1 )                   , where cr = q`−1 · cr − cr                mod qj
+                                      0≤j≤`−1
+      for r = 0, 1 and 0 ≤ j ≤ ` − 1.
+
+    There are additional homomorphic operations, rotation, and complex con-
+jugation, which are used for homomorphic linear transformation in the boot-
+strapping of the RNS-CKKS scheme. Since these operations are not used in this
+paper, we omit these operations in this section.
+
+
+2.3     Kim-Papadimitriou-Polyakov (KPP) Scaling Factor
+        Management
+Kim et al. [24] suggested a method of eliminating the large rescaling error in the
+RNS-CKKS scheme. Instead of using the same power-of-two scaling factor for
+each level, they used different scaling factors in different levels. If the maximum
+level is L, and the ciphertext modulus for level i is denoted as qi , the scaling
+factor for each level is given as follows: ∆L = qL and ∆i = ∆2i+1 /qi+1 for
+i = 0, · · · , L − 1.
+    If the two ciphertexts are at the same level, it does not introduce the ap-
+proximate rescaling error when they are multiplied homomorphically. If the two
+ciphertexts are in the different level, that is, in the levels i and j such that i > j,
+the moduli qi , · · · , qj+1 in the first ciphertext are dropped, the first ciphertext is
+                                ∆ q
+multiplied by a constant d j∆j+1    i
+                                        c, and it is rescaled by qj+1 . Then we perform
+the conventional homomorphic multiplication with the two ciphertexts, which
+are now at the same level, together with rescaling in the RNS-CKKS scheme.
+The approximate rescaling error is also not introduced in this case.
+      High-Precision Bootstrapping of RNS-CKKS Homomorphic Encryption            11
+
+2.4   Bootstrapping for CKKS Scheme
+The framework of the bootstrapping of the CKKS scheme was introduced in
+[13], which is the same as the case of the RNS-CKKS scheme. The purpose
+of bootstrapping is to refresh the ciphertext of level 0, whose multiplication
+cannot be performed anymore, to the fresh ciphertext of level L having the same
+messages. Bootstrapping is composed of the following four steps:
+  i) Modulus raising
+ ii) Homomorphic linear transformation; CoeffToSlot
+iii) Homomorphic modular reduction
+iv) Homomorphic linear transformation; SlotToCoeff
+
+Modulus Raising: The starting point of bootstrapping is modulus raising,
+where we simply consider the ciphertext of level 0 as an element of R2Q , instead
+of R2q0 . Since the ciphertext of level 0 is supposed to be hct, ski ≈ m mod q0 , we
+have hct, ski ≈ m+q0 I mod Q for some I ∈ R when we try to decrypt it. We are
+assured that the absolute values of coefficients of I are rather small, for example,
+usually smaller than 12, because coefficients of sk consist of small numbers [11].
+The crucial part of the bootstrapping of the CKKS scheme is to make ct0 such
+that hct0 , ski ≈ m mod qL . This is divided into two parts: homomorphic linear
+transform and homomorphic evaluation of modular reduction function.
+
+Homomorphic Linear Transformation: The ciphertext ct after modulus
+raising can be considered as the ciphertext encrypting m + q0 I, and thus we
+now have to perform modular reduction to coefficients of message polynomial
+homomorphically. However, the operations we have are all for slots, not coeffi-
+cients of the message polynomial. Thus, to perform some meaningful operations
+on coefficients, we have to convert ct into a ciphertext that encrypts coefficients
+of m + q0 I as its slots. After evaluation of homomorphic modular reduction
+function, we have to reversely convert this ciphertext into the other ciphertext
+ct0 that encrypts the slots of the previous ciphertext as the coefficients of its
+message. These two operations are called CoeffToSlot and SlotToCoeff
+operations. These operations are regarded as homomorphic evaluation of encod-
+ing and decoding of messages, which are a linear transformation by some variants
+of Vandermonde matrix for roots of ΦM (x). This can be performed by general
+homomorphic matrix multiplication [11], or FFT-like operation [8].
+
+Homomorphic Modular Reduction Function: After CoeffToSlot is per-
+formed, we now have to perform modular reduction homomorphically on each
+slot in modulus q0 . This procedure is called EvalMod. This modular reduc-
+tion function is not an arithmetic function and even not a continuous function.
+Fortunately, by restricting the range of the messages such that m/q0 is small
+enough, the approximation region can be given only near multiples of q0 . This
+allows us to approximate the modular reduction function more effectively. Since
+12      J. Lee et al.
+
+the operations that the CKKS supports are arithmetic operations, most of the
+works [8, 11, 22] dealing with CKKS bootstrapping approximate the modular
+reduction function with some polynomials, which are sub-optimal approximate
+polynomials.
+    The scaling factor is increased when the bootstrapping is performed because
+m/q0 needs to be very small in the homomorphic modular reduction function.
+In this paper, the default scaling factor means the scaling factor used in the
+intended applications, and the bootstrapping scaling factor means the scaling
+factor used in the bootstrapping. The bit-length difference between these two
+scaling factors is usually 10.
+
+
+2.5   Approximation Theory
+Approximation theory is needed to prove the convergence of the minimax poly-
+nomial obtained by the proposed improved multi-interval Remez algorithm. As-
+sume that functions are defined on a union of the finite number of closed and
+bounded intervals in the real line. From the following well-known theorem [28]
+in real analysis, we are convinced that this domain of functions is a compact set.
+Theorem 2.1 ([28] Bolzano-Weierstrass Theorem). A subset of Rn is a
+compact set if and only if it is closed and bounded.
+    A union of the finite number of closed and bounded intervals in the real line is
+trivially closed and bounded, and thus this domain is a compact set by Bolzano-
+Weierstrass theorem. This theorem will be used in the convergence proof of the
+improved multi-interval Remez algorithm in Section 3.
+    The next theorem [28] states that any continuous function on a compact set in
+the real line can be approximated with an arbitrarily small error by polynomial
+approximation. In fact, the theorem includes the case of continuous functions on
+more general domains, but we only use the special case on compact sets in the
+real line in this paper.
+Theorem 2.2 ([28] Stone-Weierstrass Theorem). Assume that f is a con-
+tinuous function on the compact subset D of the real line. For every  > 0, there
+is a polynomial p such that kf − pk∞ < .
+
+    There are many theorems for the minimax approximate polynomials of a
+function defined on a compact set in approximation theory. Before the introduc-
+tion of these theorems, we refer to a definition of the Haar condition of a set of
+functions that deals with the generalized version of power bases used in polyno-
+mial approximation and its equivalent statement. It is a well-known fact that the
+power basis {1, x, x2 , · · · , xd } satisfies the Haar condition. Thus, if an argument
+deals with the polynomials with regard to a set of basis functions satisfying Haar
+condition, it naturally includes the case of polynomials.
+      High-Precision Bootstrapping of RNS-CKKS Homomorphic Encryption                   13
+
+Definition 2.3 ([10] Haar’s Condition). A set of functions {g1 , g2 , · · · , gn }
+satisfies the Haar condition if each gi is continuous and if each determinant
+                                               g1 (x1 ) · · · gn (x1 )
+                         D[x1 , · · · , xn ] =     ..   ..        ..
+                                                    .       .      .
+                                               g1 (xn ) · · · gn (xn )
+for any n distinct points x1 , · · · , xn is not zero.
+Lemma 2.4 ([10]). A set of functions {g1 , · · · , gn } satisfies
+                                                        P         the Haar condition
+if and only if zero polynomial is the only polynomial i ci gi that has more than
+n − 1 roots.
+   Firstly, we are convinced that there is the unique minimax approximate poly-
+nomial in the union of the finite number of closed and bounded intervals as in
+the following two theorems.
+Theorem 2.5 ([10] Existence of Best Approximations). Let F be a normed
+linear space, and f is any fixed element in F. If S is a linear subspace of F with
+finite dimension, S contains at least one element of minimum distance from f .
+Theorem 2.6 ([10] Haar’s Unicity Theorem). Let f be any                  P continuous
+function on a compact set K. Then the minimax polynomial                    i ci gi of f is
+unique if and only if {g1 , g2 , · · · , gn } satisfies the Haar condition.
+    In Theorem 2.5 for the existence of the best approximation, consider a set
+F of continuous functions on a union D of the finite number of closed and
+bounded intervals. We can easily know that F is a linear space with a max-norm
+kf k∞ = maxx∈D |f (x)|. The set Pd of polynomials with regard to the finite
+number of basis functions on D is a finite-dimensional linear subspace. Then,
+from Theorem 2.5, there is at least one minimax approximate polynomial for
+any f ∈ F.
+    We now introduce the core property of the minimax approximate polynomial
+for a function on D.
+Theorem 2.7 ([10] Chebyshev Alternation Theorem). Let {g1 , · · · , gn }
+be a set of continuous functions defined on [a, b] satisfying
+                                                            P the Haar condition,
+and let D be a closed subset of [a, b]. A polynomial p = i ci gi is the minimax
+approximate polynomial on D to any given continuous function f defined on D
+if and only if there are n + 1 distinct elements x0 < · · · < xn in D such that for
+the error function r = f − p restricted on D,
+                          r(xi ) = −r(xi−1 ) = ± sup |r(x)|.
+                                                       x∈D
+
+    This condition is also called the equioscillation condition. This means that
+if we find a polynomial satisfying the equioscillation condition, then this is the
+unique minimax approximate polynomial, needless to compare with the maxi-
+mum approximation error of any polynomials.
+    The following three theorems are used to prove the convergence of the im-
+proved multi-interval Remez algorithm in Section 3.
+14      J. Lee et al.
+
+Theorem 2.8 ([10] de La Vallee Poussin Theorem). Let {g1 , · · · , gn } be
+a set of continuous functions on [a, b] satisfying the Haar condition. Let f be
+a continuous on [a, b], and p be a polynomial such that p − f has alternately
+positive and negative values at n + 1 consecutive points xi in [a, b]. Let p∗ be a
+minimax approximate polynomial for f , and e(f ) be the minimax approximation
+error of p∗ . Then, we have
+
+                                e(f ) ≥ min |p(xi ) − f (xi )|.
+                                          i
+
+
+
+
+Lemma 2.9 ([10]). Let {g1 , · · · , gn } be a set of continuous functions satisfying
+the Haar condition. Assume that x1 < · · · < xn and y1 < · · · < yn . Then the
+determinants D[x1 , · · · , xn ] and D[y1 , · · · , yn ], defined by Definition 2.3, have
+the same sign.
+Theorem 2.10 ([10] Strong Unicity Theorem). Let {g1 , · · · , gn } be a set of
+functions satisfying the Haar condition, and let p∗ be the minimax polynomial of
+a given continuous function u. Then, there is a constant γ > 0 determined by f
+such that for any polynomial p, we have
+
+                         kp − f k∞ ≥ kp∗ − f k∞ + γkp − p∗ k∞ .
+
+
+
+
+2.6   Algorithms for Minimax Approximation
+Remez Algorithm Remez algorithm [10, 26, 27] is an iterative algorithm that
+always returns the minimax approximate polynomial for any continuous func-
+tion on an interval of [a, b]. This algorithm strongly uses the Chebyshev alter-
+nation theorem [10] in that its purpose is finding the polynomial satisfying the
+equioscillation condition. In fact, the Remez algorithm can be applied to obtain
+the minimax approximate polynomial, whose basis function {g1 , · · · , gn } satis-
+fies the Haar condition. The following explanation includes the generalization
+of the Remez algorithm, and if we want to obtain the minimax approximate
+polynomial of degree d, we choose the basis function {g1 , · · · , gn } by the power
+basis {1, x, · · · , xd }, where n = d + 1.
+    Remez algorithm firstly initializes the set of reference points {x1 , · · · , xn+1 },
+which will be converged to the extreme points of the minimax approximate
+polynomial. Then, it obtains the minimax approximate polynomial in regard
+to only the set of reference points. Since the set of reference points is the set of
+finite points in [a, b], it is a closed subset of [a, b], and thus Chebyshev alternation
+theorem holds on the set of reference points. Let f (x) be a continuous function
+on [a, b]. The minimax approximate polynomial on the set of reference points is
+exactly the polynomial p(x) with the basis {g1 , · · · , gn } satisfying
+
+                        p(xi ) − f (xi ) = (−1)i E   i = 1, · · · , d + 2
+       High-Precision Bootstrapping of RNS-CKKS Homomorphic Encryption                        15
+
+for some real number E. This forms a system of linear equations having n + 1
+equations and n + 1 variables of n coefficients of p(x) and E, which is ensured
+to be not singular by Haar’s condition, and thus we can obtain the polynomial
+p(x). Then, we can find n zeros of p(x) − f (x), zi between xi and xi+1 , i =
+1, 2, · · · , n, and we can find n + 1 extreme points y1 , · · · , yn+1 of p(x) − f (x)
+in each [zi−1 , zi ], where z0 = a and zn+1 = b. That is, we choose the minimum
+point of p(x)−f (x) in [zi−1 , zi ] if p(xi )−f (xi ) < 0, and we choose the maximum
+point of p(x) − f (x) in [zi−1 , zi ] if p(xi ) − f (xi ) > 0. Thus, we find a new
+set of extreme points y1 , · · · , yn+1 . If this satisfies equioscillation condition, the
+Remez algorithm returns p(x) as the minimax approximate polynomial from
+the Chebyshev alternation theorem. Otherwise, it replaces the set of reference
+points with these extreme points y1 , · · · , yn+1 and processes above steps again.
+This is the Remez algorithm in Algorithm 1. The Remez algorithm is proved to
+be always converged to the minimax approximate polynomial by the following
+theorem.
+
+
+ Algorithm 1: Remez Algorithm [10, 26, 27]
+     Input : An input domain [a, b], a continuous function f on [a, b], an
+             approximation parameter δ, and a basis {g1 , · · · , gn }.
+     Output: The minimax approximate polynomial p for f
+ 1 Select x1 , x2 , · · · , xd+2 ∈ [a, b] in strictly increasing order.
+   Find the polynomial p(x) = n                                                      i
+                                       P
+ 2                                         i=1 ci gi (x) with p(xi ) − f (xi ) = (−1) E for
+     i = 1, · · · , d + 2 and some E by solving the system of linear equations with
+     variables ci ’s and E.
+ 3 Divide the interval into n + 1 sections [zi−1 , zi ], i = 1, · · · , n + 1, from zeros
+     z1 , · · · , zn of p(x) − f (x), where xi < zi < xi+1 , and boundary points
+     z0 = a, zn+1 = b.
+ 4 Find the maximum (resp. minimum) points for each section when p(xi ) − f (xi )
+     has positive (resp. negative) value. Denote these extreme points y1 , · · · , yn+1 .
+ 5 max ← maxi |p(yi ) − f (yi )|
+ 6 min ← mini |p(yi ) − f (yi )|
+ 7 if (max − min )/min < δ then
+ 8       return p(x)
+ 9 else
+10       Replace xi ’s with yi ’s and go to line 2.
+11 end
+
+
+
+
+Theorem 2.11 ([10] Convergence of Remez Algorithm). Let {g1 , · · · , gn }
+be a set of functions satisfying the Haar condition, pk be a polynomial generated
+in the k-th iteration of Remez algorithm, and p∗ be the minimax polynomial of
+a given f . Then, pk converges uniformly to p∗ by the following inequality,
+                                   kpk − p∗ k∞ ≤ Aθk ,
+where A is a non-negative constant, and 0 < θ < 1.
+16     J. Lee et al.
+
+Multi-Interval Remez Algorithm Since the Remez algorithm works only
+when the approximation region is one interval, we need another multi-interval
+Remez algorithm that works when the approximation region is the union of
+several intervals. The above Remez algorithm can be extended to the multiple
+sub-intervals of an interval [17,25,27]. The multi-interval Remez algorithm is the
+same as Algorithm 1, except Steps 3 and 4. For each iteration, firstly, we find
+all of the local extreme points of the error function p − f whose absolute error
+values are larger than the absolute error values at the current reference points.
+Then, we choose n + 1 new extreme points among these points satisfying the
+following two criteria:
+  i) The error values alternate in sign.
+ ii) A new set of extreme points includes the global extreme point.
+These two criteria are known to ensure the convergence to the minimax polyno-
+mial, even though there is no exact proof of its convergence to the best of our
+knowledge. However, it is noted that there are many choices of sets of extreme
+points satisfying these criteria. In the next section, we modify the multi-interval
+Remez algorithm, where one of the two criteria is changed.
+
+
+3    Efficient Algorithm for Optimal Minimax Approximate
+     Polynomial
+In this section, we propose an improved multi-interval Remez algorithm for ob-
+taining the optimal minimax approximate polynomial. With this proposed algo-
+rithm, we can obtain the optimal minimax approximate polynomial for contin-
+uous function on the union of finitely many closed intervals to apply the Remez
+algorithm to the bootstrapping of the CKKS scheme. The function we are going
+to approximate is the normalized modular reduction function defined in only
+near finitely many integers given as
+                                                  K−1
+                                                  [
+             normod(x) = x − round(x),     x∈            [i − , i + ],
+                                                i=−(K−1)
+
+where K determines the number of intervals in the domain. normod function
+corresponds to the modular reduction function scaled for both its domain and
+range.
+    In addition, Han et al. [22] uses the cosine function to approximate normod(x)
+to use double-angle formula for efficient homomorphic evaluation. If we use
+double-angle formula ` times, we have to approximate the following cosine func-
+tion
+                                              K−1
+                       2π        1                 [
+                 cos    `
+                            x −        ,   x ∈          [i − , i + ].
+                       2         4
+                                            i=−(K−1)
+
+    To design an approximation algorithm that deals with the above two func-
+tions, we assume the general continuous function defined on an union of finitely
+      High-Precision Bootstrapping of RNS-CKKS Homomorphic Encryption             17
+
+many closed intervals, which is given as
+                                 t
+                                 [
+                            D=       [ai , bi ] ⊂ [a, b] ⊂ R,
+                                 i=1
+
+where ai < bi < ai+1 < bi+1 for all i = 1, · · · , t − 1.
+     When we propose the improved multi-interval Remez algorithm to approxi-
+mate a given continuous function on D with a polynomial having a degree less
+than or equal to d, we have to consider two crucial points. One is to establish an
+efficient criterion for choosing new d + 2 reference points among several extreme
+points. The other is to make efficient some steps in the improved multi-interval
+Remez algorithm. We deal with these two issues for the improved multi-interval
+Remez algorithm in Sections 3.1 and 3.3, respectively.
+
+
+3.1   Improved Multi-Interval Remez Algorithm with Criteria for
+      Choosing Extreme Points
+Assume that we apply the multi-interval Remez algorithm on D and use {g1 , · · ·
+, gn } satisfying Haar condition on [a, b] as the basis of polynomials. After obtain-
+ing the minimax approximate polynomial regarding the set of reference points
+for each iteration, we have to choose a new set of reference points for the next
+iteration. However, there are many boundary points in D, and all these bound-
+ary points have to be considered as extreme points of the error function. For
+this reason, there are many cases of selecting n + 1 points among these extreme
+points. For bootstrapping in the CKKS scheme, there are many intervals to be
+considered, and thus there are lots of candidate extreme points. Since the crite-
+rion of the original multi-interval Remez algorithm cannot determine the unique
+new set of reference points for each iteration, it is necessary to make how to
+choose n + 1 points for each iteration to reduce the number of iterations as small
+as possible. Otherwise, it requires a large number of iteration for convergence
+to the minimax approximate polynomial. On the other hand, if the criterion is
+not designed properly, the improved multi-interval Remez algorithm may not
+converge into a single polynomial in some cases.
+     In order to set the criterion for selecting n + 1 reference points, we need to
+define a simple function for extreme points, µp,f : D → {−1, 0, 1} as follows,
+                           
+                           1
+                                  p(x) − f (x) is concave at z on D
+                 µp,f (z) = −1 p(x) − f (x) is convex at z on D
+                           
+                             0     otherwise,
+                           
+
+where p(x) is a polynomial obtained in that iteration and f (x) is a continuous
+function on D to be approximated. We abuse the notation µp,f as µ.
+   Assume that the number of extreme points of p(x) − f (x) on D is finite, and
+the set of extreme points is denoted by B = {w1 , w2 , · · · , wm }. Assume that B
+18     J. Lee et al.
+
+is ordered in increasing order, w1 < w2 < · · · < wm , and then the values of µ at
+these points are always 1 or −1. Let S be a set of functions defined as
+
+          S = {σ : [n + 1] → [m] | σ(i) < σ(i + 1) for all i = 1, · · · , n},
+
+which means all the ways of choosing n + 1 points of the m points. Clearly, S
+has only the identity function if n + 1 = m.
+   Then, we set three criteria for selecting n + 1 extreme points as follows:
+
+ i) Local extreme value condition. If E is the absolute value of error at points
+    in the set of reference points, then we have
+
+                         min µ(xσ(i) )(p(xσ(i) ) − f (xσ(i) )) ≥ E.
+                          i
+
+ ii) Alternating condition. µ(xσ(i) ) · µ(xσ(i+1) ) = −1 for i = 1, · · · , n.
+iii) Maximum absolute sum condition. Among σ’s satisfying the above two con-
+     ditions, choose σ maximizing the following value
+                                n+1
+                                X
+                                      |p(xσ(i) ) − f (xσ(i) )|.
+                                i=1
+
+It is noted that the local extreme value condition in i) means in particular that
+the extreme points are discarded if the local maximum value of p(x) − f (x) is
+negative or the local minimum of p(x) − f (x) is positive.
+    Note that the first two conditions are also included in the original multi-
+interval Remez algorithm. The third condition, the maximum absolute sum con-
+dition, is the replacement of the condition that the new set of reference points
+includes the global extreme point. The numerical analysis will show that the
+third condition makes the proposed improved multi-interval Remez algorithm
+converge to the optimal minimax approximate polynomial fast. Although there
+are some cases in which the global maximum point is not included in the new set
+of reference points chosen by the maximum absolute sum condition, we prove
+that the maximum absolute sum condition is enough for the improved multi-
+interval Remez algorithm to converge to the minimax approximate polynomial
+in the next subsection.
+    We propose the improved multi-interval Remez algorithm for the continuous
+function on the union of finitely many closed intervals as in Algorithm 2. The
+local extreme value condition is reflected in Step 3, and the alternating condition
+and the maximum absolute sum condition are reflected in Step 4.
+
+
+3.2   Correctness of Improved Multi-Interval Remez Algorithm
+We now have to prove that the proposed algorithm always converges to the
+minimax approximate polynomial for a given piecewise continuous function on
+D. This proof is similar to the convergence proof of the original Remez algo-
+rithm on one closed interval [10,26], but there are a few more general arguments
+       High-Precision Bootstrapping of RNS-CKKS Homomorphic Encryption                  19
+
+
+ Algorithm 2: Improved Multi-Interval Remez algorithm
+     Input : An input domain D = ti=1 [ai , bi ] ⊂ R, a continuous function f on
+                                  S
+             D, an approximation parameter δ, and a basis {g1 , · · · , gn }
+     Output: The minimax approximate polynomial p for f
+ 1 Select x1 , x2 , · · · , xn+1 ∈ D in strictly increasing order.
+ 2 Find the polynomial p(x) with p(xi ) − f (xi ) = (−1)i E for some E.
+ 3 Gather all extreme and boundary points such that µp,f (x)(p(x) − f (x)) ≥ |E|
+     into a set B.
+ 4 Find n + 1 extreme points y1 < y2 < · · · < yn+1 with alternating condition
+     and maximum absolute sum condition in B.
+ 5 max ← maxi |p(yi ) − f (yi )|
+ 6 min ← mini |p(yi ) − f (yi )|
+ 7 if (max − min )/min < δ then
+ 8      return p(x)
+ 9 else
+10      Replace xi ’s with yi ’s and go to line 2.
+11 end
+
+
+
+than the original proof. This convergence proof includes the proof for both the
+original multi-interval Remez algorithm and the improved multi-interval Remez
+algorithm.
+    We have to check that S always contains at least one element σ0 that satisfies
+the local extreme value condition and the alternating condition, and has σ0 (i0 )
+for some i0 such that |p(xσ0 (i0 ) ) − f (xσ0 (i0 ) )| = kp − f k∞ . This existence is in
+fact the basic assumption of the original multi-interval Remez algorithm, but we
+prove this existence for mathematical clarification.
+
+Theorem 3.1. Let B and S be the sets defined above. Then, there is at least one
+element in S which satisfies the local extreme value condition and the alternating
+condition and has σ0 (i0 ) for some i0 such that |p(xσ0 (i0 ) )−f (xσ0 (i0 ) )| = kp−f k∞ .
+
+
+Proof. Let ai and bi be the boundary points in D defined above and let t1 , t2 , · · ·
+, tn+1 ∈ D be the reference points used to construct pk (x) at the k-th iteration.
+Without loss of generality, ti < ti+1 for all i = 1, · · · , n, and the following
+equation for some proper positive value E is satisfied as
+
+                              p(ti ) − f (ti ) = (−1)i−1 E.
+    Let u2i−1 be the largest point among all aj and t2j ’s which are less than or
+equal to t2i−1 , and let v2i−1 be the smallest point among all bj and t2j ’s which
+are larger than or equal to t2i−1 . Then, firstly, we prove that there exists at least
+one local maximum point c2i−1 of pk (x)−f (x) in [u2i−1 , v2i−1 ], and c2i−1 < t2i <
+c2i+1 for all possible i. From the extreme value theorem for continuous function
+on interval [28], there exists at least one maximum point of pk (x) − f (x) in
+[u2i−1 , v2i−1 ], since pk (x) − f (x) is continuous on D. We denote this value at the
+maximum point as c2i−1 . Since t2i−1 is in [u2i−1 , v2i−1 ], pk (c2i−1 ) − f (c2i−1 ) ≥
+20      J. Lee et al.
+
+E > −E = pk (t2j ) − f (t2j ) for all possible j, and thus c2i−1 cannot be equal
+to any t2i ’s. Since elements appeared more than once in intervals [u2i−1 , v2i−1 ],
+i = 1, 2, · · · , b n+2
+                     2 c, are only t2i ’s and v2i−1 ≤ t2i ≤ u2i+1 for all possible i, we
+now prove that c2i−1 < t2i and t2i < c2i+1 .
+     Let u2i be the largest point among all aj and c2j−1 ’s which are less than or
+equal to t2i , and let v2i be the smallest point among all bj and c2j−1 ’s which are
+larger than or equal to t2i . Then, we prove that there exists at least one local
+minimum point c2i of pk (x) − f (x) in [u2i , v2i ], and ci ’s are sorted in strictly
+increasing order. Again, from the extreme value theorem for continuous function
+on interval, there exists at least one minimum point of pk (x) − f (x) in [u2i , v2i ].
+We denote this value at the minimum point as c2i . Since t2i is in [u2i , v2i ],
+pk (c2i ) − f (t2j ) ≤ −E < E ≤ pk (c2j−1 ) − f (c2j−1 ) for all possible j, and thus
+c2i cannot be equal to any c2j−1 . Since elements appeared more than once in
+intervals [u2i , v2i ], i = 1, 2, · · · , b n+2
+                                             2 c, are only c2i−1 ’s and v2i ≤ c2i+1 ≤ u2i+2
+for all possible i, we now prove that ci ’s are sorted in strictly increasing order.
+     Since ci ’s are all local extreme points, ci ∈ B for all i. Then, we can set σ 0 ∈ S
+such that xσ0 (i) = ci . Since c2i−1 ’s are local maximum points and c2i ’s are local
+minimum points, σ 0 satisfies alternating condition. Since µ(ci )(p(ci )−f (ci )) ≥ E,
+σ 0 also satisfies the local extreme value condition. If one of ci has the maximum
+absolute value of p − f , we are done.
+     Assume that all of ci ’s do not have the maximum absolute value of pk − f .
+Let xm be the global extreme point of pk − f . If there is some k such that
+ck < xm < ck+1 , either ck or ck+1 has the same value of µ at xm . Then,
+we replace it with xm and define this function as σ0 . Since σ0 satisfies all of
+conditions in Theorem 3.1, we are done.
+     If xm < c1 or xm > cn+1 , we separate it into two cases again. If µ(xm ) = µ(c1 )
+(resp. µ(xm ) = µ(cn+1 )), we just replace c1 (resp. cn+1 ) with xm and define this
+function as σ0 , and σ0 satisfies all these conditions. If µ(xm ) 6= µ(c1 ) (resp.
+µ(xm ) 6= µ(cn+1 )), we replace cn+1 (resp. c1 ) with xm , and relabel the points
+to define the new function σ0 . This also satisfies all three conditions. Thus, we
+prove it.
+
+
+Remark. This theorem also ensures that m ≥ n + 1. If m < n + 1, S has to be
+empty. This theorem ensures that there is at least one element in S, we can be
+convinced that m ≥ n + 1.
+   Before proving the convergence, we have to generalize the de La Vallee
+Poussin theorem, which was used to prove the convergence of the original Remez
+algorithm on an interval. Since the original de La Vallee Poussin theorem [10]
+only deals with a single interval, we generalize it in the following theorem that
+deals with the closed subset of an interval, whose proof is almost the same as
+that of the original theorem.
+Lemma 3.2 (Generalized de La Vallee Poussin Theorem). Let {g1 , · · · , gn }
+be a set of continuous functions on [a, b] satisfying the Haar condition, and let
+D be a closed subset of [a, b]. Let f be a continuous on D, and p be a polynomial
+      High-Precision Bootstrapping of RNS-CKKS Homomorphic Encryption                   21
+
+such that p − f has alternately positive and negative values at n + 1 consecutive
+points xi in D. Let p∗ be a minimax approximate polynomial for f on D, and
+e(f ) be the minimax approximation error of p∗ . Then, we have
+
+                               eD (f ) ≥ min |p(xi ) − f (xi )|.
+                                           i
+
+
+
+
+Proof. Assume that the above statement is false. Then, there is a polynomial p0
+such that p0 − f has alternately positive and negative values at n + 1 consecutive
+points in D, and
+
+                               kp∗ − f k∞ < |p0 (xi ) − f (xi )|                       (1)
+
+for all i. Then, p0 − p∗ = (p0 − f ) − (p∗ − f ) has alternately positive and negative
+values at the consecutive xi , which leads to the fact that there is n roots in [a, b].
+From Lemma 2.4, p0 − p∗ has to be zero, which is contradiction.
+   We now prove the convergence of Algorithm 2.
+Theorem 3.3. Let {g1 , · · · , gn } be a set of functions satisfying the Haar con-
+dition on [a, b], D be the multiple sub-intervals of [a, b], and f be a continuous
+function on D. Let pk be an approximate polynomial generated in the k-th it-
+eration of the improved multi-interval Remez algorithm, and p∗ be the optimal
+minimax approximate polynomial of f . Then, as k increases, pk converges uni-
+formly to p∗ as in the following inequality
+
+                                    kpk − p∗ k∞ ≤ Aθk ,
+
+where A is a non-negative constant and 0 < θ < 1.
+               (0)       (0)                                                    (k)      (k)
+Proof. Let {x1 , · · · , xn+1 } be the initial set of reference points and {x1 , · · · , xn+1 }
+be the new set of reference points chosen at the end of iteration k. Let rk = pk −f
+be the error function of pk and r∗ = p∗ −f be the error function of p∗ . Since pk is
+generated such that the absolute values of the error function rk at the reference
+        (k−1)
+points xi     , i = 1, 2, · · · , n + 1 are the same. For k ≥ 1, we define
+                                         (k−1)                    (k−1)
+                     αk = min |rk (xi              )| = max |rk (xi       )|,
+                                i                        i
+
+                                        βk = krk k∞ ,
+
+                                                         (k)
+                                    γk = min |rk (xi )|.                               (2)
+                                               i
+
+    Define β ∗ = kr∗ k∞ . We have β ∗ ≥ γk from Lemma 3.2, βk ≥ β ∗ by definition
+of p∗ , and γk ≥ αk by the local extreme value condition for new set of reference
+points. Then, we have
+                               αk ≤ γk ≤ β ∗ ≤ βk .
+22         J. Lee et al.
+
+                          (k)            (k)
+    Let c(k) = [c1 , · · · , cn ]T be the coefficient vector of pk . Then, c(k) is the
+solution vector of the following system of linear equations
+                                  n
+                                     (k)    (k−1)         (k−1)
+                                  X
+           (−1)i+1 h(k) +           cj gj (xi     ) = f (xi     ),     i = 1, · · · , n + 1     (3)
+                                  j=1
+
+                                               (k)
+for the n + 1 unknowns h(k) and cj ’s, and |h(k) | = αk . From Theorem 2.6, we
+assure that the system of linear equations in (3) is nonsingular, which can be
+rewritten as in the matrix equation for k + 1, instead of k,
+                          (k)            (k)
+                                                                (k)
+                                                                        
+                1   g1 (x1 ) · · · gn (x1 )      h(k+1)       f (x1 )
+                           (k)            (k)   (k+1)            (k) 
+             −1 g1 (x2 ) · · · gn (x2 )   c1           f (x2 ) 
+                                                           
+             .
+             .         ..     ..      ..       ..  
+                                                       =      ..    .  (4)
+                                  .            .  
+                                                                        
+             .          .              .                          .    
+                                       (k)           (k)       (k+1)            (k)
+                    (−1)n g1 (xn+1 ) · · · gn (xn+1 )         cn         f (xn+1 )
+
+From Cramer’s rule, we can find h(k+1) as
+                          (k)            (k)           (k)                (k)             (k)
+              f (x1 ) g1 (x1 ) · · · gn (x1 )                 1  g1 (x1 ) · · · gn (x1 )
+                     (k)          (k)                (k)                (k)            (k)
+              f  (x  2   ) g1 (x  2   ) · · · gn (x  2   )   −1  g1 (x2 ) · · · gn (x2 )
+     h(k+1) =      ..          ..        ..       ..       /  ..     ..     ..      ..     .
+                    .           .           .      .           .      .        .     .
+                   (k)          (k)                 (k)               (k)             (k)
+              f (xn+1 ) g1 (xn+1 ) · · · gn (xn+1 ) (−1)n g1 (xn+1 ) · · · gn (xn+1 )
+                                                                                           (5)
+              (k)
+    Let Mi be the minor of the matrix in (4) removing the first column and
+the i-th row. Then, (5) can be written as
+                               Pn+1      (k)  (k)
+                       (k+1)         f (xi )Mi (−1)i+1
+                      h      = i=1 Pn+1        (k)
+                                                          .                (6)
+                                         j=1 Mj
+                                        Pn
+If f is replaced by any polynomial p = j=1 c0j gj in (4), the minimax approxi-
+                    (k)            (k)
+mation on {x1 , · · · , xn+1 } is p itself. This leads to
+                          Pn+1         (k)   (k)     i+1
+                            i=1 pk (xi )Mi (−1)
+                                   Pn+1 (k)               = 0.                                  (7)
+                                      j=1 Mj
+
+By substracting (6) from (7), and rk = pk − f , we have
+                               Pn+1        (k)  (k)
+                       (k+1)         rk (xi )Mi (−1)i+1
+                    −h       = i=1 Pn+1         (k)
+                                                        .
+                                          j=1 Mj
+
+                                 (k)
+By the fact that rk (xi )’s alternate in sign by the alternating condition for new
+set of reference points, and all minors Mi have the same sign by Lemma 2.9, we
+have
+                  n+1                         n+1
+                            (k)        (k)              (k)   (k)
+                   X                          X
+                       rk (xi )(−1)i Mi     =     |rk (xi )||Mi |
+                           i=1                               i=1
+       High-Precision Bootstrapping of RNS-CKKS Homomorphic Encryption                 23
+
+                                               Pn+1    (k)     (k)
+                                  (k+1)         i=1 |Mi ||rk (xi )|
+                     αk+1 = |h            |=      Pn+1     (k)
+                                                                    .                  (8)
+                                                     j=1 |Mj |
+
+Now let
+                                                     (k)
+                                   (k)        |M |
+                                  θi      = Pn+1 i (k) .
+                                             j=1 |Mj |
+                                               (k)         (k)
+Since αk+1 is weighted average of |rk (xi )| by θi ’s as weights, we have αk+1 ≥
+γk from (2). Note that αk ≤ γk ≤ αk+1 , and thus αk is a non-decreasing se-
+quence. This fact is used in the last part of the proof.
+    Note that there are some n + 1 alternating points, where the approximate
+error values alternates, including the global extreme point by Theorem 3.1, and
+                                    (k)       (k)
+the approximate error values at x1 , · · · , xn+1 have the maximum absolute sum
+by the maximum absolute sum condition for new set of reference points. That is,
+Pn+1         (k)
+   i=1 |rk (xi )| is larger than or equal to sum of any n + 1 absolute error values
+including βk and thus we have
+                                   n+1
+                                               (k)
+                                   X
+                                          |rk (xi )| ≥ βk .                            (9)
+                                   i=1
+                                  (k)
+    First, we will prove that θi is larger than a constant 1 − θ > 0 throughout
+the iterations. It is known that Mi 6= 0 for all i from the Haar condition. We
+firstly prove an inequality
+                          (k)      (k)
+                         xi+1 − xi        ≥  > 0,     i = 0, · · · , n,              (10)
+                                                                                (k)          (k)
+where  does not depend on k. Assume that (10) is not true. Let x(k) = (x1 , · · · , xn+1 )
+                                                                                 (k)
+be a sequence defined on Dn+1 . Then x(k) has its subsequence such that mini |xi+1 −
+ (k)
+xi | converges to zero. Since Dn+1 is a closed and bounded subset of Rn+1 , it
+is a compact set, and thus this subsequence also has its subsequence converg-
+ing to a point (x∗1 , · · · , x∗n+1 ). Since mini |x∗i+1 − x∗i | = 0, there is some i such
+that x∗i = x∗i+1 . Let p be the minimax polynomial of f on (x∗1 , · · · , x∗n+1 ). Since
+there is actually less than or equal to n points, p is the approximate polynomial
+generated by the Lagrange interpolation, and thus
+                         p(x∗i ) = f (x∗i ),    i = 1, · · · , n + 1.
+   It is known that α1 > 0 by the fact that αk is weighted average of absolute
+approximation errors at the previous set of reference points. Then, there exists
+a number δ > 0 such that whenever |y1 − y2 | <  and y1 , y2 ∈ D, we have
+                           |(p − f )(y1 ) − (p − f )(y2 )| < α1
+because p − f is a continuous function on the compact set, and thus it is also
+                                                             (k)     (k)
+uniformly continuous. Since there is a subsequence of (x1 , · · · , xn+1 ) converging
+to x(k) = (x∗1 , · · · , x∗n+1 ), there is some k0 such that
+                           (k )
+                         |xi 0 − x∗i | < δ,      i = 1, · · · , n + 1.
+24      J. Lee et al.
+
+Then,
+                          (k )                              (k )     (k )
+            |(p − f )(xi 0 ) − (p − f )(x∗i )| = |p(xi 0 ) − f (xi 0 )| < α1
+
+because (p − f )(x∗i ) = 0. In fact, p is not the minimax approximate polynomial
+                                                  (k )         (k0 )
+in regard to the k-th set of reference points {x1 0 , · · · , xn+1   }. Since αk+1 is the
+                                                                     (k )       (k0 )
+error value of the minimax approximate polynomial on {x1 0 , · · · , xn+1             }, we
+have
+                                         (k )       (k )
+                       αk+1 ≤ max |p(xi 0 ) − f (xi 0 )| < α1 .
+                                   i
+
+This contradicts the fact that αk is non-decreasing sequence, and thus we have
+(10).
+                                  (k)
+     Now, we will prove that θi is larger than a constant 1 − θ. Consider the
+           0
+subset D of D     n+1
+                      such that for (y1 , · · · , yn+1 ) ∈ D0 , yi+1 − yi ≥ . We easily see
+that D is a closed and bounded subset in Rn+1 , and thus D0 is a compact set.
+         0
+                                                       (k)
+Then, |Mi |, which is the same function as |Mi | except that the inputs are yi ’s
+              (k)
+instead of xi ’s, is a continuous function on Dn+1 , so is on D0 , and thus there is
+an element at which |Mi | has the mininum value on D0 from the extreme value
+theorem. From the Haar condition in Definition 2.3, |Mi | cannot be zero because
+yi ’s are distinct and the minimum value of |Mi | is not zero. Since we consider
+the finite number of functions |Mi |’s, the lower bound of all |Mi |’s is bigger than
+                           Pn+1
+zero. In addition, since j=1 |Mj | is also a continuous function on D0 , there is
+                      Pn+1
+an upper bound of j=1 |Mj | on D0 from the extreme value theorem. This leads
+to the fact that θi ’s are lower-bounded beyond zero.
+     From γk+1 ≥ αk+1 , (8), and (9), we have
+
+                          γk+1 − γk ≥ αk+1 − γk
+                                           n+1
+                                                  (k)       (k)
+                                           X
+                                       =         θi (|rk (xi )| − γk )
+                                           i=1
+                                       ≥ (1 − θ)(βk − γk )                             (11)
+                                                        ∗
+                                       ≥ (1 − θ)(β − γk ).                             (12)
+
+From (12), we have
+
+                        β ∗ − γk+1 = (β ∗ − γk ) − (γk+1 − γk )
+                                   ≤ (β ∗ − γk ) − (1 − θ)(β ∗ − γk )
+                                   = θ(β ∗ − γk ).
+
+Then, we obtain the following inequality for some nonnegative B as
+
+                                       β ∗ − γk ≤ Bθk .                                (13)
+        High-Precision Bootstrapping of RNS-CKKS Homomorphic Encryption         25
+
+From (11) and (13), we have
+
+                           βk − β ∗ ≤ βk − γ k
+                                        1
+                                    ≤       (γk+1 − γk )
+                                      1−θ
+                                        1
+                                    ≤       (β ∗ − γk )
+                                      1−θ
+                                        1
+                                    ≤       Bθk
+                                      1−θ
+                                    ≤ Cθk .                                   (14)
+
+      From Theorem 2.10, there is a constant γ > 0 such that
+
+                     kp∗ − f k∞ + γkpk − p∗ k∞ ≤ kpk − f k∞ .
+
+Since βk = kpk − f k∞ , β ∗ = kp∗ − f k∞ , and (14), we complete the proof by the
+following inequality
+                                            βk − β ∗
+                              kpk − p∗ k∞ =
+                                                γ
+                                               k
+                                          ≤ Aθ
+
+for nonnegative constant A.
+
+
+    Remark. The maximum sum condition is used in the inequality (11). Note
+that the inequality (11) can be satisfied if we include the global extreme point to
+the new set of reference points as in the original multi-interval Remez algorithm,
+instead of the maximum absolute sum condition in the improved multi-interval
+Remez algorithm. Thus, this proof naturally includes the convergence proof of
+the original multi-interval Remez algorithm.
+    From the proof, we know that the convergence rate of αk determines the
+convergence rate of the algorithm. Since αk is always lower than β ∗ and non-
+decreasing sequence, it is desirable to obtain αk as large as possible for each
+iteration. The maximum sum condition is more effective than the global extreme
+point inclusion condition; The global extreme point inclusion condition cannot
+care about the reference points other than the global extreme point, but the
+maximum sum condition cares for all the reference points to be large. This can
+give some intuition for the effectiveness of the maximum sum condition.
+
+
+3.3     Efficient Implementation of Improved Multi-Interval Remez
+        Algorithm
+
+In this section, we have to consider the issues in each step of Algorithm 2 and
+suggest how to implement Steps 1, 2, 3, and 4 of Algorithm 2 as follows.
+26      J. Lee et al.
+
+Initialization: Depending on the initialization method, there can be a large
+difference in the number of iterations required. Therefore, the closer the polyno-
+mial produced by initializing the initial reference points to the optimal minimax
+approximation polynomial, the fewer iterations are required. We use the node
+setting method of Han et al. [22] to effectively set the initial reference points
+in the improved multi-interval Remez algorithm. Since Han et al.’s node setting
+method was for polynomial interpolation, it chooses the d + 1 number of nodes
+when we need the approximate polynomial of degree d. Instead, if we need to
+obtain the optimal minimax approximate polynomial of degree d, we choose the
+d + 2 number of nodes with Han et al.’s method as if we need the approximate
+polynomial of degree d + 1, and uses them for the initial reference points.
+
+
+Finding Approximate Polynomial: A naive approach is finding coefficients
+of the approximate polynomial with power basis at the current reference points
+for the continuous function f (x), i.e., we can obtain cj ’s in the following equation
+                            d
+                            X
+                                  cj xji − f (xi ) = (−1)i E,
+                            j=0
+
+where E is also an unknown variable in this system of linear equations. However,
+this method suffers from the precision problem for the coefficients. It is known
+that as the degree of the basis of approximate polynomial increases, the coeffi-
+cients usually decrease, and we have to set higher precision for the coefficients
+of the higher degree basis. Han et al. [22] use the Chebyshev basis for this coeffi-
+cient precision problem since the coefficients of a polynomial with the Chebyshev
+basis usually have the almost same order. Thus, we also use the Chebyshev basis
+instead of the power basis.
+
+
+Obtaining Extreme Points: Since we are dealing with a tiny minimax ap-
+proximation error, we have to obtain the extreme points as precisely as possible.
+Otherwise, we cannot reach the extreme point for the minimax approximate
+polynomial precisely, and then the minimax approximation error obtained with
+this algorithm becomes large. Basically, to obtain the extreme points, we can
+scan p(x) − f (x) with a small scan step and obtain the extreme points where the
+increase and decrease are exchanged. A small scan step increases the accuracy of
+the extreme point but causes a long scan time accordingly. To be more specific,
+it takes approximately 2` proportional time to find the extreme points with the
+accuracy of `-bit. Therefore, it is necessary to devise a method to obtain high
+accuracy extreme points more quickly.
+    In order to obtain the exact point of the extreme value, we use a method
+of finding the points where the increase and decrease are exchanged and then
+finding the exact extreme point using a kind of binary search. Let r(x) = p(x) −
+f (x) and sc be the scan step. If we can find xi,0 where µ(xi,0 )r(xi,0 ) ≥ |E|, and
+(r(xi,0 ) − r(xi,0 − sc))(r(xi,0 + sc) − r(xi,0 )) ≤ 0, we obtain the i-th extreme
+     High-Precision Bootstrapping of RNS-CKKS Homomorphic Encryption                          27
+
+points using the following process successively ` times,
+          xi,k =                  arg max                      |r(x)|, k = 1, 2, · · · , `,
+                   x∈{xi,k−1 −sc/2k ,xi,k−1 ,xi,k−1 +sc/2k }
+
+where the i-th extreme point xi is set to be xi,` . Then, we obtain the extreme
+point with O(log(sc) + `)-bit precision. Since sc needs not to be a too small
+value, we can find the extreme point with arbitrary precision with linear time
+to precision `. In summary, we propose that the `-bit precision of the extreme
+points can be obtained by the linear time of ` instead of 2` .
+    This procedure for each interval in the approximation region can be per-
+formed independently with each other, and thus it can be performed effectively
+with several threads. Since this step is the slowest step among any other steps
+in the improved multi-interval Remez algorithm, the parallel processing for this
+procedure is desirable to make the whole algorithm much fast.
+    One can say that the Newton method is more efficient than the binary search
+method in finding the extreme points because we may just find the roots of
+the derivative of p(x) − f (x). However, the extreme points are very densely
+distributed in our situation, and thus the Newton method may not be stably
+performed. Even if we miss only one extreme point, the algorithm can act in an
+undefined manner. The binary search method is fast enough and finds all of the
+extreme points very robustly, and thus we use the binary search instead of the
+Newton method.
+
+Obtaining New Reference Points: When we find the new reference points
+satisfying the local extreme value condition, the alternating condition, and max-
+imum absolute sum condition, there is a naive approach: among local extreme
+points which satisfy the local extreme value condition, find all d + 2 points sat-
+isfying the alternating condition and choose the n + 1 points which have the
+maximum absolute  sum value. If we have m local extreme points, we have to
+              m
+investigate d+2    points, and this value is too large, making this algorithm im-
+practical. Thus, we have to find a more efficient method than this naive approach.
+    We propose a very efficient and provable algorithm for finding the new ref-
+erence points. The proposed algorithm always gives the d + 2 points satisfying
+the three criteria. It can be considered as an elimination method in that we
+eliminate some elements for each iteration in the proposed algorithm until we
+obtain n + 1 points. It is clear that as long as m > d + 2, we can find at least one
+element which may not be included in the new reference points. This proposed
+algorithm is given in Algorithm 3. Algorithm 3 takes O(m log m) running time,
+which is a quasi-linear time algorithm.
+    We note that there are always some points in all situations such that we can
+ensure that if we choose a set of d + 2 points including these points satisfying
+the alternating condition, there exists the other set of d + 2 points without these
+points which satisfies the alternating condition and whose absolute sum is larger.
+Algorithm 3 finds these points until the number of the remaining points is d + 2.
+    To understand the last part of Algorithm 3, the example can be given that if
+the extreme point x2 is removed, T = {|r(x1 )|+|r(x2 )|, |r(x2 )|+|r(x3 )|, |r(x3 )|+
+28       J. Lee et al.
+
+|r(x4 )|, · · · } is changed to T = {|r(x1 )| + |r(x3 )|, |r(x3 )| + |r(x4 )|, · · · }. It is
+assumed that whenever we remove an element in the ordered set B in Algorithm
+3, the remaining points remain sorted and indices are relabeled in increasing
+order. When we compare the values to remove some extreme points, there are
+the cases that the compared values are equal or the smallest element is more than
+one. In such cases, we randomly remove one of these elements. The correctness
+of Algorithm 3 is proven in the following theorem.
+
+
+  Algorithm 3: New Reference
+     Input : An increasing ordered set of extreme points B = {t1 , t2 , · · · , tm }
+             with m ≥ d + 2, and the degree of the approximate polynomial d.
+     Output: d + 2 points in B satisfying alternating condition and maximum
+             absolute sum condition.
+ 1 i←1
+ 2 while ti is not the last element of B do
+ 3     if µ(ti )µ(ti+1 ) = 1 then
+ 4         Remove from B one of two points ti , ti+1 having the smaller value
+             among {|r(ti )|, |r(ti+1 )|}.
+ 5     else
+ 6         i←i+1
+ 7     end
+ 8 end
+ 9 if |B| > d + 3 then
+10     Calculate all |r(ti )| + |r(ti+1 )| for i = 1, · · · , |B| − 1 and sort and store
+         these values into the array T .
+11 while |B| > d + 2 do
+12     if |B| = d + 3 then
+13         Remove from B one of two points t1 , t|B| having less value among
+             {|r(t1 )|, |r(t|B| )|}.
+14     else if |B| = d + 4 then
+15         Insert |r(t1 )| + |r(t|B| )| into T and sort T . Remove from B the two
+             elements having the smallest value in T .
+16     else
+17         if t1 or t|B| is included in the smallest element in T then
+18              Remove from B only t1 or t|B| .
+19         else
+20              Remove from B the two elements having the smallest element in T .
+21         end
+22         Remove from T all elements related to the removed extreme points,
+             and insert into T the sum of absolute error values of the two newly
+             adjacent extreme points.
+23     end
+24 end
+      High-Precision Bootstrapping of RNS-CKKS Homomorphic Encryption                      29
+
+Theorem 3.4. Algorithm 3 always returns the n + 1 points satisfying the alter-
+nating condition and the maximum absolute sum condition.
+Proof. Let Binit = {t01 , t02 , · · · , t0m } be the initial elements in B , and let t0` be an
+element removed in the first while statement. We first show that each element
+removed in the first while statement in Algorithm 3 is not included in the new ref-
+erence; that is, if the subset A of Binit having n + 1 elements satisfies alternating
+condition and contain this removed element, there is another subset A0 of B hav-
+ing n + 1 elements satisfying alternating condition, not containing the removed
+element, and having absolute sum larger than or equal to A. Since it is removed
+in the first while statement, there is an element t0`0 such that |r(t0`0 )| ≥ |r(t0` )|,
+µ(t0`0 ) = µ(t0` ), and |`0 − `| = 1. Clearly, A cannot contain t0`0 , because A satisfies
+the alternating condition. Let A0 be the same set as A except that t0` is replaced
+with t0`0 . Then A0 also satisfies alternating condition, does not contain t0` , and
+has absolute sum larger than or equal to that of A.
+    We now observe that at the end of the first while statement, B itself satisfies
+the alternating condition. Then we now have to prove that elements removed in
+the second while statement in Algorithm 3 are not included in the new reference
+points. In other words, if the subset A of Binit having n + 1 elements satisfies
+the alternating condition and contains these removed elements, there is another
+subset A0 of B having n + 1 elements satisfying alternating condition, not con-
+taining these removed elements, and having absolute sum larger than or equal
+to A. Let t0` be an element removed in the second while statement.
+    Then, there are three cases: at the time of removal of t0` , the remaining set
+B can have n + 2, n + 3, or larger than n + 3 elements as in Algorithm 3. We
+consider each case separately. By the induction argument, we can assume that
+the remaining set B in each iteration has n+1 points that satisfy the alternating
+condition and have the maximum absolute sum among all possible n + 1 points
+in Binit . In other words, we can assume that if we have n + 1 points in Binit that
+satisfy the alternating condition and contain at least one of the removed elements
+before that time, there are n + 1 points in the remaining set B at that time such
+that they satisfy the alternating condition and have absolute sum larger than or
+equal to the previous ones. This inductive assumption makes us consider only
+the remaining set B at that iteration instead of all Binit in the proof.
+  i) Case of n + 2: If the remaining set B has n + 2 elements at the time of
+     removal of t0` , elements in B at that time are labeled as t1 , t2 , · · · , tn+2 , and
+     t0` is labeled as t1 or tn+2 . Then, |r(t)| at one of the two points t1 and tn+2 ,
+     which is not t0` has the value of |r(x)| larger than or equal to the value at
+     t0` . We denote this element t0`0 . If we have a subset A of n + 1 points in
+     the remaining set B that satisfy alternating condition and contain t0` , the
+     element t0`0 must not be in these n + 1 points due to alternating condition.
+     Let A0 be the same set as A except that t0` is replaced with t0`0 . Then, A0
+     also satisfies the alternating condition, does not contain t0` , and has absolute
+     sum larger than or equal to that of A.
+ ii) Case of n+3: If the remaining set B has n+3 elements at the time of removal
+     of t0` , the elements in B at that time are labeled as t1 , t2 , · · · , tn+3 , and we
+30      J. Lee et al.
+
+     have to remove two elements. Then, there must be a different element t0p
+     which is also removed at the time of removal of t0` . {t0` , t0p } can be {ti , ti+1 }
+     for some i or {t1 , tn+3 } as in Algorithm 3. Since all of the subsets of B
+     having n + 1 elements that satisfy the alternating condition are the cases of
+     B\{ti , ti+1 } for some i or B\{t1 , tn+3 }, one subset of B with the alternating
+     condition that has the maximum absolute sum has to be B\t0` , t0p . Therefore,
+     we can obtain the resulting subset by removing these two elements.
+iii) Case of larger than n + 3: If the remaining set B has elements larger than
+     n + 3 elements at the time of removal of t0` , the elements in B at that time
+     are labeled as t1 , t2 , · · · , tj , where j > n + 3. Then, there are two cases: One
+     is that t0` is labeled as t1 or tj , and the other is not the first case.
+     iii)-1 If t0` is labeled as t1 or tj , let t0p be the adjacent element in B. If the
+            subset A in B that satisfies the alternating condition and contains t0`
+            also contains t0p , there is at least one pair of adjacent elements t0`0 and
+            t0p0 in B that is not contained in A, since A satisfies the alternating
+            condition and more than three elements are removed from B. Note
+            that |r(t0`0 )| + |r(t0p0 )| ≥ |r(t0` )| + |r(t0p )|. Let A0 be the same set as A
+            except that t0` and t0p are replaced with t0`0 and t0p0 . A0 also satisfies
+            alternating condition, does not contain t0` , and has absolute sum larger
+            than or equal to that of A.
+            If A does not contain t0p , the adjacent element of t0p which is not t0`
+            cannot be contained in A, since A satisfies the alternating condition.
+            Let t0`0 be the adjacent element of t0p . Note that |r(t0`0 )| + |r(t0p )| ≥
+            |r(t0` )|+|r(t0p )|. Let A0 be the same set with A except that t0` is replaced
+            with t0`0 . A0 also satisfies the alternating condition, does not contain
+            t0` , and has absolute sum larger than or equal to that of A.
+     iii)-2 If t0` is not labeled as t1 or tj , the adjacent element t0p of t0` in B where
+            |r(t0` )| + |r(t0p )| is the smallest value in T cannot be t1 or tj . If this is
+            the case, t0` cannot be removed but t0p is removed in that iteration. If
+            the alternated subset A in B that contains t0` also contain t0p , there
+            is at least one pair of adjacent elements t0`0 and t0p0 in B that is not
+            contained in A. Note also that |r(t0`0 )| + |r(t0p0 )| ≥ |r(t0` )| + |r(t0p )|. Let
+            A0 be the same set as A except that t0` and t0p are replaced with t0`0
+            and t0p0 . A0 also satisfies the alternating condition, does not contain
+            t0` , and has absolute sum larger than or equal to that of A.
+            If A does not contain t0p , there is the adjacent element of t0p which is not
+            t0` , since t0p is not t1 or tj . Let t0`0 be adjacent element of t0p . Then, t0`0
+            cannot be contained in A, since A satisfies the alternating condition.
+            Note that |r(t0`0 )| + |r(t0p )| ≥ |r(t0` )| + |r(t0p )|. Let A0 be the same set
+            as A except that t0` is replaced with t0`0 . A0 also satisfies alternating
+            condition, does not contain t0` , and has absolute sum larger than or
+            equal to that of A.
+
+Thus, we prove the theorem.
+      High-Precision Bootstrapping of RNS-CKKS Homomorphic Encryption           31
+
+3.4   Numerical Analysis with Improved Multi-Interval Remez
+      Algorithm
+
+This subsection shows the numerical analysis of the improved multi-interval
+Remez algorithm for its efficiency and the optimal minimax approximation error.
+
+
+Maximum Sum Condition: Table 1 shows the number of iterations required
+to converge to the optimal minimax approximate polynomial in the multi-interval
+Remez algorithm and the improved multi-interval Remez algorithm. The initial
+set of reference points is selected uniformly in each interval since we want to ob-
+serve their performances in the worst case. While selecting new reference points
+is not unique for each iteration in the multi-interval Remez algorithm, the im-
+proved multi-interval Remez algorithm selects the new reference points uniquely
+for each iteration. Thus, when we analyze the multi-interval Remez algorithm,
+we randomly select the new reference points for each iteration among the possi-
+ble sets of reference points that satisfy the local extreme value condition and the
+alternating condition and have the global extreme point. We set the approxima-
+tion parameter δ in Algorithm 2 as 2−40 and repeat this simulation 100 times.
+It shows that the improved multi-interval Remez algorithm is much better to
+reduce the iteration number of the Remez algorithm.
+    Note that the number of iterations depends on the initial set of reference
+points. In fact, the uniformly distributed reference points are not desirable as
+an initial set of reference points because these reference points are far from the
+converged reference points. In fact, the improved multi-interval Remez algorithm
+with the initialization method explained in the previous subsection only needs
+4∼14 iterations. The overall running time of the improved multi-interval Remez
+algorithm with the method in the previous subsection is 1∼3 seconds by PC
+with AMD Ryzen Threadripper 1950X 16-core CPU @ 3.40GHz.
+
+Table 1: Comparison of iteration numbers between the improved multi-interval
+         Remez algorithm and the multi-interval Remez algorithm for δ = 2−40
+                                                multi-interval
+                degree      modified
+                                              Remez algorithm
+              of approx. Remez algorithm
+                                                 standard
+                 poly.                   average            max min
+                                                 deviation
+                   79          28          60.0    9.38      82 41
+                   99          8           17.1    3.34      28 11
+                  119          26          53.4    8.10      79 37
+                  139          39          60.3    4.71      79 48
+                  159          39          72.1    9.71      98 42
+                  179          48          72.3    9.72     105 53
+                  199          56          80.4    7.28      94 60
+
+
+Minimax Error: We obtain the optimal minimax approximate polynomials
+for the modular reduction function and the scaled cosine function with the
+32                           J. Lee et al.
+
+
+                   0                                                                     0
+
+                   -5                                                                    -5
+                                                        Han et al.                      -10
+                  -10
+                                                                                        -15
+                  -15                                   optimal
+                                                                                        -20
+
+
+
+
+                                                                           log(error)
+     log(error)
+
+
+
+                  -20                                                                   -25
+
+                  -25                                                                   -30
+                                                                                                   Han et al.
+                                                                                        -35
+                  -30
+                                                                                        -40        optimal
+                  -35
+                                                                                        -45
+                  -40
+                                                                                        -50
+                        40        60         80   100             120
+                                                                                              25         30       35     40   45
+                                         degree                                                                 degree
+
+
+                                                                        (b) Cosine function with scaling number
+                    (a) Modular reduction function                          two
+
+Fig. 1: Comparison of minimax approximatio error between the previous approx-
+        imation method and the improved multi-interval Remez algorithm.
+
+scaling number two. Fig. 1(a) shows the minimax approximation error of the
+approximate polynomial of the modular reduction function derived by the im-
+proved multi-interval Remez algorithm and the minimax approximation error
+of the previous homomorphic modular reduction method with scaling number
+zero in [22], compared to the modular reduction function. That is, let p1 (x)
+be the optimal minimax approximate polynomial of the normod function and
+let q1 (x) be the approximate polynomial obtained by Han et al.’s method with
+scaling number zero when the half-width of approximation region is 2−10 . Then,
+maxx∈D |p1 (x) − normod(x)| and maxx∈D |q1 (x) − normod(x)| are compared in
+Fig. 1(a). Note that while the minimax approximation error of the approximate
+polynomial of the modular reduction function decreases steadily as the degree
+of the approximate polynomial increases, the minimax approximation error of
+the previous method does not decrease when the degree is larger than 76 be-
+cause of the approximation error between the modular reduction function and
+the sine/cosine function.
+    Fig. 1(b) shows the minimax approximation error of the composition of the
+approximate polynomial of the scaled cosine function with scaling number two
+derived by the improved multi-interval Remez algorithm and two double angle
+formulas and the minimax approximation error of method in [22], compared
+to the cosine function. That is, let p2 (x) be the optimal minimax approximate
+polynomial of cos π2 (x − 1/4) and let q2 (x) be the approximate polynomial
+obtained by Han et al.’s method with scaling number two when the half-width
+of approximation region is 2−3 . If r(x) = 2x2 − 1, then maxx∈D |r ◦ r ◦ p2 (x) −
+sin(2πx)| and maxx∈D |r ◦ r ◦ q2 (x) − sin(2πx)| are compared in Fig. 1(b). The
+proposed method improves the minimax approximation error by 2.3 bits on
+average, and by 5 bits at maximum for the same degree of the approximate
+polynomial. This improvement leads to a reduction of 1∼2 degrees for the given
+minimax approximation error.
+    In fact, the approximate polynomial for the modular reduction function can-
+not yet be used in the bootstrapping of the RNS-CKKS scheme because of the
+     High-Precision Bootstrapping of RNS-CKKS Homomorphic Encryption            33
+
+huge coefficients. It is a very unstable polynomial to evaluate in the RNS-CKKS
+scheme in that these large coefficients amplify the approximation error in the
+message. It is an interesting open problem to stably use the minimax approxi-
+mate polynomial of the modular reduction function in the RNS-CKKS scheme.
+Instead of using the unstable minimax approximate polynomial of the modu-
+lar reduction function, we approximate the modular reduction function with a
+composition of several stable polynomials in Section 5.
+
+
+4   Numerical Analysis of Message Precision in
+    Bootstrapping with Improved Multi-Interval Remez
+    Algorithm in SEAL Library
+Since the previous researches for the bootstrapping of the RNS-CKKS scheme
+did not deal deeply with its message precision, we numerically analyze the mes-
+sage precision for the bootstrapping with improved multi-interval Remez algo-
+rithm of the RNS-CKKS scheme by changing several parameters: the degree d
+of the approximate polynomial of the scaled cosine function, the bit-length dif-
+ference δdiff = log ∆boot − log ∆ between the default scaling factor and the boot-
+strapping scaling factor, the bootstrapping scaling factor ∆boot , and the number
+of the slots. We assume that the range of the real part and the imaginary part
+of the messages to be bootstrapped is [−1, 1]. The bootstrapping precision is
+measured as − log2 (er + ei )/2, where er and ei are the average error of the real
+part and the imaginary part of all slots, respectively.
+    Numerical analysis in this section is conducted in PC with Intel(R) Xeon(R)
+Silver 4210 CPU @ 2.20GHz single-threaded, and the SEAL library version 3.5.9
+[29] is used. The double angle formula for the cosine function is assumed to be
+used twice. The improved multi-interval Remez algorithm is used to obtain the
+optimal minimax approximate polynomial in all simulations, rather than polyno-
+mial approximation methods in the previous papers, [8, 11, 22]. The polynomial
+modulus degree is set to be 216 , the secret key Hamming weight is set to be 192,
+the value of K is set to be 25, and the maximum modulus for the ciphertext is
+set to be 21553 , which satisfies the 128-bit security as in [4]. The CoeffToSlot
+and SlotToCoeff procedures in [8] with two level consumption are used in all
+simulations. The scaling factor management method and the delayed rescaling
+method in [24] is applied, and the depth consumption of the polynomial evalua-
+tion is optimized by Bossuat et al.’s evaluation method [4]. The input messages
+are sampled by the uniform distribution over the bootstrapping range.
+
+
+Degree of Approximate Polynomial: Table 2 shows the message precision of
+the bootstrapping with the improved multi-interval Remez algorithm when the
+degree of the approximate polynomial for the scaled cosine function is changed.
+The value of log δdiff is 12, log ∆boot is 60, and the number of the slots is 28 in
+this simulation. The approximation error means the minimax error of the ap-
+proximate polynomial for the scaled cosine function, and the bootstrapping error
+34      J. Lee et al.
+
+means the average error for each slot when the bootstrapping is performed with
+the library. When the scaling factor is changed from the bootstrapping scaling
+factor to the default scaling factor, the message and its error are multiplied by
+δdiff . We show both the bootstrapping error before changing the scaling factor
+and that after changing the scaling factor. Although the approximation error
+continues to decrease as the degree of the approximate polynomial increases,
+the bootstrapping error does not decrease below a certain value. This bound
+is caused by either the difference between the modular reduction function and
+the cosine function or the rescaling error, depending on the situation. Thus, we
+cannot raise the message precision infinitely by using a high degree approximate
+polynomial. The actual lower bound of the bootstrapping error before changing
+the scaling factor is denoted by emin in this section, and then the lower bound
+of the bootstrapping error after changing the scaling factor is emin δdiff .
+
+
+Table 2: Message precision of the bootstrapping with the improved multi-interval
+         Remez algorithm for various degrees of the approximate polynomials
+       degree     approximation error        bootstrapping error      message
+     of approx. by the optimal minimax before changing after changing precision
+        poly.          polynomial       scaling factor scaling factor (bits)
+                                             emin          emin δdiff
+         60           1.77 × 10−11      2.83 × 10−10    1.16 × 10−6     19.7
+         62           5.26 × 10−13      8.50 × 10−12    3.48 × 10−8     24.8
+         64           3.07 × 10−14      6.17 × 10−13    2.53 × 10−9     28.6
+         66           1.56 × 10−15      3.76 × 10−13    1.54 × 10−9     29.2
+         68           6.59 × 10−17      3.76 × 10−13    1.54 × 10−9     29.2
+
+
+
+
+Value of δdiff : The bit length difference between the default scaling factor ∆
+and the bootstrapping scaling factor ∆boot , which will be denoted as δdiff =
+log ∆boot − log ∆, is closely related to the message precision. The value of δdiff is
+usually chosen as 10 bits to lower the difference between the modular reduction
+function and the sine/cosine function since the half-width of each interval in the
+approximation region is 2−δdiff .
+    It causes loss to the message precision of the bootstrapping. In the bootstrap-
+ping procedure, we need to divide the message by 2δdiff so that it can be included
+in the approximation region and multiply 2δdiff at the end of the bootstrapping.
+If the precision error until multiplying 2δdiff is e, the final error becomes 2δdiff e. e
+cannot be reduced below a certain error value because of the rescaling error dealt
+with in the previous subsection. If we denote this lower bound as eb = 2−δb , the
+message precision will be δb − δdiff .
+    Because δdiff has a significant effect on both the message precision of the
+bootstrapping and the message precision of the intended operation in the appli-
+cation, it is desirable to reduce the δdiff to prevent this precision loss. However,
+the difference between the sine/cosine function and the modular reduction func-
+     High-Precision Bootstrapping of RNS-CKKS Homomorphic Encryption               35
+
+tion is somewhat dominant, and this difference becomes more dominant as δdiff
+increases.
+    Table 3 shows the maximum message precision of the bootstrapping with
+improved multi-interval Remez algorithm for various δdiff . The degree of the
+approximate polynomials for each case is set to be large enough to reach the
+minimum approximate error emin , and the scaling factor and the number of slots
+are fixed to be 60 and 28 , respectively.
+    The bootstrapping error after changing the scaling factor is emin δdiff . As δdiff
+decreases, emin increases rapidly so that the emin δdiff grows. This is because the
+difference between the modular reduction function and the cosine function be-
+comes larger when the approximation region is enlarged. We can naively expect
+that the bootstrapping error can be decreased infinitely when log δdiff is increased,
+because |−sin | = O(3 ). However, if the δdiff is larger than 16, the value of emin
+does not decrease, and thus emin δdiff increases. This lower bound of emin is caused
+by the rescaling error and the homomorphic linear transform in the bootstrap-
+ping. This bound of emin is related to the bootstrapping scaling factor ∆boot and
+the number of slots, which will be dealt with in the following paragraphs.
+    Note that we do not need to use the scaling factor ∆boot /δdiff after boot-
+strapping. If we use a scaling factor 2−` ∆boot /δdiff , the bootstrapping error is
+amplified by `-bit and the range of the message becomes [−2` , 2` ]. Indeed, there
+are many cases that large range of the message is more important than low boot-
+strapping error, and thus users can control the scaling factor after bootstrapping
+concerning the range and the bootstrapping error they want to use.
+
+Table 3: Message precision of the bootstrapping with the improved multi-interval
+         Remez algorithm for various values of log δdiff
+                                    bootstrapping error      message
+                  log δdiff
+                              before changing after changing precision
+                               scaling factor scaling factor (bits)
+                                    emin          emin δdiff
+                      3         2.55 × 10−5    2.04 × 10−4     12.3
+                      7         7.45 × 10−9    9.53 × 10−7     20.0
+                     10        1.32 × 10−11    1.35 × 10−8     26.1
+                     11        1.64 × 10−12    3.36 × 10−9     28.1
+                     12        3.76 × 10−13    1.54 × 10−9     29.2
+                     13        2.88 × 10−13    2.36 × 10−9     28.7
+                     14        2.77 × 10−13    4.54 × 10−9     27.7
+
+
+Bootstrapping Scaling Factor: Table 4 shows the maximum message pre-
+cision for various bootstrapping scaling factors when the number of slots is 28 .
+The degree of the approximate polynomial and the value of δdiff are set to reach
+the lower bound of emin for each bootstrapping scaling factor and to minimize
+the value of emin δdiff , which determines the actual message precision of the boot-
+strapping. The second column in Table 4 shows the lower bound of emin , the third
+column shows the value of δdiff which minimizes emin δdiff , and the last column
+36      J. Lee et al.
+
+Table 4: Maximum message precision of the bootstrapping with the improved
+         multi-interval Remez algorithm for various bootstrapping scaling fac-
+         tors
+                                          bootstrapping error      message
+              log ∆boot log δdiff
+                                    before changing after changing precision
+                                     scaling factor scaling factor (bits)
+                                          emin          emin δdiff
+                 50         9        3.30 × 10−10    1.69 × 10−7     22.5
+                 54        10        2.21 × 10−11    2.27 × 10−8     25.4
+                 57        11        2.88 × 10−12    5.90 × 10−9     27.3
+                 60        12        3.71 × 10−13    1.52 × 10−9     29.3
+
+shows the maximum message precision with the corresponding bootstrapping
+scaling factor.
+    The maximum message precision of the bootstrapping in the RNS-CKKS
+scheme decreases as the bootstrapping scaling factor decreases. This means that
+we have to use as large a bootstrapping scaling factor as possible when we need
+precise bootstrapping. Since the bootstrapping scaling factor is related to the
+multiplicative depth, this gives the trade-off between the depth and the precision.
+    Note that the bit-length of scaling factors can be different for each level, and
+thus we do not need to use the same scaling factor throughout the bootstrapping.
+This fact is used in Bossuat et al.’s work [4].
+
+
+Number of Slots: Table 5 shows the maximum message precision for various
+numbers of slots when the bootstrapping scaling factor is 60, the maximum
+scaling factor. The degree of the approximate polynomials and δdiff are set to
+the same as Table 4. The error analysis in [11] shows that the approximation
+error in SlotToCoeff step is amplified more as we use more slots. The result
+of Table 5 corresponds to this error analysis. This gives the trade-off between
+the number of slots and the message precision. Note that all precision is less
+than 32-bit precision. We will improve these precision results in the next section
+by using the composite function method with the inverse sine function.
+    Note that log δdiff is not high when the number of slots is large, although
+this log δdiff value does not ensure the high precision as the difference between
+the modular reduction function and the sine/cosine function is rather high. This
+phenomenon is because the coefficients of the message polynomial is very small
+when the number of slots is large as discussed in [4]. Thus, the approximation
+region for the cosine function can be generally much less than 1/δdiff .
+
+
+5    Improvement of Message Precision by Composite
+     Function Approximation of Modular Reduction
+     Function
+At first glance, it seems to be the best method to use the optimal minimax
+approximate polynomials for the modular reduction function. However, we can
+         High-Precision Bootstrapping of RNS-CKKS Homomorphic Encryption             37
+
+
+Table 5: Maximum message precision of the bootstrapping with improved multi-
+         interval Remez algorithm for various numbers of slots
+       degree                   bootstrapping error      message remaining running
+ log n          log δdiff
+     of approx.           before changing after changing precision modulus time (s)
+        poly.              scaling factor scaling factor (bits)
+                                emin          emin δdiff
+   5     67       14       4.52 × 10−14 7.42 × 10−10       30.3      653      91.9
+   8     66       12       3.71 × 10−13    1.52 × 10−9     29.3      653     133.6
+  10     66       11       1.34 × 10−12    2.75 × 10−9     28.4      653     189.3
+                                     −12
+  12     66        9       8.46 × 10       4.33 × 10−9     27.8      653     287.0
+  14     66        8       2.46 × 10−11    6.31 × 10−9     27.2      653     461.0
+
+see that some of the coefficients of the optimal minimax approximate polynomials
+with regard to the Chebyshev basis are so large that the amplified approximate
+errors by these coefficients totally distort the messages in the ciphertext. On
+the other hand, the optimal minimax approximate polynomial coefficients of the
+scaled sine/cosine functions with more than one scale number are small enough
+not to distort the messages. Thus, the approximation of the modular reduction
+function by the sine/cosine function is essential for the correctness of the RNS-
+CKKS scheme.
+    When we adhere to the approximation by the scaled sine/cosine function,
+the difference of the modular reduction function and the sine/cosine function is
+a crucial obstacle, which is mentioned as an important open problem in Han et
+al.’s paper [22]. This difference is sharply increased as the approximation region
+of the modular reduction function becomes longer, and this prevents us from
+reducing δdiff .
+
+
+5.1      Composite Function Approximation of Modular Reduction
+         Function by Inverse Sine Function
+We propose a simple and novel method for solving this problem, which is called
+the composite function approximation method. In short, we compose the optimal
+minimax approximate polynomial of the sine/cosine function and the approxi-
+mate polynomial of the inverse sine function. It is easy to check that if we have
+two functions f and g for 0 <  < 14 as
+               ∞
+               [
+         f:        [2π(k − ), 2π(k + )] → [− sin 2π, sin 2π],   f (x) = sin x
+              k=−∞
+
+                g : [− sin 2π, sin 2π] → [−2π, 2π],    g(x) = arcsin x,
+then the following equation holds as
+                          x                          ∞
+                                                       [
+         x − 2π · round         = (g ◦ f )(x),   x∈        [2π(k − ), 2π(k + )].
+                          2π
+                                                      k=−∞
+38     J. Lee et al.
+
+                      x
+If we substitute t = 2π , then we have
+                                                    ∞
+                          1                         [
+             normod(t) =    (g ◦ f )(2πt),    t∈        [k − , k + ].
+                         2π
+                                                   k=−∞
+
+    If we approximate both f and g with the optimal minimax approximate
+polynomials derived by the improved multi-interval Remez algorithm, we can
+approximate the modular reduction function with any small approximate error
+by the composition of f and g. Note that g(x) can be approximated very well
+with some approximate polynomials of a small degree since the domain of g(x)
+is only one interval. Indeed, the cosine approximation with double-angle formula
+in [22] can be regarded as the special case of the proposed composite function
+approximation, in that they approximate g(x) with x, that is, the identity func-
+tion. Note that the cosine function in [22] is merely a parallel shift of the sine
+function. Thus, it is said that they approximate the sine function instead of the
+cosine function.
+    The sine function f was evaluated by composing the scaled cosine function
+and several double-angle formulas in [22]. If the number of the used double-angle
+formula is `, then the functions h1 , h2 , and h3 are defined as
+                               
+                     2π        1                                  1
+      h1 (x) = cos     `
+                           x −      , h2 (x) = 2x2 − 1, h3 (x) =    arcsin(x).
+                     2         4                                 2π
+
+Then, the normod function, which is equivalent to the modular reduction func-
+tion, can be represented as
+
+                          normod(x) = h3 ◦ h`2 ◦ h1 (x).
+
+Thus, if h̃1 is the optimal minimax approximate polynomial of h1 and h̃3 is
+that of h3 , we can approximate normod function by the composition of several
+polynoimals as
+                         normod(x) ≈ h̃3 ◦ h`2 ◦ h̃1 (x).
+   With this method, we can approximate the modular reduction function by
+the composition of several polynomials at arbitrary precision. This enables us to
+reduce δdiff to 3 and reach the message precision of δb − δdiff , which is the best
+precision mentioned in the previous section. The next section shows that we can
+indeed reach this high precision in the SEAL library.
+
+5.2   Simulation Result with SEAL Library
+This subsection demonstrates that the composite function method can improve
+the message precision in the RNS-CKKS scheme. The simulation environment
+is the same as the simulation in Section 4.
+    Table 6 shows that the value of emin with the composite function method
+does not change. The degrees of approximate polynomials of the scaled cosine
+function and inverse sine function are set to minimize emin , and these degrees are
+     High-Precision Bootstrapping of RNS-CKKS Homomorphic Encryption             39
+
+shown in Table 6. In contrast to the result in Table 3, all of the values of emin in
+Table 6 are almost the same as the minimum value of emin in Table 3 regardless
+of δdiff . Since emin is fixed with the minimum value, the bootstrapping precision,
+which is determined by emin δdiff , is increased as δdiff decreases.
+
+
+
+Table 6: Maximum message precision of the bootstrapping with improved multi-
+         interval Remez algorithm and composite function method for various
+         δdiff
+                                    bootstrapping error      message
+                  log δdiff
+                              before changing after changing precision
+                               scaling factor scaling factor (bits)
+                                    emin          emin δdiff
+                      3        2.93 × 10−13 2.34 × 10−12       38.6
+                      7        2.90 × 10−13 3.71 × 10−11       34.6
+                     10        2.85 × 10−13 2.92 × 10−10       31.7
+                     11        3.21 × 10−13 6.58 × 10−10       30.5
+                     12        2.88 × 10−13    1.18 × 10−9     29.7
+
+
+
+    Table 7 shows the maximum precision of the bootstrapping with the improved
+multi-interval Remez algorithm and composite function method for various slots.
+The δdiff value and log ∆diff value are set to be 3 and 60, respectively. The max-
+imum message precision is increased by 5.4-10.2 bits and becomes 32.6-40.5 bit
+precision. All of the message precision is larger than the 32-bit precision. Thus,
+we make the bootstrapping of the RNS-CKKS scheme more reliable enough to
+be used in practical applications.
+    The half-width of the approximation region has to be 2−δdiff when the range of
+real and imaginary part of the messages is assumed to be the same as that of the
+coefficients of the message polynomial. However, when we sample the messages
+from the uniform distribution over the range, the coefficients are significantly
+reduced so that we may reduce the approximation region as discussed in [4]. 
+denotes the half-width of each approximation region we set for each number of
+slots, and this value is numerically set to have no effect on the bootstrapping. If
+one wants to be conservative on the distribution of the message and the range
+of the coefficients, they may set  to be 2−δdiff .
+    Although we add the inverse sine approximation procedure, the overall run-
+ning time of the bootstrapping is similar or reduced. Note that the more depth
+level left in a ciphertext, the more time homomorphic evaluation takes. Since
+we consume more depth level in the inverse sine approximation procedure, the
+ciphertexts in the SlotToCoeff procedure have less remaining depth level.
+Thus, the running time of the SlotToCoeff procedure in the new bootstrap-
+ping is less than that in the original one. The remaining modulus bit length is
+reduced because of the additional depth consumption of the inverse sine approx-
+40      J. Lee et al.
+
+
+Table 7: Maximum message precision of the bootstrapping with composite func-
+         tion method for various number of slots
+                 deg. of    deg. of         bootstrapping error      message rema- run-
+log n log 1/
+                app. poly. app. poly. before changing after changing preci- ining ning
+                 of cos.     of inv.   scaling factor scaling factor sion modu- time
+                              sine          emin          emin δdiff  (bits)   lus  (s)
+  5      4         71          15      7.93 × 10−14 6.34 × 10−13       40.5   473 94.7
+  8      6         70           9      2.93 × 10−13 2.34 × 10−12       38.6   473 133.2
+ 10      9         69           7      1.14 × 10−12 9.13 × 10−12       36.7   533 188.9
+ 12     10         69           5      4.84 × 10−12 3.87 × 10−11       34.5   533 273.9
+ 14     10         68           5      1.97 × 10−11 1.53 × 10−10       32.6   533 451.5
+
+imation procedure. This additional depth consumption can be seen as a trade-off
+for the high precision.
+
+
+6     Conclusion
+We proposed the algorithm for obtaining the optimal minimax approximate poly-
+nomial for any continuous function on the union of the finite set, including the
+scaled cosine function on separate approximation regions. Then we analyzed the
+message precision of the bootstrapping with the improved multi-interval Remez
+algorithm in RNS-CKKS, and its maximum message precision is measured in
+the SEAL library. We proposed the composite function method with inverse sine
+function to improve the message precision of the bootstrapping significantly,
+and thus the improved message precision bootstrapping has the precision higher
+than the precision of the 32-bit fixed-point number system, even when lots of
+slots are used. Thus, the large-depth operations in advanced applications, such
+as training a convolutional neural network for encrypted data, are needed to be
+implemented by the RNS-CKKS scheme with the improved message precision
+bootstrapping.
+
+
+Acknowledgement We thank Jean-Philippe Bossuat for his help with optimiz-
+ing the approximation for the inverse sine function by observing the distribution
+of the message polynomial coefficients.
+
+
+References
+ 1. PALISADE         Lattice    Cryptography       Library      (release      1.10.4).
+    https://palisade-crypto.org/ (Sep 2020)
+ 2. Boemer, F., Costache, A., Cammarota, R., Wierzynski, C.: nGraph-HE2: A high-
+    throughput framework for neural network inference on encrypted data. In: Proceed-
+    ings of the 7th ACM Workshop on Encrypted Computing & Applied Homomorphic
+    Cryptography. pp. 45–56 (2019)
+      High-Precision Bootstrapping of RNS-CKKS Homomorphic Encryption                 41
+
+ 3. Boemer, F., Lao, Y., Cammarota, R., Wierzynski, C.: nGraph-HE: a graph com-
+    piler for deep learning on homomorphically encrypted data. In: Proceedings of the
+    16th ACM International Conference on Computing Frontiers. pp. 3–13 (2019)
+ 4. Bossuat, J.P., Mouchet, C., Troncoso-Pastoriza, J., Hubaux, J.P.: Efficient boot-
+    strapping for approximate homomorphic encryption with non-sparse keys. Cryptol-
+    ogy ePrint Archive, Report 2020/1203 (2020), https://eprint.iacr.org/2020/1203,
+    Accepted to Eurocrypt 2021
+ 5. Bourse, F., Minelli, M., Minihold, M., Paillier, P.: Fast homomorphic evaluation of
+    deep discretized neural networks. In: Advances in Cryptology-CRYPTO 2018. pp.
+    483–512. Springer (2018)
+ 6. Brakerski, Z., Gentry, C., Vaikuntanathan, V.: (leveled) fully homomorphic en-
+    cryption without bootstrapping. ACM Transactions on Computation Theory 6(3),
+    13 (2014)
+ 7. Brutzkus, A., Gilad-Bachrach, R., Elisha, O.: Low latency privacy preserving in-
+    ference. In: International Conference on Machine Learning. pp. 812–821. PMLR
+    (2019)
+ 8. Chen, H., Chillotti, I., Song, Y.: Improved bootstrapping for approximate homo-
+    morphic encryption. In: Advances in Cryptology-EUROCRYPT 2019. pp. 34–54.
+    Springer (2019)
+ 9. Chen, Y., Luo, T., Liu, S., Zhang, S., He, L., Wang, J., Li, L., Chen, T., Xu,
+    Z., Sun, N., et al.: Dadiannao: A machine-learning supercomputer. In: 2014 47th
+    Annual IEEE/ACM International Symposium on Microarchitecture. pp. 609–622.
+    IEEE (2014)
+10. Cheney, E.: Introduction to approximation theory. McGraw-Hill (1966)
+11. Cheon, J., Han, K., Kim, A., Kim, M., Song, Y.: Bootstrapping for approximate ho-
+    momorphic encryption. In: Advances in Cryptology-EUROCRYPT 2018. pp. 360–
+    384. Springer (2018)
+12. Cheon, J., Han, K., Kim, A., Kim, M., Song, Y.: A full rns variant of approxi-
+    mate homomorphic encryption. In: International Conference on Selected Areas in
+    Cryptography-SAC 2018. pp. 347–368. Springer (2018)
+13. Cheon, J., Kim, A., Kim, M., Song, Y.: Homomorphic encryption for arithmetic
+    of approximate numbers. In: Advances in Cryptology-ASIACRYPT 2017. pp. 409–
+    437. Springer (2017)
+14. Chillotti, I., Gama, N., Georgieva, M., Izabachène, M.: TFHE: fast fully homomor-
+    phic encryption over the torus. Journal of Cryptology 33(1), 34–91 (2020)
+15. Dathathri, R., Saarikivi, O., Chen, H., Laine, K., Lauter, K., Maleki, S., Musuvathi,
+    M., Mytkowicz, T.: Chet: an optimizing compiler for fully-homomorphic neural-
+    network inferencing. In: Proceedings of the 40th ACM SIGPLAN Conference on
+    Programming Language Design and Implementation. pp. 142–156 (2019)
+16. Fan, J., Vercauteren, F.: Somewhat practical fully homomorphic encryption. Cryp-
+    tology ePrint Archive, Report 2012/144 (2012), https://eprint.iacr.org/2012/144
+17. Filip, S.: A robust and scalable implementation of the Parks-McClellan algorithm
+    for designing FIR filters. ACM Transactions on Mathematical Software 43(1), 1–24
+    (2016)
+18. Gentry, C.: Fully homomorphic encryption using ideal lattices. In: Proceedings of
+    the Forty-First Annual ACM Symposium on Theory of Computing. pp. 169–178
+    (2009)
+19. Gentry, C., Sahai, A., Waters, B.: Homomorphic encryption from learning with
+    errors: conceptually-simpler, asymptotically-faster, attribute-based. In: Advances
+    in Cryptology-CRYPTO 2013. pp. 75–92. Springer (2013)
+42      J. Lee et al.
+
+20. Gupta, S., Agrawal, A., Gopalakrishnan, K., Narayanan, P.: Deep learning with
+    limited numerical precision. In: International Conference on Machine Learning.
+    pp. 1737–1746 (2015)
+21. Gysel, P., Motamedi, M., Ghiasi, S.: Hardware-oriented approximation of convo-
+    lutional neural networks. In: International Conference on Learning Representation
+    (2016)
+22. Han, K., Ki, D.: Better bootstrapping for approximate homomorphic encryption.
+    In: Cryptographers’ Track at the RSA Conference. pp. 364–390. Springer (2020)
+23. Jiang, X., Kim, M., Lauter, K., Song, Y.: Secure outsourced matrix computation
+    and application to neural networks. In: Proceedings of the 2018 ACM SIGSAC
+    Conference on Computer and Communications Security. pp. 1209–1222 (2018)
+24. Kim, A., Papadimitriou, A., Polyakov, Y.: Approximate homomorphic encryption
+    with reduced approximation error. Cryptology ePrint Archive, Report 2020/1118
+    (2020), https://eprint.iacr.org/2020/1118
+25. McClellan, J., Parks, T.: A personal history of the Parks-McClellan algorithm.
+    IEEE Signal Processing Magazine 22(2), 82–86 (2005)
+26. Powell, M.: Approximation theory and methods. Cambridge University Press (1981)
+27. Remez, E.: Sur la détermination des polynômes d’approximation de degré donnée.
+    Communications of the Kharkov Mathematical Society 10(196), 41–63 (1934)
+28. Rudin, W.: Principles of mathematical analysis, vol. 3. McGraw-Hill New York
+    (1964)
+29. Microsoft SEAL (release 3.5). https://github.com/Microsoft/SEAL (Apr 2020),
+    microsoft Research, Redmond, WA.
+30. Van Dijk, M., Gentry, C., Halevi, S., Vaikuntanathan, V.: Fully homomorphic
+    encryption over the integers. In: Advances in Cryptology-EUROCRYPT 2010. pp.
+    24–43. Springer (2010)
+

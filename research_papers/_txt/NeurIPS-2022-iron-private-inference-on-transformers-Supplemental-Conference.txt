@@ -1,0 +1,347 @@
+A     Appendix
+A.1     More Details on Preliminaries
+
+A.1.1    Fixed-Point Encoding
+Same as other neural networks, Transformer-based models use floating-point arithmetic, however
+cryptographic protocols operate on integers. Therefore, we require a float-to-integer conversion
+[46, 30, 17] to represent a floating-point number x ∈ Q into the ring Z2ℓ . Specifically, we first
+encode it as a fixed-point number, which is parametrized by a scale parameter s that determines
+the fractional precision. Then, we embed the fixed-point representation into the ring with 2’s
+complement representation. The formulation is a = ⌊2s × x⌋ ∈ Z2ℓ if x is a non-negative number,
+and a = 2ℓ − ⌊2s × |x|⌋ ∈ Z2ℓ if x is a negative number, where s is the length of the (binary)
+fractional bits and ℓ is the bitwidth of the secret sharing ring. Unless otherwise stated, similar as prior
+works [14], we set the bitwidth as 37 and the scale as 12 in the fixed-point encoding. Because of the
+use of the above fixed-point encoding, after multiplication, the scale of the output is 2s. Therefore,
+a truncation operation is required to reduce scale. We use the ΠTrunc protocol proposed in [13] and
+improved by [17], which leads to faithful implementation of fixed-point arithmetic. For simplicity, we
+omit this operation in our protocol description. The overhead of truncation in Iron will be reported
+in Table 4.
+
+A.1.2    Formal Description of the Threat Model
+Same as prior private inference works [13, 14, 17], the security of Iron is provably provided
+in the simulation paradigm against static honest-but-curious probabilistic polynomial-time (PPT)
+adversaries. Namely, a PPT adversary A passively corrupts either the server or the client at the
+beginning of the protocol and honestly follows the protocol specification. In the simulation paradigm,
+two worlds are defined: a real world where the server and the client perform the protocol according
+to the specification in the presence of A, and an ideal world where the parties send their inputs to a
+trusted dealer (also called functionality) that executes the evaluation faithfully. The executions in both
+worlds are coordinated by the environment Env, which chooses the inputs to the parties and plays the
+role of a distinguisher between the real and ideal executions. It is required that for any adversary, the
+real-world distribution is computationally indistinguishable to the ideal-world distribution. Some
+of our protocols invoke sub-protocols and we describe them using the hybrid model. This is similar
+to a real execution, except that sub-protocols are replaced by the invocations of the corresponding
+functionality instances. We recap the definition of a private inference protocol in [38] [14] as below.
+Definition A.1. A protocol ΠPI between the server having as input a model M with weights w
+and the client having as input a sample x is a private inference protocol against honest-but-curious
+adversaries if it satisfies the following guarantees: 1) Correctness: on every model weights w and
+every input sample x, the output of the client at the end of the protocol is the correct inference
+M (w, x). 2) Security: For a corrupted client, there exists an efficient simulator SimC such that
+ViewPI                                                                   PI
+     C is computationally indistinguishable SimC (output), where ViewC is the view of the client in
+the execution of ΠPI and output denotes the output of the inference. Similarly, for a corrupted server,
+there exists an efficient simulator SimS such that ViewPIS is computationally indistinguishable SimS .
+
+Notice that the honest-but-curious security proof of Iron according to the above definition will follow
+trivially from sequential composibility of individual sub-protocols [47, 13, 30]. Hence, we require to
+provide a security proof for our matrix multiplication and non-linear protocols. We refer to Section
+A.2.3 and A.3.4 for the sub-protocols’ security analysis.
+
+A.1.3    Multi-Head Attention
+Instead of performing a single attention function, existing Transformer-based models [1, 2] follow a
+multi-head attention variant, which can be represented as
+              MultiHeadAtten = Concat (Attention(XQ,j , XK,j , XV,j ), j ∈ [H]) WO ,                   (4)
+where H is the number of heads, and XQ,j = XQ WQ,j , XK,j = XK WK,j , XV,j = XV WV,j
+for j ∈ [H]. The main intuition is that multi-head attention allows the model to jointly attend to
+information from different representation subspaces at different positions [1].
+
+
+                                                    15
+A.2      More Details on the Matrix Multiplication Protocol
+
+A.2.1      Correction Proof of the Matrix Multiplication Protocol
+Proof. For each i ∈ [m] and j ∈ [k], we write ϵi,j = i · n · k + (j + 1) · n − 1 for simplicity. Based
+                                P for ϵi,j ≥ nk, ŷ[ϵi,j ] = 0 holds. Therefore,
+on the description of Section 4.1,                                            Pgiven the definition of
+Equation 1, we have ẑ [ϵi,j ] = 0≤µ<n x̂[i·n·k+(n−1)−µ]ŷ[j ·n+µ] = 0≤µ<n X[i, µ]Y[µ, j],
+which is exactly Z[i][j].
+
+A.2.2      Optimal Parameters Selection in the Matrix Multiplication Protocol
+As shown in Section 4.1, the matrix multiplication Xm×n · Yn×k requires the communication of
+ m    n    k
+mw ( nw + kw ) ciphertexts. To minimize the ciphertext communication cost, we formalize the selection
+of the parameters mw , nw , kw as an optimization problem, i.e., min{mw ,nw ,kw } mmw ( nnw + kkw ), s.t.,
+mw nw kw ≤ N , where m, n, k, N are constants. Given the difficulty of solving the above multivariate
+optimization, we figure out a sub-optimal solution. To this end, we first fix mw = m5 , and hence
+                                              N
+the constraint is transformed to nw kw ≤ m      . Correspondingly, the new optimization problem is
+              n      k                  N
+min{nw ,kw } nw + kw , s.t., nw kw ≤ m . Then, the following holds:
+                                                              √          √
+                          n      k        nw         kw      2 nk       2 mnk
+                             +      = 1/      + 1/       ≥√          ≥ √         ,                   (5)
+                         nw     kw          n         k       nw kw        N
+where the first inequality is due to a1 + 1b ≥ √2ab , and the second inequality comes from nw kw ≤ m  N
+                                                                                                         .
+                                                                         √
+As a result, assuming mw = m, the optimal communication size is 2 √mnk      N
+                                                                                ciphertexts. Notably, it
+may not have the optimal analytical solution, because the variables must be discrete positive integers,
+rather than real number. To achieve minimal communication in our implementation, like Cheetah
+[14], we use the exhaustive testing approach on all the results satisfying the constraint to find the
+optimal matrix partitioning strategy. Note that this is quite fast due to the small search range.
+Communication comparison with Cheetah. As shown in Section 3.1 of [14], the Cheetah’s
+communication overhead is m( nnw + kkw ) ciphertexts with the constraint nw kw ≤ N . By using the
+                                                                          √
+similar analysis as above, we can obtain its optimal solution, i.e., 2m√Nnk . Therefore, we obtain a
+√
+  m× communication improvement in an ideal situation (i.e., the optimal analytical integer solution
+exists).
+
+A.2.3      Security Proof of the Matrix Multiplication Protocol
+Theorem A.2. In presence of an honest-but-curious adversary, the protocol ΠMatMul in Algorithm 1
+realizes the matrix multiplication functionality, in which P0 and P1 take as inputs the matrices X
+and Y, and learn the secret shares ⟨Z⟩0 and ⟨Z⟩1 , respectively, such that Z = XY.
+
+Proof. The correctness of Theorem A.2 is directly derived from Theorem 4.1. We below focus on
+the protocol’s security when the server or the client is corrupted. Our security proof follows the
+simulation paradigm defined in Section A.1.2. In this paradigm we need show that the real-world
+distribution is computationally indistinguishable to the simulated distribution by the simulator Sim in
+the ideal world.
+Proof of indistinguishability with the corrupted server. The server’s view of ViewMatMul
+                                                                                    S    consists
+of ciphertexts CTβ,γ . The simulator SimS for this view can be constructed as follows:
+Given the access to public parameters, SimS outputs ciphertexts CT
+                                                                f β,γ = Enc(0) to the server.
+The security against the corrupted server is directly reduced to the semantic security of the underlying
+homomorphic encryption scheme. Thus we have that the simulated view ViewMatMul       S       in the ideal
+world is computationally indistinguishable from the real-world distribution of the protocol.
+Proof of indistinguishability with corrupted clients. The client’s view of ViewMatMulC     consists of
+ciphertexts CT′α,γ , and the decryption of these ciphertexts, i.e., ⟨Z⟩1 . The simulator SimC for this
+view can be constructed as follows:
+   5
+       In our setting, m is always less than N .
+
+
+                                                   16
+On receiving the ciphertexts CTα,γ from the client, SimC samples uniformly random polynomials
+                                ′
+r̂α,γ ∈ AN,2ℓ , and computes CT
+                              f α,γ = Enc(r̂α,γ ). Given the access to the output, SimC outputs
+   ′
+CT
+f α,γ to the client.
+                                  ′
+Similarly, the ciphertexts CT
+                            f α,γ are computationally indistinguishable from CTf α,γ due to the
+semantic security. Besides, the values of ⟨Z⟩1 distribute uniformly in Z2ℓ , which is exactly the
+same distribution of values decoded from r̂α,γ . Thus we have that ViewMatMul
+                                                                       C      is computationally
+indistinguishable from the real-world distribution of the protocol.
+
+A.3     More Details on Non-linear Protocols
+
+A.3.1    Tanh
+
+Algorithm 5 Secure Tanh Protocol
+Input: P0 , P1 hold ⟨x⟩0 ∈ Z2ℓ , ⟨x⟩1 ∈ Z2ℓ , respectively.
+Output: P0 , P1 get ⟨y⟩0 ∈ Z2ℓ , ⟨y⟩1 ∈ Z2ℓ , respectively, where y = Tanh(x).
+ 1: P0 , P1 parse ⟨x⟩0 = msb0 ∥a0 and ⟨x⟩1 = msb1 ∥a1 , and invoke ΠCMP to learn ⟨carry⟩B
+                                                                                        b , where
+    carry = 1{a0 + a1 > 2ℓ−1 − 1}, and the inputs are 2ℓ−1 − a0 − 1 and a1 from P0 and P1 ,
+    respectively. For b ∈ {0, 1}, Pb outputs ⟨MSB(x)⟩B                 B
+                                                          b = ⟨carry⟩b ⊕ msbb .
+ 2: P0 , P1 invoke ΠMulOT with inputs ⟨2x⟩ and ⟨MSB(x)⟩B , and set outputs as ⟨x̄⟩, where x̄ =
+    2x · MSB(x) − x that is always negative with the constraint of |x̄| = |x|.
+ 3: P0 , P1 invoke ΠnExp with negative inputs ⟨2x̄⟩ and learn ⟨e2x̄ ⟩.
+ 4: P0 , P1 invoke ΠRecip with inputs ⟨e2x̄ ⟩, and learns ⟨ȳ⟩ where ȳ = 1 − e2x̄2+1 .
+ 5: P0 , P1 invoke an instance of ΠMulOT on input ⟨MSB(x)⟩B and ⟨ȳ⟩, and learn ⟨y⟩, where y =
+    ȳ + MSB(x) · (−2ȳ).
+
+
+We present an optimized protocol for Tanh in Algorithm 5, which builds over the protocol used in
+[17]. Our optimization relies on the observation: when evaluating on x, the sign of Tanh(x) is the
+same as that of x. Compared with the protocol in [17], our alternative saves one invocation of the
+reciprocal protocol ΠRecip and multiplication protocol ΠMulOT .
+
+A.3.2    Underlying Protocols from [17, 13]
+We outline the underlying protocols from existing works [17, 13], and the detailed implementation
+could be found in the corresponding papers.
+
+        • Multiplication (MulOT ): The OT-based multiplication protocol ΠMulOT takes as input ⟨x⟩ ∈
+          {0, 1}ℓ and ⟨y⟩ ∈ {0, 1}ℓ and returns ⟨z⟩ such that z = xy. The well-known technique
+          is proposed by ABY [22] and optimized in [13]. Currently, the optimal solution invokes
+          2-COTi for i ∈ {1, . . . , ℓ} requiring communication ℓ(λ + ℓ+1  2 ) bits with 2 rounds that
+          is equivalent to ℓ instances of COT ℓ+1 . A variant of multiplication is multiplexer6 , which
+                                                  2
+          takes as input ⟨x⟩B ∈ {0, 1} and ⟨y⟩ ∈ {0, 1}ℓ and outputs ⟨z⟩ ∈ {0, 1}ℓ such that z = y if
+          x = 1 and 0 otherwise. The multiplexer protocol ΠMux can be realized by 2 parallel calls of
+          2-COTℓ with communication 2(λ + ℓ) bits and 2 rounds.
+        • Comparison (CMP): The comparison protocol ΠCMP takes as input ⟨x⟩ ∈ {0, 1}ℓ , and
+          returns ⟨z⟩ such that z = 1{x ≥ 0}. Recently, [13] gave an efficient protocol for ΠCMP with
+          communication less than λℓ + 14ℓ bits with log ℓ rounds.
+        • Exponential on negative inputs (nExp): The exponential protocol ΠnExp takes as input
+          x ∈ {0, 1}ℓ , where x ≤ 0, and returns ⟨z⟩ such that z = ex . The protocol is proposed by
+          [17], which invokes digit decomposition to generate small-length inputs and integrates the
+          OT-based lookup table technique to compute exponential on the small-length inputs.
+   6
+    In the protocol description, we treat these two types of multiplication indiscriminately, but we implement
+them using different techniques.
+
+
+                                                      17
+        • Reciprocal of Square Root (rSqrt): The protocol of square root’s reciprocal, ΠrSqrt , takes
+          as input x ∈ {0, 1}ℓ and returns ⟨z⟩ ∈ {0, 1}ℓ such that z = √1x . [17] proposed the
+          state-of-the-art OT-based protocol, which relies on the Goldschmidt’s algorithm [48] that
+          iterates on an initial approximation.
+        • Reciprocal (Recip): The reciprocal protocol ΠRecip takes as input x ∈ {0, 1}ℓ and returns
+          ⟨z⟩ ∈ {0, 1}ℓ such that z = 1/x. The most efficient implementation is proposed in [17]
+          with a similar idea as the protocol ΠrSqrt .
+
+A.3.3    Extra Optimization
+MSB-known protocol optimization. As pointed out by [17], 2PC protocols could be designed in a
+far more efficient way when the MSB of the inputs are known. In particular, we optimize truncation
+and OT-based multiplication in this case. For example, the MSB-known truncation protocol requires
+O(λ(s + 3)) communication, instead of O(λ(ℓ + 3)), where λ is the security parameter, ℓ is the bit
+length of the secret sharing ring and s is the fractional scale.
+We elaborate the optimization for the GELU protocol in Algorithm 3, and the same idea can also be
+used in the Softmax and LayerNorm protocols. For GELU, we fist compute the shares of MSB(x),
+instead of calculating it in the latter Tanh protocol, and then in the following sub-process, we use this
+knowledge to reduce overhead. Moreover, we further observe that the GELU protocol implies more
+MSB-known operations if proper computation order is considered. We rewrite the GELU formulation
+as below:                                          hp                           i
+                    GELU(x) = 0.5 x + xTanh              2/πx 1 + 0.044715x2         .                (6)
+                                                 hp                           i
+We observe that 1 + 0.044715x2 and xTanh            2/πx 1 + 0.044715x2 are always non-negative,
+                                                                     hp                        i
+where the latter holds because the sign x equals to that of Tanh         2/πx 1 + 0.044715x2 .
+
+A.3.4    Security Proof of Non-linear Protocols
+Similar as the security of protocols in [13, 17], our protocols directly follow in the hybrid
+model. In particular, the security of the Softmax and GELU protocols are easy to see in
+(CMP, nExp, Recip, MULOT )-hybrid. Besides, the security of the LayerNorm protocol follows in
+(rSqrt, MULOT )-hybrid.
+
+A.4     More Details on Experimental Evaluation
+
+A.4.1    Additional Experimental Setup
+
+      Table 2: Models and hyper-parameters               Table 3: Datasets and tasks description
+
+                                 Hyper-parameters   Datasets #Train #Test         Task             Domain
+           Models      #Params
+                                 b    d      t                               Single-sentence
+                                                     SST-2    67K    872                         Movie reviews
+                                                                             2-classification
+          BERT-Tiny     4.4M     2    128   128                               Sentence pair
+                                                     MRPC     3.7K   408                             News
+                                                                            2-class paraphrase
+         BERT-Medium    41.7M    8    512   128
+                                                                             Sentence pair
+                                                     MNLI     393K   2K                              Misc.
+          BERT-Base    110.1M    12   768   128                             3-class inference
+                                                                             Sentence pair
+          BERT-Large    340M     24 1024    128      QNLI     105K   2K                           Wikipedia
+                                                                            2-class inference
+
+We evaluation Iron on 4 widely used pre-trained BERT models with different hyper-parameters,
+as shown in Table 2. We denote the number of blocks as b, the dimension of representations as
+d, and the number of input tokens as t. We always fix the number of self-attention heads to d/64
+and the size of feed-forward features to 4d. The end-task models are obtained by stacking a linear
+classifier on top of the Transformer architectures with fine-tuning. We follow the default fine-tuning
+hyper-parameters in [35], e.g., batch size 32, learning rate 2 × 10−5 and epoch 3. Notice that any
+hyper-parameters optimization during the training phase is compatible with our scheme. Besides, we
+use 4 datasets for different tasks from GLUE [18], which include the Stanford Sentiment Treebank
+
+
+                                                    18
+                   Table 4: Detailed performance breakdown of our protocols on BERT
+                 Models        Metrics      MatMul   Truncation   GELU      Softmax   LayerNorm    Total
+                            Runtime (Sec)    1.54       2.61       14.65     5.04        2.40      26.24
+                BERT-Tiny
+                            Comm. (MB)       29.99     108.66     642.38    214.01      99.02     1094.07
+                            Runtime (Sec)    11.25      9.70       58.79     20.24       8.56     108.53
+              BERT-Medium
+                            Comm. (MB)      132.00     404.63     2565.53   856.05      374.53    4332.74
+                            Runtime (Sec)    22.12     14.87       88.08     30.31      13.05     168.43
+                BERT-Base
+                            Comm. (MB)      197.68     626.94     3848.30   1284.08     575.23    6532.23
+                            Runtime (Sec)    36.66     19.50      117.45     40.43      16.65     230.70
+               BERT-Large
+                            Comm. (MB)      240.05     809.25     5131.06   1712.10     733.83    8626.28
+
+
+
+
+(SST-2), the Microsoft Research Paraphrase Corpus (MRPC), the Multi-Genre Natural Language
+Inference Corpus (MNLI) and the Stanford Question Answering Dataset (QNLI). Table 3 shows the
+datasets’ details. Besides, we assume the embedding table is publicly available to all parties, and
+hence the evaluation does not include the results of embedding layers.
+
+A.4.2      Additional Experimental Results
+
+Detailed performance breakdown on BERT. In Table 4, we show the detailed performance break-
+down including the communication and computation costs of matrix multiplication, truncation,
+GELU, softmax and layer normalization. The most expensive non-linear operation is GELU due to
+its huge number. For example, for each layer of BERT-Base, the number of GELU is 393,216. We
+also observe that the our linear operation is lightweight in terms of communication.
+
+A.5      Related Works
+
+Recently a quantity of works have designed customized protocols for performing private inference on
+neural networks, especially convolutional neural networks. These special-purpose protocols improve
+the computation and communication costs and generally fall into two categories: linear protocols and
+non-linear protocols. We briefly discuss the progress as below.
+Linear protocols. Gazelle [29] proposed an optimized AHE-based linear algebra kernels, which
+support matrix-vector multiplication and convolution operations. The main innovation is a new
+packing method to minimize the expensive rotation operations, which is the critical component for
+the linear algebra. After that, CrypTFlow2 [13] proposed a comprehensive implementation for linear
+layers, based on both AHE-based and OT-based solution7 . For the AHE-based solution, they use
+the protocol from Gazelle, and employ several optimizations such as parallelization and reducing
+ciphertext size. They observe the AHE-based solution performs better than the OT-based counterpart,
+especially for large-scale models. More recently, Huang et al. presented Cheetah [14], the most
+efficient AHE-based linear layer protocols, including matrix-vector multiplication and convolution
+operations. The improvement comes from a novel input packing technique, which is rotation-free
+and hence efficient. Moreover, the packing method is compatible with secret sharing in a ring. This
+support further benefits the subsequent non-linear operations [14]. However, existing protocols are
+only optimized for matrix-vector multiplication, rather than general matrix multiplication Iron relies
+on. As mentioned earlier, directly extending the most efficient matrix-vector multiplication protocol
+still causes prohibitively high communication overhead. Therefore, to approach such communication
+issue, we propose a special-purpose protocol for matrix multiplication, based on the state-of-the-art
+protocol in Cheetah.
+Notice that different from the setting of 2PC private inference, [49] proposed a private outsourced
+inference scheme, which stands for encrypted data and encrypted model. To this end, [49] designs
+a homomorphic matrix multiplication protocol for multiplying two encrypted matrices, which is
+fundamentally different our homomorphic multiplication with a plaintext. As a result, it requires to
+invoke costly homomorphic multiplication and rotation operations, which are about 2 ∼ 20× more
+expensive than the underlying operations of our protocol (refer to Table 9 of [50]).
+
+   7
+       The OT-based linear protocol is also used in SIRNN [17]
+
+
+                                                         19
+Non-linear protocols. Although earlier works [29, 38] implemented non-linear function evaluation
+with garbled circuits (GC), CrypTFlow2 [13] found that these GC-based solutions result in high
+communication overhead. Therefore, the authors designed optimized OT-based protocols, such as
+truncation and comparison. These protocols achieve state-of-the-art performance, and can be seen as
+general underlying building blocks for the design of advanced protocols [17]. Despite the efficiency
+advantage for truncation and comparison, these protocols can not support complex functions, like
+exponent in Transformers. Actually, the state-of-the-art general-purpose framework, MP-SPDZ,
+provides comprehensive protocols. However, as shown in SIRNN [17], the protocols implemented
+with MP-SPDZ are communication-heavy and computation-intensive. Therefore, SIRNN [17]
+proposed special-purpose protocols for exponent on negative inputs, sigmoid and reciprocal of square
+root, which achieve orders of magnitude improvement over MP-SPDZ, both in terms of runtime
+and communication. However, these functions are still insufficient to implement a private inference
+framework on Transformers. Therefore, on the basis of the building blocks in [13, 17], we propose
+new protocols for three non-linear functions that are critical components for Transformers, and
+make several specialized optimizations. Note that, [11] also proposed a softmax protocol but in
+an unrealistic setting, where except the client and the server, a trusted third party (TTP) exists and
+assists to generate correlated randomness to accelerate protocol evaluation. However, in a practical
+application, it is difficult to have a completely TTP [13, 14]. In contrast to [11], our setting lies in a
+practical client-server setting, without any unrealistic assumptions.
+
+
+
+
+                                                   20
+

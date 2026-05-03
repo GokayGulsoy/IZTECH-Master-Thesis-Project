@@ -1,0 +1,741 @@
+                        PoWER-BERT: Accelerating BERT Inference via
+                            Progressive Word-vector Elimination
+
+
+         Saurabh Goyal 1 Anamitra Roy Choudhury 1 Saurabh M. Raje 1 Venkatesan T. Chakaravarthy 1
+                                    Yogish Sabharwal 1 Ashish Verma 2
+
+
+                        Abstract                               language acceptability tasks. The model has been used in
+                                                               applications ranging from text summarization (Liu & La-
+      We develop a novel method, called PoWER-BERT,            pata, 2019) to biomedical/insight text mining (Palakodety
+      for improving the inference time of the pop-             et al., 2020; Lee et al., 2019).
+      ular BERT model, while maintaining the accu-
+      racy. It works by: a) exploiting redundancy              The BERT model consists of an embedding layer, a chain
+      pertaining to word-vectors (intermediate trans-          of transformer blocks and an output layer. The input words
+      former block outputs) and eliminating the re-            are first embedded as vectors, which are then processed by
+      dundant vectors. b) determining which word-              the pipeline of transformer blocks and the final prediction
+      vectors to eliminate by developing a strategy for        is derived at the output layer (see Figure 1). The model
+      measuring their significance, based on the self-         is known to be compute intensive, resulting in high infras-
+      attention mechanism. c) learning how many                tructure demands and latency, whereas low latency is vital
+      word-vectors to eliminate by augmenting the              for a good customer experience. Therefore, it is crucial to
+      BERT model and the loss function. Experiments            design methods that reduce the computational demands of
+      on the standard GLUE benchmark shows that                BERT in order to successfully meet the latency and resource
+      PoWER-BERT achieves up to 4.5x reduction in              requirements of a production environment.
+      inference time over BERT with < 1% loss in               Consequently, recent studies have focused on optimizing
+      accuracy. We show that PoWER-BERT offers                 two fundamental metrics: model size and inference time.
+      significantly better trade-off between accuracy          The recently proposed ALBERT (Lan et al., 2019) achieves
+      and inference time compared to prior methods.            significant compression over BERT by sharing parameters
+      We demonstrate that our method attains up to             across the transformer blocks and decomposing the embed-
+      6.8x reduction in inference time with < 1%               ding layer. However, there is almost no impact on the in-
+      loss in accuracy when applied over ALBERT, a             ference time, since the amount of computation remains the
+      highly compressed version of BERT. The code              same during inference (even though training is faster).
+      for PoWER-BERT is publicly available at https:
+      //github.com/IBM/PoWER-BERT.                             Other studies have aimed for optimizing both the met-
+                                                               rics simultaneously. Here, a natural strategy is to re-
+                                                               duce the number of transformer blocks and the idea has
+1. Introduction                                                been employed by DistilBERT (Sanh et al., 2019b) and
+                                                               BERT-PKD (Sun et al., 2019b) within the knowledge distil-
+The BERT model (Devlin et al., 2019) has gained popular-       lation paradigm. An alternative approach is to shrink the in-
+ity as an effective approach for natural language process-     dividual transformer blocks. Each transformer block com-
+ing. It has achieved significant success on standard bench-    prises of multiple self-attention heads and the Head-Prune
+marks such as GLUE (Wang et al., 2019a) and SQuAD              strategy (Michel et al., 2019b) removes a fraction of the
+(Rajpurkar et al., 2016), dealing with sentiment classifica-   heads by measuring their significance. In order to achieve
+tion, question-answering, natural language inference and       considerable reduction in the two metrics, commensurate
+                                                               number of transformer blocks/heads have to be pruned, and
+  1
+   IBM Research, New Delhi, India 2 IBM Research, York-        the process leads to noticeable loss in accuracy. The above
+town, New York, USA. Correspondence to: Saurabh Goyal          approaches operate by removing the redundant model pa-
+<saurago1@in.ibm.com, saurabhiit2007@gmail.com>.               rameters using strategies such as parameter sharing and
+                                                               transformer block/attention-head removal.
+Proceedings of the 37 th International Conference on Machine
+Learning, Online, PMLR 119, 2020. Copyright 2020 by the au-
+thor(s).
+                               PoWER-BERT: Accelerating BERT Inference via Progressive Word-vector Elimination
+
+              (128 x 768)   (128 x 768) (128 x 768)   (128 x 768)   (128 x 768)   (128 x 768) (128 x 768)   (128 x 768)   (128 x 768)   (128 x 768) (128 x 768)   (128 x 768)   (128 x 768)
+   INPUT                                                                                                                                                                                          OUTPUT
+                       Block         Block        Block         Block        Block         Block        Block         Block        Block        Block         Block        Block         OUTPUT
+           EMBED                                                                                                                                                                          LAYER
+ ℓ = 128                 1             2            3             4            5             6            7             8            9           10            11           12
+
+              (128 x 768)   (80 x 768)   (73 x 768)   (70 x 768)    (50 x 768)    (50 x 768)   (40 x 768)    (33 x 768)   (27 x 768)    (20 x 768)   (15 x 768)   (13 x 768)     (3 x 768)
+
+
+
+Figure 1: Illustration of PoWER-BERT scheme over BERTBASE that has L = 12 transformer blocks and hidden size H = 768. The words
+are first embedded as vectors of length H = 768. The numbers show output sizes for each transformer block for input sequence of
+length N = 128. The numbers on the top and the bottom correspond to BERTBASE and PoWER-BERT, respectively. In this example, the
+first transformer block eliminates 48 and retains 80 word-vectors, whereas the second eliminates 7 more and retains 73 word-vectors.
+The hidden size remains at 768.
+
+
+Our Objective and Approach. We target the metric of                                                             • We show that our scheme can also be used to accel-
+inference time for a wide range of classification tasks. The                                                      erate ALBERT, a highly compressed variant of BERT,
+objective is to achieve significant reduction on the metric,                                                      yielding up to 6.8x reduction in inference time. The
+while maintaining the accuracy, and derive improved trade-                                                        code for PoWER-BERT is publicly available at https:
+off between the two.                                                                                              //github.com/IBM/PoWER-BERT.
+In contrast to the prior approaches, we keep the model pa-
+rameters intact. Instead, we identify and exploit a differ-                                                 Related Work. In general, different methods for deep
+ent type of redundancy that pertains to the the intermedi-                                                  neural network compression have been developed such as
+ate vectors computed along the transformer block pipeline,                                                  pruning network connections (Han et al., 2015; Molchanov
+which we henceforth denote as word-vectors. We demon-                                                       et al., 2017), pruning filters/channels from the convolution
+strate that, due to the self-attention mechanism, there is dif-                                             layers (He et al., 2017; Molchanov et al., 2016), weight
+fusion of information: as the word-vectors pass through                                                     quantization (Gong et al., 2014), knowledge distillation
+the transformer block pipeline, they start carrying simi-                                                   from teacher to student model (Hinton et al., 2015; Sau &
+lar information, resulting in redundancy. Consequently,                                                     Balasubramanian, 2016) and singular value decomposition
+a significant fraction of the word-vectors can be elimi-                                                    of weight matrices (Denil et al., 2013; Kim et al., 2015).
+nated in a progressive manner as we move from the first
+to the last transformer block. The removal of the word-                                                     Some of these general techniques have been explored for
+vectors reduces the computational load and results in im-                                                   BERT: weight quantization (Shen et al., 2019; Zafrir et al.,
+proved inference time. Based on the above ideas, we                                                         2019), structured weight pruning (Wang et al., 2019b) and
+develop a novel scheme called PoWER-BERT (Progressive                                                       dimensionality reduction (Lan et al., 2019; Wang et al.,
+Word-vector Elimination for inference time Reduction of                                                     2019b). Although these techniques offer significant model
+BERT). Figure 1 presents an illustration.                                                                   size reduction, they do not result in proportional inference
+                                                                                                            time gains and some of them require specific hardware to
+Main Contributions.                      Our main contributions are sum-                                    execute. Another line of work has exploited pruning entries
+marized below.                                                                                              of the attention matrices (Zhao et al., 2019; Correia et al.,
+                                                                                                            2019; Peters et al., 2019; Martins & Astudillo, 2016). How-
+                                                                                                            ever, the goal of these work is to improve translation accu-
+  • We develop a novel scheme called PoWER-BERT for
+                                                                                                            racy, they do not result in either model size or inference
+    improving BERT inference time. It is based on exploit-
+                                                                                                            time reduction. The BERT model allows for compression
+    ing a new type of redundancy within the BERT model
+                                                                                                            via other methods: sharing of transformer block param-
+    pertaining to the word-vectors. As part of the scheme,
+                                                                                                            eters (Lan et al., 2019), removing transformer blocks via
+    we design strategies for determining how many and
+                                                                                                            distillation (Sanh et al., 2019b; Sun et al., 2019b; Liu et al.,
+    which word-vectors to eliminate at each transformer
+                                                                                                            2019), and pruning attention heads (Michel et al., 2019b;
+    block.
+                                                                                                            McCarley, 2019).
+  • We present an experimental evaluation on a wide                                                         Most of these prior approaches are based on removing re-
+    spectrum of classification/regression tasks from the                                                    dundant parameters. PoWER-BERT is an orthogonal tech-
+    popular GLUE benchmark. The results show that                                                           nique that retains all the parameters, and eliminates only
+    PoWER-BERT achieves up to 4.5x reduction in infer-                                                      the redundant word-vectors. Consequently, the scheme can
+    ence time over BERTBASE with < 1% loss in accuracy.                                                     be applied over and used to accelerate inference of com-
+                                                                                                            pressed models. Our experimental evaluation demonstrates
+  • We perform a comprehensive comparison with the
+                                                                                                            the phenomenon by applying the scheme over ALBERT.
+    state-of-the-art inference time reduction methods and
+    demonstrate that PoWER-BERT offers significantly bet-                                                   In terms of inference time, removing a transformer block
+    ter trade-off between inference time and accuracy.                                                      can be considered equivalent to eliminating all its output
+                    PoWER-BERT: Accelerating BERT Inference via Progressive Word-vector Elimination
+
+word-vectors. However, transformer block elimination is                                1.0
+a coarse-grained mechanism that removes the block in to-
+tality. To achieve considerable gain on inference time,                                0.8
+
+
+
+
+                                                                   Cosine Similarity
+a commensurate number of transformer blocks need to
+pruned, leading to accuracy loss. In contrast, word-vector                             0.6
+elimination is a fine-grained method that keeps the trans-
+former blocks intact and eliminates only a fraction of word-                           0.4
+vectors. Consequently, as demonstrated in our experimen-
+tal study, word-vector elimination leads to improved infer-                            0.2
+ence time gains.
+                                                                                       0.0
+                                                                                             1   2   3   4   5   6   7   8   9 10 11 12
+2. Background                                                                                        Transformer Block Index
+In this section, we present an overview of the BERT model
+focusing on the aspects that are essential to our discussion.    Figure 2: Cosine similarity for BERT transformer blocks on the
+                                                                 SST-2 dataset. The j th bar represents cosine similarity for the j th
+Throughout the paper, we consider the BERTBASE version           transformer block, averaged over all pairs of word-vectors and all
+with L = 12 transformer blocks, A = 12 self-attention            inputs.
+heads per transformer block and hidden size H = 768.
+The techniques can be readily applied to other versions.
+The inputs in the dataset get tokenized and augmented with       3. PoWER-BERT Scheme
+a CLS token at the beginning. A suitable maximum length          3.1. Motivation
+N is chosen, and shorter input sequences get padded to
+achieve an uniform length of N .                                 BERT derives the final prediction from the word-vector cor-
+                                                                 responding to the CLS token. We conducted experiments
+Given an input of length N , each word first gets embed-
+                                                                 to determine whether it is critical to derive the final predic-
+ded as a vector of length H = 768. The word-vectors are
+                                                                 tion from the CLS token during inference. The results over
+then processed by the chain of transformer blocks using
+                                                                 different datasets showed that other word positions can be
+a self-attention mechanism that captures information from
+                                                                 used as well, with minimal variations in accuracy. For in-
+the other word-vectors. At the output layer, the final pre-
+                                                                 stance, on the SST-2 dataset from our experimental study,
+diction is derived from the vector corresponding to the CLS
+                                                                 the mean drop in accuracy across the different positions
+token and the other word-vectors are ignored. PoWER-BERT
+                                                                 was only 1.2% with a standard deviation of 0.23% (com-
+utilizes the self-attention mechanism to measure the signif-
+                                                                 pared to baseline accuracy of 92.43%). We observed that
+icance of the word-vectors. This mechanism is described
+                                                                 the fundamental reason was diffusion of information.
+below.
+
+                                                                 Diffusion of Information. As the word-vectors pass
+Self-Attention Mechanism. Each transformer block                 through the transformer block pipeline, they start progres-
+comprises of a self-attention module consisting of 12 at-        sively carrying similar information due to the self-attention
+tention heads and a feed-forward network. Each head              mechanism. We demonstrate the phenomenon through co-
+h ∈ [1, 12] is associated with three weight matrices Wqh ,       sine similarity measurements. Let j ∈ [1, 12] be a trans-
+Wkh and Wvh , called the query, the key and the value ma-        former block. For each input,
+                                                                                             compute the cosine similar-
+trices.                                                          ity between each of the N2 pairs of word-vectors output by
+                                                                 the transformer block, where N is the input length. Com-
+Let M be the matrix of size N × 768 input to the trans-          pute the average over all pairs and all inputs in the dataset.
+former block. Each head h computes an attention matrix:          As an illustration, Figure 2 shows the results for the SST-
+                                                                 2 dataset. We observe that the similarity increases with
+                                                                 the transformer block index, implying diffusion of informa-
+       Ah = softmax[(M × Wqh ) × (M × Wkh )T ]                   tion. The diffusion leads to redundancy of the word-vectors
+                                                                 and the model is able to derive the final prediction from any
+                                                                 word-vector at the output layer.
+with softmax applied row-wise. The attention matrix Ah
+is of size N × N , wherein each row sums to 1. The head          The core intuition behind PoWER-BERT is that the re-
+computes matrices Vh = M × Wvh and Zh = Ah × Vh .                dundancy of the word-vectors cannot possibly manifest
+The transformer block concatenates the Zh matrices over          abruptly at the last layer, rather must build progressively
+all the heads and derives its output after further processing.   through the transformer block pipeline. Consequently, we
+                     PoWER-BERT: Accelerating BERT Inference via Progressive Word-vector Elimination
+
+should be able to eliminate word-vectors in a progressive                        Self-Attention Head-1                     Self-Attention Head-12
+manner across all the transformer blocks.                                        key             w                         key             w
+
+
+
+
+                                                                         query
+
+
+
+
+                                                                                                                   query
+PoWER-BERT            Components. The             PoWER-BERT
+scheme involves two critical, inter-related tasks. First,               w’                                        w’
+we identify a retention configuration: a monotonically
+decreasing sequence (`1 , `2 , . . . , `12 ) that specifies the
+number of word-vectors `j to retain at transformer                                                   Attention imposed
+                                                                                           Sum                                       Sum
+block j. For example, in Figure 1, the configuration is                                                by w on w’ at
+                                                                                                          Head-1
+(80, 73, 70, 50, 50, 40, 33, 27, 20, 15, 13, 3). Secondly, we
+do word-vector selection, i.e., for a given input, determine
+which `j word-vectors to retain at each transformer block                    Sig(w) = Sig1(w) +                                     + Sig12(w)
+j. We first address the task of word-vector selection.
+                                                                      Figure 3: Figure shows significance score computation for word-
+3.2. Word-vector Selection                                            vector w using the computed self-attention matrix.
+Assume that we are given a retention configuration
+(`1 , `2 , . . . , `12 ). Consider a transformer block j ∈ [1, 12].
+The input to the transformer block is a collection of `j−1            Attention-based Scoring. Consider a transformer block
+word-vectors arranged in the form of a matrix of size                 j . In the PoWER-BERT setting, the input matrix M is
+`j−1 × 768 (taking `0 = N ). Our aim is to select `j word-            of size `j−1 × 768 and the attention matrices are of size
+vectors to retain and we consider two kinds of strategies.            `j−1 × `j−1 . Consider an attention head h ∈ [1, 12]. For
+                                                                      a word w0 , theProw Zh [w
+                                                                                                  0
+                                                                                                    , :] computed by the head h can
+                                                                                                0
+Static and Dynamic Strategies. Static strategies fix `j               be written as w Ah [w , w] · Vh [w, :]. In other words, the
+positions and retain the word-vectors at the same positions           row Zh [w0 , :] is the weighted average of the rows of Vh ,
+across all the input sequences in the dataset. A natural static       taking the attention values as weights. Intuitively, we inter-
+strategy is to retain the first (or head) `j word-vectors. The        pret the entry Ah [w0 , w] as the attention received by word
+intuition is that the input sequences are of varying lengths          w0 from w on head h.
+and an uniform length of N is achieved by adding PAD to-              Our scoring function is based on the intuition that the sig-
+kens that carry little information. The strategy aims to re-          nificance of a word-vector w can be estimated from the
+move as many PAD tokens on the average as possible, even              attention imposed by w on the other word-vectors. For a
+though actual word-vectors may also get eliminated. A                 word-vector w and a head h, we
+related method is to fix `j positions at random and retain                                            P define the significance
+                                                                      score of w for h as Sigh (w) = w0 Ah [w0 , w]. The over-
+word-vectors only at those positions across the dataset. We           all significance score of w is
+denote these strategies as Head-WS and Rand-WS, respec-                                           Pthen defined as the aggregate
+                                                                      over the heads: Sig(w) = h Sigh (w). Thus, the signif-
+tively (head/random word-vector selection).                           icance score is the total amount of attention imposed by w
+In contrast to the static strategies, the dynamic strategies          on the other words. See Figure 3 for an illustration.
+select the positions on a per-input basis. While the word-            We conducted a study to validate the scoring function. We
+vectors tend to carry similar information at the final trans-         utilized mutual information to analyze the effect of elimi-
+former blocks, in the earlier transformer blocks, they have           nating a single word-vector. The study showed that higher
+different levels of influence over the final prediction. The          the score of the eliminated word-vector, lower the agree-
+positions of the significant word-vectors vary across the             ment with the baseline model. Thus, the scoring function
+dataset. Hence, it is a better idea to select the positions           satisfies the criterion we had aimed for: the score of a word-
+for each input independently, as confirmed by our experi-             vector is positively correlated with its influence on the final
+mental evaluation.                                                    prediction. A detailed description of the study is deferred
+We develop a scoring mechanism for estimating the signif-             to the supplementary material.
+icance of the word-vectors satisfying the following crite-
+rion: the score of a word-vector must be positively cor-
+related with its influence on the final classification out-           Word-vector Extraction. Given the scoring mechanism,
+put (namely, word-vectors of higher influence get higher              we perform word-vector selection by inserting an extract
+score). We accomplish the task by utilizing the self-                 layer between the self-attention module and the feed for-
+attention mechanism and design a dynamic strategy, de-                ward network. The layer computes the scores and retains
+noted as Attn-WS.                                                     the top `j word-vectors. See Figure 4 for an illustration.
+                      PoWER-BERT: Accelerating BERT Inference via Progressive Word-vector Elimination
+
+                                W3                         W6                                          TRANSFORMER BLOCK-2
+
+
+                                                                                       W’1             W’2            W’3         W’4
+  TRANSFORMER
+
+
+
+                        Feed Forward Network (FFN)
+                                                                                                   Feed Forward Network (FFN)
+    BLOCK-2
+
+
+
+
+                                                                       TRANSFORMER
+                                Extract Layer                                        r1[3].W1        r1[4].W2      r1[1].W3     r1[2].W4
+
+
+
+
+                                                                         BLOCK-1
+                                                                                       r1[3]           r1[4]         r1[1]       r1[2]       SOFT
+                             Self-Attention Layer
+                                                                                               Sorting based on significance score         EXTRACT
+                                                                                                                                            LAYER
+                 W1                W3                 W5     W6                        r1[1]           r1[2]         r1[3]       r1[4]
+  TRANSFORMER
+
+
+
+
+                         Feed Forward Network (FFN)                                                    Self-Attention Layer
+    BLOCK-1
+
+
+
+
+                                                                        TOKENIZED
+                                                                          INPUT
+                                Extract Layer                                            W1             W2             W3          W4
+
+
+
+                             Self-Attention Layer                     Figure 5: soft-extract layer. First transformer block is shown,
+                                                                      taking N = 4. In this example, the sorted sequence of the word-
+  TOKENIZED
+    INPUT
+                                                                      vectors is w3 , w4 , w1 , w2 ; the most significant word-vector w3
+                W1    W2        W3        W4         W5    W6         gets multiplied by r1 [1] and the least significant word-vector w2
+                                                                      by r1 [4].
+Figure 4: Word-vector selection over the first two transformer
+blocks. Here, N = 6, `1 = 4 and `2 = 2. The first trans-
+former block eliminates two word-vectors w2 and w4 with least         tuitively, the parameter rj [k] represents the extent to which
+significance scores; the second transformer block further elimi-      the k th sorted position is retained.
+nates word-vectors w1 and w5 .
+                                                                      The soft-extract layer is added in between the self-
+                                                                      attention module and the feed forward network, and per-
+3.3. Retention Configuration                                          forms the following transformation. Let Ein denote the
+                                                                      matrix of size N × 768 output by the self-attention layer.
+We next address the task of determining the retention con-            For i ∈ [1, N ], the row Ein [i, :] yields the word-vector wi .
+figuration. Analyzing all the possible configurations is un-          The layer multiplies the word-vector by the retention pa-
+tenable due to the exponential search space. Instead, we de-          rameter corresponding to its sorted position:
+sign a strategy that learns the retention configuration. Intu-
+itively, we wish to retain the word-vectors with the topmost                         Eout [i, :] = rj [Sigpos (wi )] · Ein [i, :].
+significance scores and the objective is to learn how many
+to retain. The topmost word-vectors may appear in arbi-               The modified matrix Eout [i, :] is input to the feed-forward
+trary positions across different inputs in the dataset. There-        network. The transformation ensures that all the word-
+fore, we sort them according to their significance scores.            vectors in the k th sorted position get multiplied by the same
+We shall learn the extent to which the sorted positions               parameter rj [k]. Figure 5 presents an illustration.
+must be retained. We accomplish the task by introducing
+soft-extract layers and modifying the loss function.                  Loss Function. We define the mass at transformer block
+                                                                      j to be the extent to which the sorted positions are retained,
+                                                                      i.e.,
+Soft-extract Layer. The extract layer either selects or                                                 N
+                                                                                                        X
+eliminates a word-vector (based on scores). In contrast, the                              mass(j; r) =      rj [k]
+soft-extract layer would retain all the word-vectors, but                                                            k=1
+to varying degrees as determined by their significance.
+                                                                      Our aim is to minimize the aggregate mass over all the
+Consider a transformer block j and let w1 , w2 , . . . , wN           transformer blocks with minimal loss in accuracy. Intu-
+be the sequence of word-vectors input to the transformer              itively, the aggregate mass may be viewed as a budget on
+block. The significance score of wi is given by Sig(wi ).             the total number of positions retained; mass(j; r) is the
+Sort the word-vectors in the decreasing order of their                breakup across the transformer blocks.
+scores. For a word-vector wi , let Sigpos (wi ) denote the
+                                                                      We modify the loss function by incorporating an L1 regu-
+position of wi in the sorted order; we refer to it as the sorted
+                                                                      larizer over the aggregate mass. As demonstrated earlier,
+position of wi .
+                                                                      the transformer blocks have varying influence on the clas-
+The soft-extract layer involves N learnable parame-                   sification output. We scale the mass of each transformer
+ters, denoted rj [1], . . . , rj [N ], called retention parameters.   block by its index. Let Θ denote the parameters of the
+The parameters are constrained to be in the range [0, 1]. In-         baseline BERT model and L(·) be the loss function (such as
+                    PoWER-BERT: Accelerating BERT Inference via Progressive Word-vector Elimination
+
+cross entropy loss or mean-squared error) as defined in the      Table 1: Dataset statistics: NLI and QA refers to Natural Lan-
+                                                                 guage Inference and Question Answering tasks respectively. Note
+original task. We define the new objective function as:          that STS-B is a regression task, therefore doesn’t have classes.
+                                                 
+                                XL
+           min L(Θ, r) + λ ·       j · mass(j; r)                                                               I NPUT S EQ .
+          Θ,r                                                      DATASET             TASK         # C LASSES
+                                 j=1                                                                              L ENGTH (N )
+          s.t. rj [k] ∈ [0, 1] ∀(j ∈ [1, L], k ∈ [1, N ]),         C O LA         ACCEPTABILITY         2              64
+                                                                   RTE                  NLI             2             256
+where L is the number of transformer blocks. While                 QQP             S IMILARITY          2             128
+L(Θ, r) controls the accuracy, the regularizer term controls       MRPC            PARAPHRASE           2             128
+                                                                   SST-2            S ENTIMENT          2              64
+the aggregate mass. The hyper-parameter λ tunes the trade-         MNLI- M              NLI             3             128
+off.                                                               MNLI- MM             NLI             3             128
+                                                                   QNLI               QA/NLI            2             128
+The retention parameters are initialized as rj [k] = 1, mean-      STS-B           S IMILARITY          -              64
+ing all the sorted positions are fully retained to start with.     IMDB             S ENTIMENT          2             512
+We train the model to learn the retention parameters. The          RACE                 QA              2             512
+learned parameter rj [k] provides the extent to which the
+word-vectors at the k th sorted position must be retained.
+We obtain the retention configuration from the mass of
+the above parameters: for each transformer block j, set          from the GLUE benchmark (Wang et al., 2019a), and the
+`j = ceil(mass(j)). In the rare case where the config-           IMDB (Maas et al., 2011) and the RACE (Lai et al., 2017))
+uration is non-monotonic, we assign `j = min{`j , `j−1 }.        datasets. The datasets details are shown in Table 1.
+
+3.4. Training PoWER-BERT
+Given a dataset, the scheme involves three training steps:       Baseline methods. We compare PoWER-BERT with
+                                                                 the state-of-the-art inference time reduction methods:
+ 1. Fine-tuning: Start with the pre-trained BERT model
+                                                                 DistilBERT (Sanh et al., 2019b), BERT-PKD (Sun et al.,
+    and fine-tune it on the given dataset.
+                                                                 2019b) and Head-Prune (Michel et al., 2019b). They op-
+ 2. Configuration-search: Construct an auxiliary model           erate by removing the parameters: the first two eliminate
+    by inserting the soft-extract layers in the fine             transformer blocks, and the last prunes attention heads.
+    tuned model, and modifying its loss function. The            Publicly available implementations were used for these
+    regularizer parameter λ is tuned to derive the de-           methods (Sanh et al., 2019a; Sun et al., 2019a; Michel et al.,
+    sired trade-off between accuracy and inference time.         2019a).
+    The model consists of parameters of the original
+    BERT model and the newly introduced soft-extract
+    layer. We use a higher learning rate for the latter. We      Hyper-parameters           and       Evaluation. Training
+    train the model and derive the retention configuration.      PoWER-BERT primarily involves four hyper-parameters,
+                                                                 which we select from the ranges listed below: a) learning
+ 3. Re-training: Substitute the soft-extract layer by
+                                                                 rate for the newly introduced soft-extract layers -
+    extract layers. The number of word-vectors to re-
+                                                                 [10−4 , 10−2 ]; b) learning rate for the parameters from
+    tain at each transformer block is determined by the
+                                                                 the original BERT model - [2 × 10−5 , 6 × 10−5 ]; c)
+    retention configuration computed in the previous step.
+                                                                 regularization parameter λ that controls the trade-off
+    The word-vectors to be retained are selected based on
+                                                                 between accuracy and inference time - [10−4 , 10−3 ]; d)
+    their significance scores. We re-train the model.
+                                                                 batch size - {4, 8, 16, 32, 64}. Hyper-parameters specific
+                                                                 to the datasets are provided in the supplementary material.
+In our experiments, all the three steps required only 2 −
+3 epochs. Inference is performed using the re-trained            The hyper-parameters for both PoWER-BERT and the base-
+PoWER-BERT model. The CLS token is never eliminated              line methods were tuned on the Dev dataset for GLUE and
+and it is used to derive the final prediction.                   RACE tasks. For IMDB, we subdivided the training data
+                                                                 into 80% for training and 20% for tuning. The test accu-
+4. Experimental Evaluation                                       racy results for the GLUE datasets were obtained by sub-
+                                                                 mitting the predictions to the evaluation server1 , whereas
+4.1. Setup                                                       for IMDB and RACE, the reported results are on the pub-
+                                                                 licly available Test data.
+Datasets. We evaluate our approach on a wide spectrum
+                                                                    1
+of classification/regression tasks pertaining to 9 datasets             https://gluebenchmark.com
+                      PoWER-BERT: Accelerating BERT Inference via Progressive Word-vector Elimination
+
+Table 2: Comparison between PoWER-BERT and BERTBASE . We limit the accuracy loss for PoWER-BERT to be within 1% by tuning the
+regularizer parameter λ. Inference done on a K80 GPU with batch size of 128 (averaged over 100 runs). Matthew’s Correlation reported
+for CoLA; F1-score for QQP and MRPC; Spearman Correlation for STS-B; Accuracy for the rest.
+
+
+                            M ETHOD       C O LA       RTE        QQP       MRPC        SST-2      MNLI- M       MNLI- MM         QNLI       STS-B      IMDB       RACE
+                            BERTBASE       52.5        68.1        71.2       88.7       93.0        84.6            84.0          91.0       85.8       93.5       66.9
+  T EST ACCURACY
+                            PoWER-BERT     52.3        67.4        70.2       88.1       92.1        83.8            83.1          90.1       85.1       92.5       66.0
+                            BERTBASE       898        3993        1833       1798         905        1867           1881          1848        881       9110       20040
+  I NFERENCE T IME ( MS )
+                            PoWER-BERT     201        1189         405        674         374         725            908           916        448       3419       10110
+  S PEEDUP                                (4.5 X )    (3.4 X )   (4.5 X )   (2.7 X )    (2.4 X )    (2.6 X )        (2.1 X )      (2.0 X )   (2.0 X )   (2.7 X )   (2.0 X )
+
+
+Table 3: Comparison between PoWER-BERT and ALBERT. Here PoWER-BERT represents application of our scheme on ALBERT. The
+experimental setup is same as in Table 2
+
+
+                                      M ETHOD        C O LA       RTE       QQP        MRPC        SST-2       MNLI- M         MNLI- MM      QNLI       STS-B
+                                     ALBERT           42.8        65.6       68.3        89.0       93.7         82.6            82.5         89.2        80.9
+         T EST ACCURACY
+                                   PoWER-BERT         43.8        64.6       67.4        88.1       92.7         81.8            81.6         89.1        80.0
+                                     ALBERT           940        4210       1950        1957        922         1960             1981         1964        956
+         I NFERENCE T IME ( MS )
+                                   PoWER-BERT         165        1778        287         813        442          589              922         1049        604
+         S PEEDUP                                    (5.7 X )    (2.4 X )   (6.8 X )    (2.4 X )   (2.1 X )     (3.3 X )        (2.1 X )     (1.9 X )   (1.6 X )
+
+
+
+
+Implementation. The code for PoWER-BERT was imple-                                     that PoWER-BERT offers at least 2.0x reduction in inference
+mented in Keras and is available at https://github.com/                                time on all the datasets and the improvement can be as high
+IBM/PoWER-BERT. The inference time experiments for                                     as 4.5x, as exhibited on the CoLA and the QQP datasets.
+PoWER-BERT and the baselines were conducted using Keras
+                                                                                       We present an illustrative analysis by considering the RTE
+framework on a K80 GPU machine. A batch size of 128
+                                                                                       dataset. The input sequence length for the dataset is
+(averaged over 100 runs) was used for all the datasets ex-
+                                                                                       N = 256. Hence, across the twelve transformer blocks,
+cept RACE, for which the batch size was set to 32 (since
+                                                                                       BERTBASE needs to process 12 × 256 = 3072 word-
+each input question has 4 choices of answers).
+                                                                                       vectors for any input. In contrast, the retention con-
+                                                                                       figuration used by PoWER-BERT on this dataset happens
+Maximum Input Sequence Length. The input se-
+                                                                                       to be (153, 125, 111, 105, 85, 80, 72, 48, 35, 27, 22, 5) sum-
+quences are of varying length and are padded to get a uni-
+                                                                                       ming to 868. Thus, PoWER-BERT processes an aggregate
+form length of N . Prior work use different values of N ,
+                                                                                       of only 868 word-vectors. The self-attention and the feed
+for instance ALBERT uses N = 512 for all GLUE datasets.
+                                                                                       forward network modules of the transformer blocks per-
+However, only a small fraction of the inputs are of length
+                                                                                       form a fixed amount of computations for each word-vector.
+close to the maximum. Large values of N would offer easy
+                                                                                       Consequently, the elimination of the word-vectors leads to
+pruning opportunities and larger gains for PoWER-BERT. To
+                                                                                       reduction in computational load and improved inference
+make the baselines competitive, we set stringent values of
+                                                                                       time.
+N : we determined the length N 0 such that at most 1% of
+the input sequences are longer than N 0 and fixed N to be
+the value from {64, 128, 256, 512} closest to N 0 . Table 1                            Comparison to Prior Methods. In the next experiment,
+presents the lengths specific to each dataset.                                         we compare PoWER-BERT with the state-of-the-art infer-
+                                                                                       ence time reduction methods, by studying the trade-off be-
+4.2. Evaluations                                                                       tween accuracy and inference time. The Pareto curves for
+                                                                                       six of the GLUE datasets are shown in Figure 6; others are
+Comparison to BERT. In the first experiment, we
+                                                                                       provided in the supplementary material. Top-left corners
+demonstrate the effectiveness of the word-vector elimi-
+                                                                                       correspond to the best inference time and accuracy.
+nation approach by evaluating the inference time gains
+achieved by PoWER-BERT over BERTBASE . We limit the ac-                                For PoWER-BERT, the points on the curves were obtained by
+curacy loss to be within 1% by tuning the regularizer pa-                              tuning the regularizer parameter λ. For the two transformer
+rameter λ that controls the trade-off between inference time                           block elimination methods, DistilBERT and BERT-PKD,
+and accuracy. The results are shown in Table 2. We observe                             we derived three points by retaining 3, 4, and 6 transformer
+                                PoWER-BERT: Accelerating BERT Inference via Progressive Word-vector Elimination
+
+                                CoLA                                                   QNLI                                                  MNLI-m
+                   55                                                  92
+                                                                                                                                84
+                   50
+  Matthew's Corr
+
+
+
+                                                                       90
+
+
+
+
+                                                        Accuracy (%)
+
+
+
+
+                                                                                                                 Accuracy (%)
+                   45                                                                                                           82
+
+                   40                                                  88
+                                                                                                                                80
+                                        PoWER-BERT                                        PoWER-BERT                                              PoWER-BERT
+                   35                   BERT                                              BERT                                                    BERT
+                                        DistilBERT                     86                 DistilBERT                            78                DistilBERT
+                   30                   BERT-PKD                                          BERT-PKD                                                BERT-PKD
+                                        Head-Prune                                        Head-Prune                                              Head-Prune
+                   25                                                  84                                                       76
+                    100   300   500     700     900                     200    600      1000     1400   1800                     200   600     1000     1400    1800
+                          Inference Time (ms)                                  Inference Time (ms)                                     Inference Time (ms)
+
+                                MRPC                                                    RTE                                                    QQP
+                   90                                                  70                                                       72
+                                                                       68                                                       71
+                   88                                   Accuracy (%)
+                                                                       66
+                                                                                                                                70
+  F1 Score
+
+
+
+
+                                                                                                                 F1 Score
+                   86                                                  64
+                                                                                                                                69
+                   84             PoWER-BERT
+                                                                       62                        PoWER-BERT                                      PoWER-BERT
+                                  BERT                                                           BERT                           68               BERT
+                                                                       60
+                                  DistilBERT                                                     DistilBERT                                      DistilBERT
+                   82                                                                                                           67
+                                  BERT-PKD                             58                        BERT-PKD                                        BERT-PKD
+                                  Head-Prune                                                     Head-Prune                                      Head-Prune
+                   80                                                  56                                                       66
+                    200   600    1000    1400    1800                   200   900    1600 2300 3000 3700                         200   600     1000     1400    1800
+                          Inference Time (ms)                                  Inference Time (ms)                                     Inference Time (ms)
+
+
+Figure 6: Comparison to prior methods. Pareto curves showing accuracy vs. inference time trade-off. Top-left corners correspond to
+the best inference time and accuracy. Points for PoWER-BERT obtained by tuning the regularizer parameter λ. For DistilBERT and
+BERT-PKD, the points correspond to retaining {3, 4, 6} transformer blocks. For Head-Prune, points obtained by varying number of
+retained attention-heads. The cross represents BERTBASE performance; dotted line represents its accuracy (for the ease of comparison).
+Over the best baseline method, PoWER-BERT offers: accuracy gains as high as 16% on CoLA and 6% on RTE at inference time 305 ms
+and 1326 ms, respectively; inference time gains as high as 2.7x on CoLA and 2x on RTE at accuracy 48.2% and 65.5%, respectively.
+
+
+blocks; these choices were made so as to achieve inference                                Table 4: Comparison of the accuracy of the word-vector selection
+                                                                                          methods on the SST-2 Dev set for a fixed retention configuration.
+time gains comparable to PoWER-BERT. Similarly, for the
+Head-Prune strategy, the points were obtained by varying
+the number of attention-heads retained.                                                                                                Head-WS     Rand-WS     Attn-WS
+
+Figure 6 demonstrates that PoWER-BERT exhibits marked                                          E NTIRE DATASET                         85.4%        85.7%      88.3%
+                                                                                               I NPUT SEQUENCE LENGTH > 16             83.7%        83.4%      87.4%
+dominance over all the prior methods offering:
+
+  • Accuracy gains as high as 16% on CoLA and 6% on
+    RTE for a given inference time.                                                       over ALBERT, one of the best known compression methods
+  • Inference time gains as high as 2.7x on CoLA and                                      for BERT. The results are shown in Table 3 for the GLUE
+    2.0x on RTE for a given accuracy.                                                     datasets. We observe that the PoWER-BERT strategy is able
+                                                                                          to accelerate ALBERT inference by 2x factors on most of the
+The results validate our hypothesis that fine-grained word-                               datasets (with < 1% loss in accuracy), with the gain being
+vector elimination yields better trade-off than coarse-                                   as high as 6.8x on the QQP dataset.
+grained transformer block elimination. We also observe
+that Head-Prune is not competitive. The reason is that                                    Ablation Study. In Section 3.2, we described three
+the method exclusively targets the attention-heads consti-                                methods for word-vector selection: two static techniques,
+tuting only 26% of the BERTBASE parameters and further-                                   Head-WS and Rand-WS, and a dynamic strategy, de-
+more, pruning a large fraction of the heads would obliterate                              noted Attn-WS, based on the significance scores de-
+the critical self-attention mechanism of BERT.                                            rived from the attention mechanism. We demonstrate
+                                                                                          the advantage of Attn-WS by taking the SST-2 dataset
+Accelerating ALBERT. As discussed earlier, word-                                          as an illustrative example. For all the three meth-
+vector elimination scheme can be applied over compressed                                  ods, we used the same sample retention configuration of
+models as well. To demonstrate, we apply PoWER-BERT                                       (64, 32, 16, 16, 16, 16, 16, 16, 16). The accuracy results are
+                            PoWER-BERT: Accelerating BERT Inference via Progressive Word-vector Elimination
+
+                                         Example:1                                     retained word-vectors carry the sentiment of the sentence
+   BLOCK-9                                                    gone        wrong        and are sufficient for correct prediction. The above study
+   BLOCK-5             feels                   python         gone        wrong        further reinforces our premise that word-vector redundancy
+                                                                                       can be exploited to improve inference time, while maintain-
+   BLOCK-1             feels             monty python sketch gone horribly wrong
+                                                                                       ing accuracy.
+  TOKENIZED
+              it    all feels like   a   monty python sketch gone horribly wrong .
+    INPUT
+
+                                         Example:2                                     5. Conclusions
+   BLOCK-9               films lacks
+                                                                                       We presented PoWER-BERT, a novel method for improving
+   BLOCK-5                films lacks      passion                      material
+                                                                                       the inference time of the BERT model by exploiting word-
+   BLOCK-1    but         films lacks      passion required    sell     material       vectors redundancy. Experiments on the standard GLUE
+  TOKENIZED   but this films lacks the passion required to sell the material       .
+                                                                                       benchmark show that PoWER-BERT achieves up to 4.5x gain
+    INPUT                                                                              in inference time over BERTBASE with < 1% loss in accu-
+                                                                                       racy. Compared to prior techniques, it offers significantly
+Figure 7: Anecdotal Examples. Real-life examples from SST-2
+                                                                                       better trade-off between accuracy and inference time. We
+dataset demonstrating progressive word-vector elimination.
+                                                                                       showed that our scheme can be applied over ALBERT, a
+                                                                                       highly compressed variant of BERT. For future work, we
+                                                                                       plan to extend PoWER-BERT to wider range of tasks such as
+shown in Table 4. The first row of the table shows that
+                                                                                       language translation and text summarization.
+Attn-WS offers improved accuracy. We perform a deeper
+analysis by filtering inputs based on length. In the given
+sample configuration, most transformer blocks retain only                              References
+16 word-vectors. Consequently, we selected a threshold of                              Correia, G. M., Niculae, V., and Martins, A. F. T. Adap-
+16 and considered a restricted dataset with inputs longer                                tively sparse transformers. Proceedings of the 2019 Con-
+than the threshold. The second row shows the accuracy re-                                ference on Empirical Methods in Natural Language Pro-
+sults.                                                                                   cessing and the 9th International Joint Conference on
+Recall that Head-WS relies on eliminating as many PAD to-                                Natural Language Processing (EMNLP-IJCNLP), 2019.
+kens as possible on the average. We find that the strategy                               doi: 10.18653/v1/d19-1223. URL http://dx.doi.org/10.
+fails on longer inputs, since many important word-vectors                                18653/v1/d19-1223.
+may get eliminated. Similarly, Rand-WS also performs
+                                                                                       Denil, M., Shakibi, B., Dinh, L., Ranzato, M., and De Fre-
+poorly, since it is oblivious to the importance of the word-
+                                                                                         itas, N. Predicting parameters in deep learning. In NIPS,
+vectors. In contrast, Attn-WS achieves higher accuracy
+                                                                                         2013.
+by carefully selecting word-vectors based on their signif-
+icance. The inference time is the same for all the methods,                            Devlin, J., Chang, M.-W., Lee, K., and Toutanova, K.
+as the same number of word-vectors get eliminated.                                       BERT: Pre-training of deep bidirectional transformers
+                                                                                         for language understanding. In NAACL, 2019.
+Anecdotal Examples.           We present real-life exam-
+                                                                                       Gong, Y., Liu, L., Yang, M., and Bourdev, L. Compressing
+ples demonstrating word-vector redundancy and our word-
+                                                                                         deep convolutional networks using vector quantization.
+vector selection strategy based on the self-attention mech-
+                                                                                         arXiv preprint arXiv:1412.6115, 2014.
+anism (Attn-WS). For this purpose, we experimented with
+sentences from the SST-2 sentiment classification dataset                              Han, S., Pool, J., Tran, J., and Dally, W. Learning both
+and the results are shown in Figure 7.                                                   weights and connections for efficient neural network. In
+Both the sentences have input sequence length N =                                        NIPS, 2015.
+12 (tokens).         We set the retention configuration as                             He, Y., Zhang, X., and Sun, J. Channel pruning for accel-
+(7, 7, 7, 7, 4, 4, 4, 4, 2, 2, 2, 2) so that it progressively re-                        erating very deep neural networks. In ICCV, 2017.
+moves five word-vectors at the first transformer block, and
+two more at the fifth and the ninth transformer blocks, each.                          Hinton, G., Vinyals, O., and Dean, J. Distilling the knowl-
+                                                                                         edge in a neural network. arxiv preprint: 1503.02531,
+In both the examples, the first transformer block eliminates                             2015.
+the word-vectors corresponding to stop words and punctu-
+ation. The later transformer blocks may seem to eliminate                              Kim, Y.-D., Park, E., Yoo, S., Choi, T., Yang, L., and
+more relevant word-vectors. However, their information                                   Shin, D. Compression of deep convolutional neural net-
+is captured by the word-vectors retained at the final trans-                             works for fast and low power mobile applications. arxiv
+former block, due to the diffusion of information. These                                 preprint: 1511.06530, 2015.
+                   PoWER-BERT: Accelerating BERT Inference via Progressive Word-vector Elimination
+
+Lai, G., Xie, Q., Liu, H., Yang, Y., and Hovy, E. Race:        Rajpurkar, P., Zhang, J., Lopyrev, K., and Liang, P.
+  Large-scale reading comprehension dataset from exami-          SQuAD: 100,000+ questions for machine comprehen-
+  nations. arXiv preprint arXiv:1704.04683, 2017.                sion of text. arXiv preprint arXiv:1606.05250, 2016.
+Lan, Z., Chen, M., Goodman, S., Gimpel, K., Sharma,            Sanh, V., Debut, L., Chaumond, J., and Wolf,
+  P., and Soricut, R. ALBERT: A lite BERT for self-              T., 2019a.      URL ”https://github.com/huggingface/
+  supervised learning of language representations. arXiv         transformers/tree/master/examples/distillation”.
+  preprint arXiv:1909.11942, 2019.
+                                                               Sanh, V., Debut, L., Chaumond, J., and Wolf, T. Dis-
+Lee, J., Yoon, W., Kim, S., Kim, D., Kim, S., So, C. H.,         tilBERT, a distilled version of BERT: smaller, faster,
+  and Kang, J. BioBERT: Pre-trained biomedical language          cheaper and lighter. arXiv preprint arXiv:1910.01108,
+  representation model for biomedical text mining. Bioin-        2019b.
+  formatics, 2019.
+                                                               Sau, B. B. and Balasubramanian, V. N. Deep model
+Liu, X., He, P., Chen, W., and Gao, J. Improving multi-task      compression: Distilling knowledge from noisy teachers.
+  deep neural networks via knowledge distillation for natu-      arxiv preprint: 1610.09650, 2016.
+  ral language understanding. arxiv preprint: 1904.09482,
+  2019.                                                        Shen, S., Dong, Z., Ye, J., Ma, L., Yao, Z., Gholami, A.,
+                                                                 Mahoney, M. W., and Keutzer, K. Q-BERT: Hessian
+Liu, Y. and Lapata, M. Text summarization with pretrained        based ultra low precision quantization of BERT. arxiv
+  encoders. arXiv preprint arXiv:1908.08345, 2019.               preprint:1909.05840, 2019.
+Maas, A. L., Daly, R. E., Pham, P. T., Huang, D., Ng, A. Y.,
+                                                               Sun, S., Cheng, Y., Gan, Z., and Liu, J.,
+ and Potts, C. Learning word vectors for sentiment anal-
+                                                                 2019a.        URL    ”https://github.com/intersun/
+ ysis. In ACL, 2011.
+                                                                 PKD-for-BERT-Model-Compression”.
+Martins, A. F. T. and Astudillo, R. F. From softmax to
+ sparsemax: A sparse model of attention and multi-label        Sun, S., Cheng, Y., Gan, Z., and Liu, J. Patient knowledge
+ classification. 2016.                                           distillation for BERT model compression. arXiv preprint
+                                                                 arXiv:1908.09355, 2019b.
+McCarley, J. S. Pruning a BERT-based question answering
+ model. arxiv preprint: 1910.06360, 2019.                      Wang, A., Singh, A., Michael, J., Hill, F., Levy, O., and
+                                                                Bowman, S. R. GLUE: A multi-task benchmark and
+Michel, P., Levy, O., and Neubig, G., 2019a.                    analysis platform for natural language understanding. In
+ URL                 ”https://github.com/pmichel31415/          ICLR, 2019a.
+ are-16-heads-really-better-than-1”.
+                                                               Wang, Z., Wohlwend, J., and Lei, T. Structured pruning
+Michel, P., Levy, O., and Neubig, G. Are sixteen heads          of large language models. arxiv preprint: 1910.04732,
+ really better than one? arXiv preprint arXiv:1905.10650,       2019b.
+ 2019b.
+                                                               Zafrir, O., Boudoukh, G., Izsak, P., and Wasserblat,
+Molchanov, D., Ashukha, A., and Vetrov, D. Variational           M.       Q8BERT: Quantized 8bit BERT.       arxiv
+ dropout sparsifies deep neural networks. arxiv preprint:        preprint:1910.06188, 2019.
+ 1701.05369, 2017.
+                                                               Zhao, G., Lin, J., Zhang, Z., Ren, X., Su, Q., and Sun,
+Molchanov, P., Tyree, S., Karras, T., Aila, T., and Kautz,
+                                                                 X. Explicit sparse transformer: Concentrated attention
+ J. Pruning convolutional neural networks for resource
+                                                                 through explicit selection. arXiv,1912.11637, 2019.
+ efficient inference. arxiv preprint: 1611.06440, 2016.
+Palakodety, S., KhudaBukhsh, A. R., and Carbonell, J. G.
+  Mining insights from large-scale corpora using fine-
+  tuned language models. In Proceedings of the Twenty-
+  Fourth European Conference on Artificial Intelligence
+  (ECAI-20), pp. To appear, 2020.
+Peters, B., Niculae, V., and Martins, A. F. T. Sparse
+  sequence-to-sequence models. Proceedings of the 57th
+  Annual Meeting of the Association for Computational
+  Linguistics, 2019. doi: 10.18653/v1/p19-1146. URL
+  http://dx.doi.org/10.18653/v1/p19-1146.
+

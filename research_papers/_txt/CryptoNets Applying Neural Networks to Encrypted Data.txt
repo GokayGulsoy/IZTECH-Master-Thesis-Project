@@ -1,0 +1,599 @@
+                CryptoNets: Applying Neural Networks to Encrypted Data
+                         with High Throughput and Accuracy
+
+
+Nathan Dowlin1                                                                             NDOWLIN @ PRINCETON . EDU
+Department of Mathematics, Princeton University
+Ran Gilad-Bachrach                                                                             RANG @ MICROSOFT. COM
+Kim Laine                                                                               KIM . LAINE @ MICROSOFT. COM
+Kristin Lauter                                                                            KLAUTER @ MICROSOFT. COM
+Michael Naehrig                                                                         MNAEHRIG @ MICROSOFT. COM
+John Wernsing                                                                     JOHN . WERNSING @ MICROSOFT. COM
+Microsoft Research, Redmond
+
+
+
+                        Abstract                               1. Introduction
+     Applying machine learning to a problem which              Consider a hospital that would like to use a cloud service
+     involves medical, financial, or other types of sen-       to predict the probability of readmission of a patient within
+     sitive data, not only requires accurate predic-           the next 30 days, in order to improve the quality of care and
+     tions but also careful attention to maintaining           to reduce costs. Due to ethical and legal requirements re-
+     data privacy and security. Legal and ethical re-          garding the confidentiality of patient information, the hos-
+     quirements may prevent the use of cloud-based             pital might be prohibited from using such a service. In
+     machine learning solutions for such tasks. In             this work we present a way by which the hospital can use
+     this work, we will present a method to convert            this valuable service without sacrificing patient privacy. In
+     learned neural networks to CryptoNets, neural             the proposed protocol, the hospital encrypts the private in-
+     networks that can be applied to encrypted data.           formation and sends it in encrypted form to the prediction
+     This allows a data owner to send their data in an         provider, referred to as the cloud in our discussion below.
+     encrypted form to a cloud service that hosts the          The cloud is able to compute the prediction over the en-
+     network. The encryption ensures that the data re-         crypted data records and sends back the results that the hos-
+     mains confidential since the cloud does not have          pital can decrypt and read. The encryption scheme uses a
+     access to the keys needed to decrypt it. Never-           public key for encryption and a secret key (private key) for
+     theless, we will show that the cloud service is           decryption. It is important to note that the cloud does not
+     capable of applying the neural network to the en-         have access to the secret key, so it cannot decrypt the data
+     crypted data to make encrypted predictions, and           nor can it decrypt the prediction. The only information it
+     also return them in encrypted form. These en-             obtains during the process is that it did perform a prediction
+     crypted predictions can be sent back to the owner         on behalf of the hospital. Hence, the cloud can charge the
+     of the secret key who can decrypt them. There-            hospital for its services, but does not learn anything about
+     fore, the cloud service does not gain any infor-          the patient’s medical files or the predicted outcomes. This
+     mation about the raw data nor about the predic-           procedure allows for private and secure predictions without
+     tion it made. We demonstrate CryptoNets on                requiring the establishment of trust between the data owner
+     the MNIST optical character recognition tasks.            and the service provider. This may have applications in
+     CryptoNets achieve 99% accuracy and can make              fields such as health, finance, business, and possibly oth-
+     around 59000 predictions per hour on a single             ers.
+     PC. Therefore, they allow high throughput, ac-
+                                                               It is important to note that this work focuses on the infer-
+     curate, and private predictions.
+                                                               ence stage. We make the assumption that the cloud already
+                                                               has a model. In our case it would be a neural network that
+Proceedings of the 33 rd International Conference on Machine      1
+                                                                    This work was done while the first author was at Microsoft
+Learning, New York, NY, USA, 2016. JMLR: W&CP volume           Research, Redmond
+48. Copyright 2016 by the author(s).
+                                                          CryptoNets
+
+was previously trained, for example, using a set of unen-        To allow accurate predictions we propose using neural net-
+crypted data. Training models for these kinds of applica-        works, which in recent years have shown great promise
+tions might be a challenge as well due to the same concerns      for a wide variety of learning tasks. Much of the revival
+regarding privacy and security. The problem of training          in the interest in neural networks is due to the unprece-
+such a model is sometimes referred to as privacy preserv-        dented accuracy achieved in tasks such as image classifica-
+ing data-mining (Agrawal & Srikant, 2000). One possi-            tion (Krizhevsky et al., 2012) and speech recognition (Dahl
+ble solution to training while preserving privacy lies in the    et al., 2012). In Section 2 we present a brief background on
+concept of differential privacy (Dwork, 2011). Working           neural networks, as well as the necessary adjustments for
+with a statistical database, differential privacy allows one     them to work with homomorphic encryption, thus creating
+to control the amount of information leaked from an indi-        CryptoNets.
+vidual record in a dataset. Therefore, when training, one
+                                                                 One line of criticism against homomorphic encryption is
+can use this concept to ensure privacy for any entity whose
+                                                                 its inefficiency, which is commonly thought to make it im-
+information is contained in the dataset as well as to create
+                                                                 practical for nearly all applications. However, combining
+models that do not leak this information about the data they
+                                                                 together techniques from cryptography, machine learning
+were trained on. However, the notion of differential privacy
+                                                                 and software engineering, we show that CryptoNets may
+is not useful in the inference phase since at this stage, we
+                                                                 be efficient and accurate enough for real world applica-
+are interested in examining a single record. Other options
+                                                                 tions. We show that when CryptoNets are applied to the
+include working on encrypted data for training as well, in
+                                                                 MNIST dataset, an accuracy of 99% can be achieved with
+which case either simple classification techniques should
+                                                                 a throughput of 58982 predictions per hour on a single PC,
+be used (Graepel et al., 2013), or other assumptions on the
+                                                                 and a latency of 250 seconds. Note that a single prediction
+data representation should be made (Aslett et al., 2015a).
+                                                                 takes 250 seconds to complete, however, the same process
+The main ingredients of CryptoNets are homomorphic en-           can make 4096 predictions simultaneously with no added
+cryption and neural networks. Homomorphic encryption             cost. Therefore, over an hour, our implementation can
+was originally proposed by Rivest et al. (1978) as a way to      make 58982 predictions on average. Hence, CryptoNets
+encrypt data such that certain operations can be performed       are accurate, secure, private, and have a high throughput -
+on it without decrypting it first. In his seminal paper Gentry   an unexpected combination in the realm of homomorphic
+(2009) was the first to present a fully homomorphic encryp-      encryption.
+tion scheme. The term ”fully homomorphic” means that the
+scheme allows arbitrarily many operations to be performed        2. Neural Networks
+on the encrypted data. Gentry’s original scheme was highly
+inefficient, but since then the work of several researchers      The goal of this work is to demonstrate the application of
+has produced significantly more practical schemes. In this       neural networks over encrypted data. We use the term neu-
+work, in particular, we use the homomorphic encryption           ral networks to refer to artificial feed-forward neural net-
+scheme of Bos et al. (2013), which is very closely related to    works. These networks can be thought of as leveled cir-
+the schemes in López-Alt et al. (2012); Stehlé & Steinfeld     cuits. Traditionally, these levels are called layers and are
+(2011). This scheme is a leveled homomorphic encryption          visualized as being stacked so that the bottom-most layer is
+scheme, which allows adding and multiplying encrypted            the input layer. Each node of the input layer is fitted with
+messages but requires that one knows in advance the com-         the value of one of the features of the instance at hand. Each
+plexity of the arithmetic circuit that is to be applied to the   of the nodes in the following layers computes a function
+data. In other words, this cryptosystem allows to com-           over the values of the layer beneath it. The values com-
+pute polynomial functions of a fixed maximal degree on           puted at the top-most layer are the outputs of the neural
+the encrypted data. High degree polynomial computation           network.
+requires the use of large parameters in the scheme, which
+                                                                 Several common functions can be computed at the nodes.
+results in larger encrypted messages and slower computa-
+                                                                 We have listed some of them here:
+tion times. Hence, a primary task in making practical use of
+this system is to present the desired computation as a low-       1. Weighted-Sum (convolution layer): Multiply the vec-
+degree polynomial. We refer the reader to Dowlin et al.              tor of values at the layer beneath it by a vector of
+(2015); Bos et al. (2013); López-Alt et al. (2012) for de-          weights and sum the results. The weights are fixed
+tails on the encryption scheme, and only give a brief intro-         during the inference processes. This function is es-
+duction to it in Section 3. We used the Simple Encrypted             sentially a dot product of the weight vector and the
+Arithmetic Library (SEAL) for homomorphic encryption2 .              vector of values of the feeding layer.
+   2
+       Available at http://sealcrypto.codeplex.com                2. Max Pooling: Compute the maximal value of some of
+                                                                     the components of the feeding layer.
+                                                           CryptoNets
+
+  3. Mean Pooling: Compute the average value of some of           only effect of not dividing is that the output gets scaled by
+     the components of the feeding layer.                         a factor, which then propagates to the next layers.
+  4. Sigmoid: Take the value of one of the nodes in               The sigmoid and the rectified linear activation functions
+     the feeding layer and evaluate the function z 7→             are non-polynomial functions. The solution of Xie et al.
+     1/(1+exp(−z)).                                               (2014) was to approximate these functions with low-degree
+                                                                  polynomials, but we take a different approach here. We
+  5. Rectified Linear: Take the value of one of the nodes         try to control the trade-off between having a non-linear
+     in the feeding layer and compute the function z 7→           transformation, which is needed by the learning algorithm,
+     max (0, z).                                                  and the need to keep the degree of the polynomials small,
+                                                                  to make the homomorphic encryption parameters feasible.
+Since homomorphic encryption supports only additions              We chose to use the lowest-degree non-linear polynomial
+and multiplications, only polynomial functions can be com-        function, which is the square function: sqr (z) := z 2 . It
+puted in a straightforward way. Moreover, due to the in-          is interesting to note that Livni et al. (2014) have recently
+creased complexity in computing circuits with nested mul-         suggested a theoretical analysis of the problem of learning
+tiplications, it is desired to restrict the computation to low-   neural networks with polynomial activation functions and
+degree polynomials. The weighted-sum function can be di-          devoted much of their study to the square activation func-
+rectly implemented since it uses only additions and multi-        tion.
+plications. Moreover, the multiplications here are between
+precomputed weights and the values of the feeding layer.          In conclusion, to make a network compatible with homo-
+Since the weights are not encrypted, it is possible to use        morphic encryption some modifications are needed. Prefer-
+the more efficient plain multiplication operation, as is de-      ably, these modifications should be taken into account
+scribed in Section 3.2.1. Some networks also add a bias           while training. The activation functions should be replaced
+term to the result of the weighted sum. To add this bias          by polynomial activation functions and the max pooling
+term a plain addition can be used since, again, the value of      replaced by scaled mean pooling. For the sake of time-
+this bias term is known to the cloud.                             efficient evaluation, consecutive layers that use only linear
+                                                                  transformations, such as the weighted-sum or mean pool-
+One thing to note is that the encryption scheme does not          ing, can be collapsed.
+support floating-point numbers. Instead, we use fixed pre-
+cision real numbers by converting them to integers by
+proper scaling, although there are also other ways to do this     3. Homomorphic Encryption
+(Dowlin et al., 2015). Furthermore, the encryption scheme         Encrypting data is a prominent method for securing and
+applies all of its operations modulo some number t, which         preserving privacy of data. Homomorphic encryption (HE)
+is why it is important to pay attention to the growth in the      (Rivest et al., 1978) adds to that the ability to act on the
+size of the numbers appearing throughout the computation,         data while it is still encrypted. In mathematics, a homo-
+and to make sure that reduction modulo t does not occur.          morphism is a structure-preserving transformation. For ex-
+Otherwise the results of the computation might be unex-           ample, consider the map Φ : Z → Z7 such that Φ (z) := z
+pected. In our experiments, 5 − 10 bits of precision on the       (mod 7). This map Φ preserves both the additive and mul-
+inputs and weights of the network were sufficient in main-        tiplicative structure of the integers in the sense that for ev-
+taining the accuracy of the neural network. All the num-          ery z1 , z2 ∈ Z, we have that Φ (z1 + z2 ) = Φ (z1 ) ⊕ Φ (z2 )
+bers computed were smaller than 280 , which guided us in          and Φ (z1 · z2 ) = Φ (z1 ) ⊗ Φ (z2 ) where ⊕ and ⊗ are the
+selecting the parameters for the encryption scheme as seen        addition and multiplication operations in Z7 . The map Φ is
+in Section 3.2.5.                                                 a ring homomorphism between the rings Z and Z7 .
+Max pooling cannot be computed directly since the max-            In the context of homomorphic encryption, we will be in-
+function is non-polynomial. However, powers of it can             terested in preserving the additive and multiplicative struc-
+be approximated due to the relation max (x1 , . . . , xn ) =      tures of the rings of plaintexts and ciphertexts in the en-
+          P d 1/d
+limd→∞       i xi    . To keep the degree small, d should be      cryption and decryption operations. Since the first such en-
+kept reasonably small, with the smallest meaningful value         cryption scheme was introduced (Gentry, 2009), there have
+d = 1 returning a scalar multiple of the mean pooling func-       been many advances in this field (see e.g. Naehrig et al.
+tion. We will use this scaled mean-pool
+                                    P function instead of         (2011); Gentry et al. (2012a;b); López-Alt et al. (2012)).
+the max-pool function, as the sum xi is easy to compute
+over encrypted data. The reason we use the scaled mean-           Technically speaking, (fully) homomorphic encryption al-
+pool instead of the traditional mean-pool is that we prefer       lows for an arbitrary number of addition and multiplica-
+not having to divide by the number of elements, although          tion operations to be performed on the encrypted data. For
+this could in principle be done (Dowlin et al., 2015). The        the sake of efficiency, we will instead use a weaker variant
+                                                            CryptoNets
+
+of this idea often called leveled homomorphic encryption,          3.2. Practical considerations
+where the parameters of the encryption scheme are chosen
+                                                                   The first thing to note is that the method described above
+so that arithmetic circuits of (roughly speaking) a predeter-
+                                                                   works as long as the noise terms appearing in the encryp-
+mined depth can be evaluated. In our case this amounts to
+                                                                   tions of m1 and m2 are small enough. Otherwise the de-
+knowing the structure of the neural network, including the
+                                                                   cryptions might not yield correct answers. The security
+activation functions. The particular encryption scheme that
+                                                                   level of the system depends on the parameters n, q, t, and
+we employ is YASHE’, described in Bos et al. (2013).
+                                                                   the amount of noise added. The maximum amount of noise
+                                                                   that a ciphertext can have and still be decryptable depends
+3.1. Description of the method
+                                                                   on the parameters q and t.
+The encryption scheme of Bos et al. (2013) (also López-Alt        When ciphertexts are added or multiplied, the noise in the
+et al. (2012)) maps plaintext messages from the ring Rtn :=        resulting ciphertext is typically larger than in the inputs.
+Zt [x] /(xn + 1) to the ring Rqn := Zq [x] /(xn + 1). See          Noise growth is particularly strong in multiplication. This
+the supporting material for a brief introduction to rings and      essentially means that the parameter q should be selected
+their properties. The encryption scheme chooses random             to be large enough to support the increased noise, which
+polynomials f 0 , g ∈ Rqn , and defines f := tf 0 + 1. The         necessitates choosing a larger n for security reasons.
+public key h is defined to be h := tgf −1 , while f is the
+secret key. Since not every element in Rqn is invertible,          If the computation to be performed is expressed as an arith-
+these steps are iterated until the corresponding f has an          metic circuit with addition and multiplication nodes, the
+inverse and h can be computed.                                     main limitation to using the scheme is the number of mul-
+                                                                   tiplication gates in the path from the inputs to the outputs.
+A message m ∈ Rtn is encrypted by computing                        This number we refer to as the level. Keeping the level
+                  c := [bq/tc m + e + hs]q                         low allows for selecting smaller values for the parameters,
+                                                                   which results in faster computation and smaller ciphertexts.
+where e and s are random noise polynomials in Rqn , with           Note that the level is not the same as the degree of a polyno-
+coefficients of small absolute value. We use the notation          mial to be evaluated, and instead behaves like the logarithm
+[a]q (resp. [a]t ) to denote the reduction of the coefficients     of the degree.
+of a modulo q (resp. t) to the symmetric interval of length q
+(resp. t) around 0. Decrypting is done by computing                While keeping the parameters small improves performance
+                                                               for our tasks, we would like to make t large to prevent
+                                t                                  the coefficients of the plaintext polynomials from reducing
+                       m :=       fc     .
+                                q      t
+                                                                   modulo t at any point during the computation. To better
+                                                                   understand this point, note that the atomic objects used in a
+Here the product f c is first computed in Rqn , the coefficients   neural network are real numbers. The neural network takes
+are interpreted as integers, scaled by t/q, and rounded to the     as its input a vector of real numbers and, through a series of
+nearest integers. Finally they are interpreted modulo t.           additions, multiplications, and other real functions, it com-
+Two ciphertexts c1 and c2 , with underlying messages m1            putes its outputs, which are also real numbers. However,
+and m2 , can be added together in Rqn to yield the encryption      the homomorphic encryption scheme works over the ring
+of m1 + m2 . This works because                                    Rtn := Zt [x] /(xn + 1). This means that some conver-
+                                                                   sion process between real numbers and elements of Rtn is
+          c1 + c2 = bq/tc (m1 + m2 ) + (e1 + e2 )                  needed. We refer to such conversions as encodings (real
+                                                            (1)
+                     + h (s1 + s2 ) ,                              numbers to Rtn ) and decodings (Rtn to real numbers). If
+                                                                   the coefficients of a polynomial in Rtn are reduced mod-
+which decrypts to m1 + m2 ∈ Rtn .
+                                                                   ulo t after say, an addition, there is usually a problem with
+To multiply two messages we first compute                          decoding it correctly to the sum of the real numbers, and
+                                                                 instead the result is likely to be unexpected. This is why
+          t
+            c1 c2 = bq/tc (m1 m2 ) + e0 + h2 s1 s2          (2)    we need to keep track of how large the coefficients of the
+          q                                                        plaintext polynomials grow throughout the entire computa-
+where e0 is a noise term that under the right conditions is        tion, and choose the parameter t to be larger.
+still small. It is easy to see that the term above decrypts to     To make the computations faster, it is also important to
+m1 · m2 , but under the secret key f 2 ∈ Rqn . Using a pro-        keep track of what parts of the data need to be secured.
+cess called relinearization (see e.g. (Brakerski & Vaikun-         A common task that is repeatedly performed in the neural
+tanathan, 2011; Bos et al., 2013)), it is possible to modify       network is computing the weighted some of the inputs from
+the result so that it will be decryptable under the original       the previous layer. While the data from the previous layer
+secret key.
+                                                         CryptoNets
+
+is encrypted, the weights are known to the network in their     efficients of the plaintext polynomials from overflowing t.
+plain form. Therefore, when multiplying the data by the         This forces us to choose large values for t, which causes
+weights we can use a more efficient form of multiplication,     the noise to grow more rapidly in the ciphertexts and de-
+described below.                                                creases (with q fixed) the maximum amount of noise tol-
+                                                                erated. Therefore, we need to choose a larger q, and sub-
+3.2.1. P LAIN OPERATIONS                                        sequently a larger n for security reasons. One way to par-
+                                                                tially overcome this issue is by using the Chinese Remain-
+In applying neural networks a common operation is to add
+                                                                der Theorem (CRT) (See the supporting material). The idea
+or multiply some value, which is derived from the data with
+                                                                is
+                                                                Pto use    multiple primes t1 , . . . , tk . Given a polynomial
+some known constant. The naive way to implement such
+                                                                    ai xi we can convert it toPk polynomials in such a way
+operations is to first encrypt the constant and then perform
+                                                                that the j-th polynomial is [ai (mod tj )] xi . Each such
+the addition or multiplication operation. However, this pro-
+                                                                polynomial is encrypted and manipulated identically. The
+cess is both computationally intensive and adds a large
+                                                                CRT guarantees that we will be able to decode back the    Q re-
+amount of noise if the operation is multiplication. How-
+                                                                sult, as long as its coefficient does not grow beyond tj .
+ever, this is not necessary. Let c = bq/tc m + e + hs be
+                                                                Therefore, this method allows us to encode exponentially
+the encrypted message and w the known constant. Addi-
+                                                                large numbers while increasing time and space linearly in
+tion can be achieved by multiplying w by bq/tc and adding
+                                                                the number of primes used.
+that to c, which results in bq/tc (m + w) + e + hs. This is
+essentially just encrypting w with no noise and performing
+                                                                3.2.4. PARALLEL C OMPUTATION
+normal homomorphic addition.
+                                                                The encryption uses polynomials of a high degree. For ex-
+For multiplication, even the scaling is not needed since
+                                                                ample, in our case n = 4096, both ciphertext and plaintext
+cw = bq/tc mw + e0 + hs0 . This is very efficient, espe-
+                                                                polynomials can have degrees up to 4095. If the data is en-
+cially if w is a sparse polynomial. For example, if w is
+                                                                coded as a scalar, only one out of the 4096 coefficients is
+a scalar (as it would be in the scenario below), then this
+                                                                being used, while all the operations (additions and multi-
+multiplication is computed in linear time in the degree of c,
+                                                                plications) act on the entire 4096 coefficient polynomials.
+which is n − 1.
+                                                                Therefore, the operations are slow due to the high degree,
+                                                                but the result contains only a single significant coefficient.
+3.2.2. E NCODING
+                                                                Another application of the CRT allows us to perform Sin-
+As we already discussed above, there is a mismatch be-          gle Instruction Multiple Data (SIMD) operations at no extra
+tween the atomic constructs in neural networks (real num-                       Q (2012b). Assume that t is selected such
+                                                                cost Gentry et al.
+bers), and the atomic constructs in the homomorphic en-         that xn + 1 ≡ (x − αi ) (mod t). In this case the CRT
+cryption schemes (polynomials in Rtn ). An encoding             can be used to show that Rtn ∼  = Z×nt . The isomorphism
+scheme should map one to the other in a way that preserves      is explicit and easy to compute, which means that we can
+the addition and multiplication operations. Such an encod-      encode n values into a single polynomial, operate on this
+ing scheme can be constructed in several ways. For exam-        polynomial, and decode the n different results.
+ple, it is possible to convert the real numbers to fixed pre-
+                                                                Note that we use here the CRT in an opposite direction
+cision numbers, and then use their binary representation to
+                                                                to how we use it when encoding large numbers (Sec-
+convert them into a polynomial with the coefficients given
+                                                                tion 3.2.3). When encoding large numbers, we take a single
+by the binary expansion. This polynomial will have the
+                                                                number and break it into multiple small numbers that are
+property that when evaluated at 2, it will return the encoded
+                                                                being processed in parallel and joined together at the end.
+value. Another option is to encode the fixed precision num-
+                                                                On the other hand, here we take multiple scalars and join
+ber as a constant polynomial. This encoding is simple, but
+                                                                them together to form a single polynomial. This polyno-
+might seem inefficient in the sense that only one coefficient
+                                                                mial is being processed as a single unit and only upon com-
+of the polynomial is being used. In Section 3.2.4 we show
+                                                                pleting the computation is it broken into its components.
+how a batch of such instances can be encoded simultane-
+ously to make use of the entire space. One problem with
+                                                                3.2.5. PARAMETER S ELECTION
+such a scalar encoding is that the only coefficient of the
+message polynomials grows very rapidly when homomor-            The main parameters defining the cryptosystem are the
+phic operations are performed                                   plaintext modulus t, the coefficient modulus q and the de-
+                                                                gree n of the polynomial modulus (xn + 1). To allow for
+3.2.3. E NCODING LARGE NUMBERS                                  encoding large enough numbers for the purposes of the net-
+                                                                work, we used five plaintext moduli and both of the CRT
+As we have already explained, a major challenge for com-
+                                                                techniques described above. The values used for the q, t
+puting in this encryption scheme lies in preventing the co-
+                                                               CryptoNets
+
+pairs are (2191 −2589751, 40961), (2191 −491527, 65537),              throughput of 274131 decryptions and decoding per hour is
+(2191 − 2232751, 114689), (2191 − 2309565, 147457), and               achievable with our setup.
+(2191 − 15131401, 188417). The values of t were selected
+so that their product is greater than 280 , which is large            4.2. Description of the Network
+enough to allow the precision needed. At the same time
+they are small enough, with respect to the values of q to             The network has two forms: the model that is the direct
+allow for computing the desired network correctly, i.e. so            output of training, and the simplified version which is actu-
+that the noise does not grow too large. Finally, the plaintext        ally used for making predictions. The trained network has
+moduli are chosen such that                                           9 layers, and the simplified version has 5 layers. A visu-
+                                                                      alization of the latter is given in Table 1, though we will
+                  4095
+                  Y                                                 describe both of them here.
+    x4096 + 1 =          x − αi1,...,5       (mod t1,...,5 )
+                   i=0
+                                                                      Here is a description of the network used for training:
+
+In other words, the polynomial modulus breaks into lin-                1. Convolution Layer: The input image is 28 × 28. The
+ear components, which allows for optimal use of the SIMD                  convolution has windows, or kernels, of size 5 × 5, a
+technique described in Section 3.2.4.                                     stride of (2, 2), and a mapcount of 5. The output of
+                                                                          this layer is therefore 5 × 13 × 13.
+4. Empirical Results                                                   2. Square Activation Layer: This layer squares the value
+We have tested CryptoNets on the MNIST dataset (LeCun                     at each input node.
+et al., 1998). This dataset consists of 60,000 images of hand          3. Scaled Mean Pool Layer: This layer has 1 × 3 × 3
+written digits. Each image is a 28x28 pixel array, where                  windows, and again outputs a multi-array of dimen-
+each pixel is represented by its gray level in the range of               sion 5 × 13 × 13.
+0-255. We used the training part of this dataset, consist-
+ing of 50,000 images, to train a network and the remaining             4. Convolution Layer: This convolution has a kernel size
+10,000 images for testing. The details of the network used                of 1 × 5 × 5, a stride of (1, 2, 2), and a mapcount of
+are presented in Table 1. The accuracy of the training net-               10. The output layer is therefore 50 × 5 × 5.
+work is 99% (it mislabels only 105 out of the 10, 000 test
+                                                                       5. Scaled Mean Pool Layer: As with the first mean pool,
+examples).
+                                                                          the kernel size is 1×3×3, and the output is 50×5×5.
+4.1. Timing analysis                                                   6. Fully Connected Layer: This layer fully connects the
+                                                                          incoming 50 · 5 · 5 = 1250 nodes to the outgoing 100
+Since the network can accept batches of size 4096 (due to
+                                                                          nodes, or equivalently, is multiplication by a 100 ×
+the choice of the degree n = 4096 in the encryption pa-
+                                                                          1250 matrix.
+rameters) we timed the network on the first 4096 images
+of the test set to match the batch size. The latency of the            7. Square Activation Layer: This layer squares the value
+network is governed by the time to process a batch while                  at each input node.
+the throughput is also a function of the batch size. There-
+fore, we separated the report for these two parameters and             8. Fully Connected Layer: This layer fully connects the
+also reported on the time per instance. These results are                 incoming 100 nodes to the outgoing 10 nodes, or
+presented in Table 2.                                                     equivalently, is multiplication by a 10 × 100 matrix.
+
+Applying the network takes 250 seconds on a PC with a                  9. Sigmoid Activation Function: This layer applies the
+single Intel Xeon E5-1620 CPU running at 3.5GHz, with                     sigmoid function to each of the 10 incoming values.
+16GB of RAM, running the Windows 10 operating sys-
+tem. Since applying the network allows making 4096 pre-               The sigmoid activation function is necessary for the train-
+dictions simultaneously using the SIMD operations as de-              ing stage in order to get reasonable error terms when run-
+scribed in Section 3.2.4, this PC can sustain a throughput            ning the gradient descent algorithm. However, we don’t
+of 4096 × 3600/250 ≈ 58982 predictions per hour. En-                  have a good way of dealing with the sigmoid in the en-
+crypting the data takes 44.49 seconds and additional 0.138            crypted realm. Luckily, once we have our weights fixed
+seconds for every parallel instance to be encoded. There-             and want to make predictions, we can simply leave it out.
+fore, if 4096 instances are encoded, a throughput of 24193            This is because the prediction of the neural network is given
+instances per hour can be encrypted and encoded. Decrypt-             by the index of the maximum value of its output vector, and
+ing the data takes 3 seconds and additional 12.4 millisec-            since the sigmoid function is monotone increasing, whether
+ond to decode predictions for each instance. Therefore, a             or not we apply it will not affect the prediction.
+                                                          CryptoNets
+
+
+                        Table 1. Breakdown of the time it takes to apply CryptoNets to the MNIST network
+       Layer             Description                                                                       Time to compute
+   Convolution layer     Weighted sums layer with windows of size 5 × 5, stride size of 2. From               30 seconds
+                         each window, 5 different maps are computed and a padding is added to
+                         the upper side and left side of each image.
+    1st square layer     Squares each of the 835 outputs of the convolution layer                              81 seconds
+       Pool layer        Weighted sum layer that generates 100 outputs from the 835 outputs of                127 seconds
+                         the 1st square layer
+    2nd square layer     Squares each of the 100 outputs of the pool layer                                    10 seconds
+      Output layer       Weighted sum that generates 10 outputs (corresponding to the 10 digits)              1.6 seconds
+                         from the 100 outputs of the 2nd square layer
+
+
+                                       Table 2. The performance of CryptoNet for MNIST
+            Stage                 Latency        Additional latency per each instance in a batch             Throughput
+     Encoding+Encryption        44.5 seconds                      0.138 seconds                             24193 per hour
+      Network application       250 seconds                             0                                   58982 per hour
+     Decryption+Decoding         3 seconds                        0.012 seconds                            274131 per hour
+
+
+The other change that we make to the network is just for
+                                                                          Table 3. Message sizes of CryptoNet for MNIST
+an increase in efficiency. Since layers 3 through 6 are all
+                                                                                         Message size       Size per instance
+linear, they can all be viewed as matrix multiplication and
+composed into a single linear layer corresponding to a ma-          Owner → Cloud         367.5 MB             91.875 KB
+trix of dimension 100 by 5 · 13 · 13 = 865. Thus, our final         Cloud → Owner          4.7 MB                1.17 KB
+network for making predictions is only 5 layers deep.
+One obstacle to training networks using the square activa-
+tion function is that, unlike the rectified linear and sigmoid    It is interesting to put the message sizes used in comparison
+functions, its derivative is unbounded. This can lead to          to natural raw representations of these messages. The size
+strange behavior when running the gradient descent algo-          of the message depends on the representation used. For
+rithm, especially for deeper nets it sometimes blows up or        example, if each image is represented as an array of size
+overfits. The overfitting issue can be partially resolved by      28x28 and each pixel is represented as a double precision
+the addition of convolution layers without activation func-       floating point number, then the size of each image is ap-
+tions (layers 4 and 5 in our network). This allows us to re-      proximately 6 KB, which is 15.3 times smaller than the
+duce the number of degrees of freedom in the output poly-         encrypted version. More concise representation is possible
+nomial. However, for even deeper nets (10 to 20 layers)           if only a single byte is used to represent each pixel, which
+something else will be needed to aid in training.                 will bring the ratio between the encrypted size to the unen-
+                                                                  crypted size to 120. The sparsity of the data allows com-
+4.3. Message sizes                                                pressing the data even further, and indeed the compressed
+                                                                  version of this dataset has an average of only 165 bytes per
+The images consist of 28 × 28 pixels. Each pixel is en-           instance. Therefore, the encrypted version is 570× larger
+crypted as 5 polynomials (two values for t are used together      than this compressed form. In conclusion, the encrypted
+with CRT to allow for the large numbers needed). Each co-         data is one to three orders of magnitude larger than the un-
+efficient in the polynomial requires 24 bytes and therefore,      encrypted data. The exact factor depends on what is con-
+each image requires 28 × 28 × 4096 × 5 × 24 bytes or              sidered a natural representation of the data in its raw form.
+367.5 MB. However, the same message can contain 4096
+images and therefore, the per image message size is only
+91.875 KB. The response of the classifier contains only 10        5. Discussion and Conclusions
+values (for the 10 possible digits) and therefore the message     The growing interest in Machine Learning As a Service
+size is 10 × 4096 × 5 × 24 which is 4.7 MB or 1.17 KB             (MLAS), where a marketplace of predictors is available on
+per image, when 4096 images are encoded together. These           a pay-per-use basis, requires attention to the security and
+numbers are summarized in Table 3.                                privacy of this model. Not all data types are sensitive, but
+                                                          CryptoNets
+
+in many applications in medicine, finance, and marketing         tion (Zhan et al., 2005; Qi & Atallah, 2008). However,
+the relevant data on which predictions are to be made is         linear classifiers and nearest neighbor classifiers do not de-
+typically very sensitive.                                        liver the same level of accuracy that neural networks are
+                                                                 capable of delivering.
+Different methods can be used to protect the data. For ex-
+ample, the prediction provider and the data owner can en-        Aslett et al. (2015a;b) presented ways to train machine
+crypt the data while in transit using traditional cryptogra-     learning models over data encrypted with homomorphic
+phy. These methods are promising in terms of through-            encryption. They presented both simple algorithms, such
+put, latency, and accuracy, but they require some way to         as naive Bayes classifiers, as well as more involved random
+establish trust between the cloud and the data owner. The        models such as random forests and some variations of it.
+provider also needs to guarantee the safety of the keys, and     Their work differs from our work in several major aspects:
+the safety of the data against attackers while it is stored in   The models they propose work well on some tasks, but do
+the cloud.                                                       not compete well with neural networks on tasks such as rec-
+                                                                 ognizing objects in images. They also had to use a unique
+Another possible approach would be using secure Multi-
+                                                                 coding scheme, in which values are compared to threshold
+Party Computation (MPC) techniques (Goldreich, 1998).
+                                                                 before encryption, to allow the learning algorithm to work.
+Most MPC methods establish a communication protocol
+                                                                 CryptoNets imposes fewer requirements on the data owner,
+between the parties involved, such that if the parties follow
+                                                                 and allows the use of neural networks; however, it does not
+the protocol they will end with the desired results while
+                                                                 support training on the encrypted data.
+protecting the security and privacy of their respective as-
+sets (Barni et al., 2006; Orlandi et al., 2007; Piva et al.,     Training neural networks over encrypted data is still possi-
+2008; Chen & Zhong, 2009). Barni et al. (2006) presented         ble. If all the activation functions are polynomials, and the
+a method of this type, where the data owner encrypts the         loss function is polynomial too, back-propagation can be
+data and sends it to the cloud. The cloud computes an inner      computed using additions and multiplications only. How-
+product between the data and the weights of the first layer,     ever, there are several challenges in doing so. Computa-
+and sends the result to the data owner. The data owner de-       tional complexity is a major challenge. Even when trained
+crypts, applies the non-linear transformation, and encrypts      on plaintext, neural networks are slow to train. Today,
+the result before sending it back to the cloud. The cloud        much of the effort in the field of machine learning goes
+can apply the second layer and send the output back to           towards accelerating this training process by using sophis-
+the data owner. The process continues until all the lay-         ticated hardware such as GPUs. However, adding homo-
+ers have been computed. In Orlandi et al. (2007) they also       morphic encryption to the process will make the process
+noted that this procedure leaks much of the information of       at least an order of magnitude slower. It is more likely
+the weights of the network to the data owner, and added a        that the slowdown would be much worse since the level
+method to obscure the weights. The main difference be-           of the computed polynomial is proportional to the number
+tween these methods and the method we describe in this           of back-propagation steps made, and therefore using lev-
+paper is that in our method the data owner does not have         eled homomorphic encryption does not seem to be feasible.
+to maintain a constant presence while the neural network         Another challenging aspect in the presence of encryption is
+is evaluated. For example, the data owner can encrypt the        the lack of ability of a data scientist to inspect the data and
+data and store it in the cloud in its encrypted form. The        the trained models, to correct mislabeled items, to add fea-
+cloud can apply one or several networks to the data while        tures, and to tune the network.
+the data owner is offline. Whenever the data owner wishes
+                                                                 The main contribution of this work is a method that en-
+to read the predictions, it can retrieve the information and
+                                                                 joys the accuracy of neural networks with the simplicity
+decrypt it, allowing the data owner to maintain a much sim-
+                                                                 of use of homomorphic encryption. By combining tech-
+pler infrastructure. Moreover, since intermediate results are
+                                                                 niques from cryptography, machine learning, and engineer-
+not shared, less information is leaked from the cloud to the
+                                                                 ing, we were able to create a setup in which both accuracy
+data owner.
+                                                                 and security are achieved, while maintaining a high level
+Graepel et al. (2013) suggested the use of homomorphic en-       of throughput. This work leaves much room for improve-
+cryption for machine learning algorithms. They focused on        ment, however. For example, the throughput and latency
+finding algorithms where the training can be done over en-       can be significantly improved by using GPUs and FPGAs
+crypted data, and therefore were forced to use learning al-      to accelerate the computation. Another direction for further
+gorithms in which the training algorithm can be expressed        progress would be finding more efficient encoding schemes
+as a low degree polynomial. As a result, most of the al-         that allow for smaller parameters, and hence faster homo-
+gorithms proposed were of the linear discrimination type.        morphic computation.
+Several authors also looked at nearest neighbor classifica-
+                                                        CryptoNets
+
+References                                                     Gentry, Craig, Halevi, Shai, and Smart, Nigel P. Ho-
+                                                                 momorphic evaluation of the aes circuit. In Advances
+Agrawal, Rakesh and Srikant, Ramakrishnan. Privacy-
+                                                                 in Cryptology–CRYPTO 2012, pp. 850–867. Springer,
+  preserving data mining. In ACM Sigmod Record, pp.
+                                                                 2012b.
+  439–450. ACM, 2000.
+                                                               Goldreich, Oded.      Secure multi-party computation.
+Aslett, Louis JM, Esperança, Pedro M, and Holmes,
+                                                                 Manuscript. Preliminary version, 1998.
+  Chris C.     Encrypted statistical machine learning:
+  new privacy preserving methods.       arXiv preprint         Graepel, Thore, Lauter, Kristin, and Naehrig, Michael. Ml
+  arXiv:1508.06845, 2015a.                                       confidential: Machine learning on encrypted data. In
+Aslett, Louis JM, Esperança, Pedro M, and Holmes,               Information Security and Cryptology–ICISC 2012, pp.
+  Chris C. A review of homomorphic encryption and                1–21. Springer, 2013.
+  software tools for encrypted statistical machine learning.   Krizhevsky, Alex, Sutskever, Ilya, and Hinton, Geoffrey E.
+  arXiv preprint arXiv:1508.06574, 2015b.                        Imagenet classification with deep convolutional neural
+Barni, Mauro, Orlandi, Claudio, and Piva, Alessandro.            networks. In Advances in neural information processing
+  A privacy-preserving protocol for neural-network-based         systems, pp. 1097–1105, 2012.
+  computation. In Proceedings of the 8th workshop on           LeCun, Yan, Cortes, Corinna, and Burges, Christo-
+  Multimedia and security, pp. 146–151. ACM, 2006.               pher J.C. The mnist database of handwritten digits.
+Bos, Joppe W, Lauter, Kristin, Loftus, Jake, and Naehrig,        http://yann.lecun.com/exdb/mnist/, 1998.
+  Michael. Improved security for a ring-based fully ho-        Livni, Roi, Shalev-Shwartz, Shai, and Shamir, Ohad. On
+  momorphic encryption scheme. In Cryptography and               the computational efficiency of training neural networks.
+  Coding, pp. 45–64. Springer, 2013.                             In Advances in Neural Information Processing Systems,
+Brakerski, Zvika and Vaikuntanathan, Vinod. Efficient            pp. 855–863, 2014.
+  fully homomorphic encryption from (standard. In LWE,         López-Alt, Adriana, Tromer, Eran, and Vaikuntanathan,
+  FOCS 2011, IEEE 52nd Annual Symposium on Founda-                Vinod. On-the-fly multiparty computation on the cloud
+  tions of Computer Science, IEEE. Citeseer, 2011.                via multikey fully homomorphic encryption. In Proceed-
+Chen, Tingting and Zhong, Sheng. Privacy-preserving               ings of the forty-fourth annual ACM symposium on The-
+  backpropagation neural network learning. Neural Net-            ory of computing, pp. 1219–1234. ACM, 2012.
+  works, IEEE Transactions on, 20(10):1554–1564, 2009.
+                                                               Naehrig, Michael, Lauter, Kristin, and Vaikuntanathan,
+Dahl, George E, Yu, Dong, Deng, Li, and Acero, Alex.             Vinod. Can homomorphic encryption be practical? In
+  Context-dependent pre-trained deep neural networks for         Proceedings of the 3rd ACM workshop on Cloud com-
+  large-vocabulary speech recognition. Audio, Speech, and        puting security workshop, pp. 113–124. ACM, 2011.
+  Language Processing, IEEE Transactions on, 20(1):30–
+                                                               Orlandi, Claudio, Piva, Alessandro, and Barni, Mauro.
+  42, 2012.
+                                                                 Oblivious neural network computing via homomorphic
+Dowlin, Nathan, Gilad-Bachrach, Ran, Laine, Kim,                 encryption. EURASIP Journal on Information Security,
+  Lauter, Kristin, Naehrig, Michael, and Wernsing,               2007:18, 2007.
+  John.    Manual for using homomorphic encryption
+                                                               Piva, Alessandro, Orlandi, Claudio, Caini, M, Bianchi,
+  for bioinformatics. Technical report, Microsoft Re-
+                                                                 Tiziano, and Barni, Mauro. Enhancing privacy in re-
+  search, 2015. http://research.microsoft.
+                                                                 mote data classification. In Proceedings of The Ifip Tc
+  com/apps/pubs/default.aspx?id=258435.
+                                                                 11 23rd International Information Security Conference,
+Dwork, Cynthia. Differential privacy. In Encyclopedia            pp. 33–46. Springer, 2008.
+ of Cryptography and Security, pp. 338–340. Springer,
+                                                               Qi, Yinian and Atallah, Mikhail J. Efficient privacy-
+ 2011.
+                                                                 preserving k-nearest neighbor search. In Distributed
+Gentry, Craig. Fully homomorphic encryption using ideal          Computing Systems, 2008. ICDCS’08. The 28th Inter-
+  lattices. In STOC, volume 9, pp. 169–178, 2009.                national Conference on, pp. 311–319. IEEE, 2008.
+
+Gentry, Craig, Halevi, Shai, and Smart, Nigel P. Fully ho-     Rivest, Ronald L, Adleman, Len, and Dertouzos,
+  momorphic encryption with polylog overhead. In Ad-             Michael L. On data banks and privacy homomor-
+  vances in Cryptology–EUROCRYPT 2012, pp. 465–482.              phisms. Foundations of secure computation, 4(11):169–
+  Springer, 2012a.                                               180, 1978.
+                                                        CryptoNets
+
+Stehlé, Damien and Steinfeld, Ron. Making ntru as secure
+  as worst-case problems over ideal lattices. In Advances
+  in Cryptology–EUROCRYPT 2011, pp. 27–47. Springer,
+  2011.
+Xie, Pengtao, Bilenko, Misha, Finley, Tom, Gilad-
+  Bachrach, Ran, Lauter, Kristin, and Naehrig, Michael.
+  Crypto-nets: Neural networks over encrypted data. arXiv
+  preprint arXiv:1412.6181, 2014.
+Zhan, Justin Zhijun, Chang, LiWu, and Matwin, Stan. Pri-
+  vacy preserving k-nearest neighbor classification. IJ Net-
+  work Security, 1(1):46–51, 2005.
+

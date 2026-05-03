@@ -1,0 +1,1861 @@
+                                                                                                                                                                        2024 IEEE Symposium on Security and Privacy (SP)
+
+
+
+
+                                                                                                                                     BOLT: Privacy-Preserving, Accurate and Efficient Inference for Transformers
+
+                                                                                                                                                     Qi Pang† , Jinhao Zhu‡ , Helen Möllering⋄ , Wenting Zheng† , Thomas Schneider⋄
+                                                                                                                                                          †
+                                                                                                                                                       Carnegie Mellon University ‡ UC Berkeley ⋄ Technical University of Darmstadt
+                                                                                                                                        {qipang, wenting}@cmu.edu, jinhao.zhu@berkeley.edu, {moellering, schneider}@encrypto.cs.tu-darmstadt.de
+2024 IEEE Symposium on Security and Privacy (SP) | 979-8-3503-3130-1/24/$31.00 ©2024 IEEE | DOI: 10.1109/SP54263.2024.00130
+
+
+
+
+                                                                                                                                Abstract—The advent of transformers has brought about sig-              concerns for both parties: either the user has to upload their
+                                                                                                                                nificant advancements in traditional machine learning tasks.            private data to the company’s servers, or the server needs
+                                                                                                                                However, their pervasive deployment has raised concerns about           to store its proprietary model on the user’s edge device.
+                                                                                                                                the potential leakage of sensitive information during infer-            ChatGPT operates in the former setting. As a result, serious
+                                                                                                                                ence. Existing approaches using secure multiparty computation           user data privacy concerns have been raised, which even led
+                                                                                                                                (MPC) face limitations when applied to transformers due to              to a temporary ban of ChatGPT in Italy [47], [55], [45].
+                                                                                                                                the extensive model size and resource-intensive matrix-matrix                While privacy rights may appear to conflict with effec-
+                                                                                                                                multiplications. In this paper, we present BOLT, a privacy-             tive data analytics, we can employ a cryptographic method
+                                                                                                                                preserving inference framework for transformer models that              known as secure multi-party computation (MPC) to safe-
+                                                                                                                                supports efficient matrix multiplications and nonlinear com-            guard both data and model privacy without compromis-
+                                                                                                                                putations. Combined with our novel machine learning opti-               ing functionality. At a high level, MPC allows n parties
+                                                                                                                                mizations, BOLT reduces the communication cost by 10.91×.               p1 , . . . , pn with corresponding inputs x1 , . . . , xn to learn
+                                                                                                                                Our evaluation on diverse datasets demonstrates that BOLT               the output of a public function f (x1 , . . . , xn ) without re-
+                                                                                                                                maintains comparable accuracy to floating-point models and              vealing each party’s xi to other parties. Each party’s data is
+                                                                                                                                achieves 4.8-9.5× faster inference across various network set-          effectively “encrypted” throughout the entire computation.
+                                                                                                                                tings compared to the state-of-the-art system.                          At the end of the computation, each party only learns the
+                                                                                                                                                                                                        final result without gaining any additional information.
+                                                                                                                                Index Terms—secure multi-party computation, homomorphic                      While MPC can be utilized for generic computation, it
+                                                                                                                                encryption, secure machine learning inference, transformer              often leads to substantial computation and communication
+                                                                                                                                                                                                        costs due to the expensive cryptographic primitives. Recent
+                                                                                                                                                                                                        studies have concentrated on developing optimized solutions
+                                                                                                                                1. Introduction                                                         tailored to specific workloads for the efficient private eval-
+                                                                                                                                                                                                        uation and training of convolutional neural networks [49],
+                                                                                                                                    Transformer models have recently emerged as a game-                 [50], [25], [41], [60], [4]. However, securing transformers
+                                                                                                                                changing technology. ChatGPT [1] has made the power of                  is especially challenging due to multiple reasons:
+                                                                                                                                transformer-based language models accessible for everyone.
+                                                                                                                                Compared to traditional supervised, task-specific learning,             1) Transformers are considerably larger than convolutional
+                                                                                                                                large transformer models are trained on huge quantities of                 neural networks, containing hundreds of millions to bil-
+                                                                                                                                unlabeled textual data and are directly useful for a wide va-              lions of parameters [17], [52], [56], [57].
+                                                                                                                                riety of applications such as translation, content generation,          2) Prior works on private neural networks propose opti-
+                                                                                                                                or question answering. For example, they can be used in                    mized protocols for private matrix-vector multiplications,
+                                                                                                                                the health care domain to identify patterns and risk factors               but transformers necessitate large-scale matrix-matrix
+                                                                                                                                by analyzing electronic health records, medical literature,                multiplications.
+                                                                                                                                and clinical notes which can significantly advance diagnosis,           3) Securely evaluating hundreds of thousands of inputs
+                                                                                                                                treatment, and drug discovery [66], [5], [62].                             for complex non-linear functions in transformers is ex-
+                                                                                                                                    Transformer is a general neural network architecture that              tremely expensive.
+                                                                                                                                is characterized by the usage of attention mechanisms [71].                 Therefore, new protocols need to be developed for se-
+                                                                                                                                Attention mechanisms effectively capture relationships be-              curing transformer inference. To the best of our knowledge,
+                                                                                                                                tween tokens to model contextual information and capture                Iron [28] is the state-of-the-art system that investigates how
+                                                                                                                                long-range dependencies in the input token sequence.                    to fully preserve data privacy during standard transformer
+                                                                                                                                    However, such powerful models do not come without                   inference. However, it falls short in offering a practical
+                                                                                                                                risks, especially in terms of privacy [46], [69]. ChatGPT               solution due to its significant performance overhead. For
+                                                                                                                                is an example of Machine Learning as a Service (MLaaS),                 instance, our implementation of Iron requires 280.99 GB
+                                                                                                                                where a server (OpenAI) hosts a proprietary model, and                  communication for an end-to-end inference, taking 216 min-
+                                                                                                                                users input their data into the model and receive a prediction          utes for an end-to-end inference on the BERT-base model
+                                                                                                                                result in return. However, the MLaaS setting raises privacy             (110 M parameters [17]) under one of the WAN settings
+
+
+                                                                                                                              © 2024, Qi Pang. Under license to IEEE.                            4753
+                                                                                                                              DOI 10.1109/SP54263.2024.00130
+(100 Mbps, 80 ms). As systems and hardware continue to                      respectively, along with an optimized Softmax procedure.
+evolve [63], [64], [36], [37], [68], we believe it is essential             Given that even four or five multiplications can be ex-
+to reduce network communication since computation can be                    pensive considering input dimensions (e.g., 128 × 3072
+accelerated and parallelized. The linear and non-linear pro-                for each GELU function in 12 layers of BERT-base), we
+tocols along with machine learning optimizations in BOLT                    present an additional optimization based on [51] that is
+significantly reduce communication while maintaining ef-                    also of independent interest for the secure computation
+ficient computations, marking substantial progress towards                  community: a polynomial pre-processing technique that
+practical privacy-preserving transformer inference.                         allows reducing the number of multiplications for the
+Our contributions. We propose BOLT, a novel privacy-                        evaluation of polynomials of order n (Horner’s scheme)
+preserving inference system for transformer models, which                   to approximately ⌈ n2 ⌉ when the polynomial’s coefficients
+addresses the aforementioned challenges by reducing the                     are known in advance.
+communication costs, and thus improves the end-to-end run-               • Machine learning optimizations. We further propose
+
+time. BOLT guarantees the confidentiality of the client’s                   machine learning optimizations to enhance efficiency and
+input data and also protects the service provider’s intellec-               accuracy. Specifically, we develop oblivious word elimina-
+tual property – its model. BOLT integrates cryptographic                    tion using attention scores. These scores, which measure
+improvements, accurate and efficient approximations for                     the correlations between input tokens, serve as a met-
+non-linear functions, and algorithmic enhancements from                     ric to rank token importance. We then apply oblivious
+the perspective of machine learning.                                        bitonic sort to discard less contributive tokens and signif-
+                                                                            icantly reduce input size. Additionally, we utilize secure
+• Communication-optimized and computation-efficient                         computation-aware fine-tuning to bridge the gap between
+  linear operations. The first challenge we face in BOLT                    secure and floating-point computations to further improve
+  is that transformers have much more complicated linear                    accuracy.
+  operations that have high multiplicative depth. Many past                   Combining all our optimizations, BOLT consumes
+  secure inference protocols utilize homomorphic encryp-                 10.91× less communication and has 4.8× to 9.5× bet-
+  tion (HE) only for plaintext-ciphertext matrix-vector mul-             ter total run-time than Iron in different network settings.
+  tiplications, which are present in convolutional neural net-           We consider this a big step towards practical privacy-
+  works. Iron tackles this by using a mix of HE and MPC,                 preserving transformer inference. We have open-sourced our
+  but the techniques result in high communication costs. In-             code at https://github.com/Clive2312/BOLT.
+  stead, BOLT’s cryptographic improvements only make use
+  of HE to efficiently save on communication costs. We de-               2. Background
+  velop compute-efficient, low-depth algorithms in HE. Our
+  first insight is an alternative interpretation of ciphertext-
+  plaintext matrix-matrix multiplication that results in an              2.1. Notation
+  optimized packing of ciphertexts. Prior works [35], [28]
+  waste a part of the communication as they leave some                        We denote by [n] the set {0, 1, . . . , n − 1}, where n ∈
+  ciphertext slots “empty”. However, merely changing pack-               N. We use lower case bold letter such as x to represent
+  ing is not enough since it still requires many computation-            vectors and xi to indicate the i-th element of the vector x.
+  ally expensive rotations for the matrix multiplications in             Correspondingly, X ∈ Ra×b is a matrix of a × b real values
+  transformer models. We propose a second optimization                   and Xi,j is the element indexed by row i and column j of
+  to address this issue: we adapt the baby-step giant-step               the matrix X. ⟨u, v⟩ is the inner product and u ⊗ v is the
+  strategy [27], [7] to our matrix multiplication algorithm              outer product. ⌈x⌉ is the ceiling operation on x, ⌊x⌋ is the
+  in order to reduce the number of input ciphertext rotations,           floor operation, and ⌈x⌋ is rounding. A multiplexer gate is
+  and instead and run the rotations later on partial sums of             denoted by a?b : c and indicates if a is true then return b and
+  the intermediate result. This reduces the number of cipher-            otherwise return c. x >> i and x << i indicate right and
+  text rotations between 2.33× to 9.33× for the BERT-base                left shifts of a value x by i ∈ N positions in binary. λ is the
+  model. Finally, we design ciphertext-ciphertext matrix                 computational security parameter. A box, e.g., A , indicates
+  multiplication algorithms that are efficient and have low              private values, i.e., either encrypted or secret shared.
+  multiplicative depth in HE.
+• Accurate and efficient non-linear operations. An accu-                 2.2. Transformers
+  rate and efficient protocol for non-linear operations is also
+  crucial. Iron shows that more than 75% of their total run-                 In this paper, we focus on the BERT (Bidirectional
+  time is attributed to non-linear layers, due to the complex            Encoder Representations from Transformers [17]), a widely
+  computations involved when transferring plaintext non-                 used transformer model. We present the BERT architecture
+  linear formulas directly into MPC protocols. These in-                 in Fig. 1.
+  clude trigonometric and exponential functions which are                Input Format. BERT receives user input as text, which is
+  on their own already very expensive in MPC [59]. To                    tokenized using vocabulary and position information before
+  address this, we introduce two highly precise polynomial               being fed into the transformer model. Each token in the
+  approximations for GELU and Tanh of order 4 and 5                      input sentence maps to a high-dimensional vector. Unlike
+
+
+                                                                  4754
+            Tokenized Input                                                                              Pooler and classifier. For downstream tasks, the output of
+                                                                                                         the L encoder layers is fed into a pooler and classifier layer,
+     MatMul
+      MatMul
+       MatMul
+                 MatMul
+                  MatMul
+                   MatMul
+                                MatMul
+                                 MatMul
+                                 MatMul
+                                                                                                         and Tanh is usually used as the activation function. The first
+                                                   Add & Norm                Pooling
+                                                                                                         token of the encoding result (corresponding to the first row
+                                                     MatMul
+                                                                                                         of the result matrix) is a special token that is being utilized
+       QQ              KK         VV
+         Q              K          V                                                                     as the input of pooler and classifier, which output the result.
+                                                                               Tanh
+                                                      GELU                                               Fine-tuning. BERT is an encoder model trained on a large
+            MatMul
+             MatMul
+              MatMul                                 MatMul
+                                                                                                         public dataset. To enhance its performance on downstream
+                                                                           Classification                tasks, it requires fine-tuning on smaller datasets, which may
+            Softmax
+             Softmax                               Add & Norm                                            be private or contain sensitive information. Fine-tuning is
+              Softmax
+
+                                                                                                         more cost-effective than training and typically results in
+                  MatMul
+                   MatMul              Concat        MatMul                   Output
+      ×12
+                       MatMul                                                                            good accuracy after several epochs.
+
+              Linear 1          Softmax × V          Linear 2   Linear 3         Linear 4
+                                                                                                         2.3. Cryptographic primitives
+      Figure 1: BERT [17]’s high-level architecture.
+                                                                                                         Secure multi-party computation (MPC). MPC techniques
+                                                                                                         allow a set of P mutually distrusting parties P1 , · · · , PP
+traditional neural networks like CNNs, the transformer’s                                                 to collaboratively evaluate an arbitrary function f on their
+input is a 2D matrix rather than a 1D vector. Specifically,                                              respective private inputs x1 , . . . , xP without revealing any
+for an input X ∈ Rm×d , m represents the length of tokens                                                information about the inputs except from what can be in-
+and d denotes the model dimension.                                                                       ferred from the output [74].
+Encoder. An encoder component starts with a multi-head at-
+                                                                                                             The MPC framework [11] that we use to instantiate
+tention block followed by two normalization operations with
+                                                                                                         our protocols in §7 implements 2-out-of-2 additive secret
+feed-forward layers in between. Attention layers [71] cap-
+                                                                                                         sharing with two parties P1 and P2 . Here, each Pi (where
+ture context and dependencies among words in a sentence.
+                                                                                                         i ∈ {1, 2}) holds a share ⟨x⟩i of a secret x ∈ Z2ℓ such that
+Concretely, an input X ∈ Rm×d is fed into L “headers”.
+                                                                                                         x = ⟨x⟩1 + ⟨x⟩2 mod 2ℓ , where ℓ is the bit length. While
+Each header linearly projects the input using query, key, and
+                                                     ′                                                   additions can be executed locally “for free”, multiplications
+value parameter matrices WhQ , WhK , WhV ∈ Rd×d as well                                                  require communications between the parties and are realized
+                           Q     K    V     d′
+as the respective biases Bh , Bh , Bh ∈ R , where h ∈ [H],                                               using oblivious transfer (OT).
+d′ = d/H , and H is the number of heads in each multi-head                                               Homomorphic encryption. Homomorphic encryption (HE)
+attention layer.
+              ′
+                 The result of the projections are Qh , Kh and                                           is another important cryptographic primitive for secure com-
+Vh ∈ Rm×d . In BERT-base, m = 128, d = 768, H =′ 12                                                      putation that allows a party to execute computations on
+and L = 12. Next, the attention score Atth ∈ Rm×d is                                                     another party’s encrypted data without decryption. Recently,
+computed before being fed into a feed-forward network:                                                   there has been a lot of exciting developments in lattice-based
+                                                 Qh × KTh                                                HE schemes [8], [21], [24], [9], [13] because of their relative
+             Atth = Softmax(                       √      ) × Vh ,                          (1)          efficiency compared to previous designs. Lattice-based HE
+                                                     d                                                   schemes were originally designed for leveled homomorphic
+where the Softmax function is defined as:                                                                encryption, which can support computation that have limited
+                                                 eXi,j
+                                                                                                         multiplicative depth. The reason for those limitations is that
+      Softmax(X)i,j = P                                 Xi,j
+                                                             , i ∈ [m], j ∈ [d]             (2)          the cryptographic hardness assumption leads to noise in
+                                                j∈[d] e                                                  a ciphertext, and the noise increases with each operation,
+Then the attention results are concatenated as Att =                                                     such that, at some point decryption fails. Thus, controlling
+Concat({Atth }h∈[H] ), where Att ∈ Rm×d . Further, the                                                   the noise growth is crucial for ensuring the correctness
+attention value is normalized across the layer:                                                          of the computation. In this paper, we leverage leveled
+                                                                                                         HE (specifically, BFV [9]) instead of fully homomorphic
+                                                   γ j (Xi,j − µi )                                      encryption [23] (FHE), since FHE requires bootstrapping,
+         LayerNorm(X)i,j =                                          + βj ,                  (3)
+                                                         σi                                              which is still prohibitively expensive. Key parameters of HE
+                                                                                                         schemes typically consist of dimension of the polynomial
+where i ∈ [m], j ∈ [d], µ ∈ Rm is the mean, and σ ∈ Rm                                                   ring n, plaintext modulus p, and ciphertext modulus q .
+is the variance. γ ∈ Rd and β ∈ Rd are model parameters.                                                 Trade-off between MPC and HE. While MPC and HE
+    Transformers employ the GELU activation function be-                                                 both enable secure computation, there is no clear “better”
+tween the feed-forward layers due to its favorable curvature                                             technique. Instead, the choice has to be made based on mul-
+and non-monotonicity properties [30], [31]:                                                              tiple factors depending on the requirements of the applica-
+                                            1               x                                            tion and setup. HE typically has lower communication cost
+                  GELU(x) =                   x · (1 + erf( √ )),                           (4)          and higher computational overhead than MPC, especially
+                                            2                2
+                                                                              R x −t2                    for complex non-linear computations. In contrast, MPC
+where the Gauss error function is erf(x) = √2π                                 0
+                                                                                 e dt.                   can be based mostly on efficient symmetric cryptographic
+
+
+                                                                                                  4755
+primitives to evaluate the non-linear functions, but requires                 Native computation in MPC and HE operates over
+expensive communication between computing parties.                       rings, and therefore floating point arithmetic is very expen-
+                                                                         sive [41], [58], [16]. However, the parameters of transformer
+                                                                         models, as well as all intermediate values in a transformer
+3. System Overview                                                       inference, are typically represented in 32-bit floating point
+                                                                         numbers. To achieve both efficiency and accuracy, we en-
+System setup. BOLT is a secure inference protocol for                    code all values in fixed-point arithmetic. Based on the bit
+transformer models, specifically BERT. The service provider              length ℓ and the length of the fractional part s ∈ Z (also
+owns and maintains a fine-tuned transformer model, pri-                  called the scale), a real value x ∈ R is converted into
+vately offering it to users whose input data is sensitive. This          its (approximated) fixed-point representation by computing
+corresponds to a secure two-party computation (2PC, §2.3)                y = ⌊x · 2s ⌋ mod 2ℓ . Hence, decoding is defined as y/2s .
+scenario. BOLT allows the client and server to engage in a               All the operations of MPC are performed over the ring Z2ℓ ,
+tailored 2PC protocol for privacy-preserving inference.                  and all the operations of HE are over the ring Zp . We utilize
+Threat model. We assume that the two mutually distrusting                the conversions between MPC and HE; see §7.1.2.
+parties, server P1 and client P2 , are semi-honest (a.k.a.                    While the techniques of BOLT are applicable to all
+honest-but-curious). They will correctly follow the proto-               transformers, we use BERT [17] as a running example in
+col specifications while attempting to passively gain addi-              the following for the sake of simplicity of presentation.
+tional knowledge that cannot be inferred from the output.
+Semi-honest security is a common assumption for privacy-
+preserving machine learning (PPML). It is used in related                4. Efficient MatMul in BOLT
+works on private neural network inference [35], [49], [32],
+[44], [28]. There are two main reasons for such an assump-                    A key characteristic of the transformer architecture in
+tion: 1) the parties have to trust each other to some extent             BERT is the attention mechanism §2.2, which consists of
+since the server is providing the inference service; 2) semi-            large matrix multiplications. Similar to prior works [35],
+honest performance is much more practical.                               [49], [32], [28], we use HE to securely compute them as HE
+     BOLT assumes that the model architecture is known to                is relatively efficient for linear operations and allows us to
+both parties. As is standard in all secure computation pro-              save on communication bandwidth and roundtrips compared
+tocols, we also do not aim to hide leakage of the inference              to MPC. Given the trends in systems and hardware, we
+result. Note that this is inherent to the ideal functionality            believe that it is more important to save on network commu-
+of those protocols because the result needs to be useful and             nication as computations can be accelerated and parallelized.
+be revealed to someone, often both of the parties that are               For example, there are several recent exciting works on
+involved in the original computation. There are orthogonal               hardware acceleration of FHE [63], [64], [36], [37], [68]
+techniques like differential privacy [20] that can be com-               that achieve significant run-time savings.
+bined with BOLT to alleviate such information leakage.                        The challenges that we face in designing our techniques
+     In a typical BERT use case, the service provider will               are two-fold. First, BERT has matrix-matrix multiplications
+first fine-tune the model on their private datasets. Consid-             instead of matrix-vector multiplications. Second, the linear
+ering that the original BERT model is trained on a large                 computation also has increased multiplicative depth leading
+public dataset, its well-trained tokenization can effectively            to tricky ciphertext-ciphertext matrix multiplication. We note
+map sentences to a BERT-friendly space, we freeze the                    that our approach of using HE for computing all building
+tokenization during private fine-tuning. That is, the sentence           blocks is rather unusual – prior works [35], [49], [32], [34]
+tokenization process is public and contains no sensitive                 only have plaintext-ciphertext matrix-vector multiplication
+information. Furthermore, both parties know the parameter                or only supports CNN models, and Iron [28] also uses MPC
+scales and dimensions of each layer.                                     for ciphertext-ciphertext matrix multiplications.
+System architecture. BOLT is a hybrid protocol that uses                      In this section, we propose an efficient protocol for
+both HE and MPC. In §4, we discuss our novel efficient                   linear operations. Unlike previous protocols in Iron which
+protocols for matrix multiplication using HE. §5 discusses               waste a lot of ciphertext slots, our protocol has compact
+our techniques for approximating and optimizing non-linear               ciphertext packing and significantly reduces communication
+functions. Since the non-linear functions are very expensive             (§ 4.1.1). We optimize the computation by minimizing
+to express in HE, we use secret sharing-based MPC to                     the multiplicative depth and number of rotations (§ 4.1.2).
+implement these functionalities. Thus, we adopt a hybrid                 Additionally, we support ciphertext-ciphertext matrix mul-
+approach, and support conversions between HE and MPC.                    tiplication, which is integral in the attention mechanism of
+This also allows us to automatically reset the HE noise                  transformers (§ 4.1.3).
+without using expensive bootstrapping operations.
+     BOLT primarily focuses on optimizing the overall exe-               4.1. Building blocks
+cution cost instead of just the online cost. We consider the
+overall protocol execution crucial, as merely optimizing for             4.1.1. Ciphertext-Plaintext MatMul with Compact Pack-
+online cost can add additional overall cost and have extra               ing. We start with matrix-matrix multiplications that mul-
+memory/storage overheads [22].                                           tiply a ciphertext matrix with a plaintext matrix. We will
+
+
+                                                                  4756
+                                                                                                                                    BOLT              BOLT
+                                                                                                  Gazelle∗        Iron            w/o BSGS           w/ BSGS
+
+                                                   C1 = A1 × B1 + A2 × B2
+                                                                                                  O(md1 )      O(md1 d2 /n)        O(d1 )             O(d1 )
+                a11 a12                                                               #Mult.       98304          768                768            q 768
+                a21 a22                          a11b11 + a12b21     C[0,0]                       O(md1 )          0               O(d1 )         O( m2 d21 d2 /n2 )
+
+                                                 a21b11 + a22b21
+                                                                                      #Rot.        96768         p 0                756                 43
+                a31 a32                                              C[1,0]                      O(md1 /d2 )   O( md1 d2 /n)   O(m(d1 + d2 )/n)   O(m(d1 + d2 )/n)
+     A    =     a41 a42                          a31b11 + a32b21     C[2,0]           #Ct.          1664           56                13                 13
+
+                                                 a41b11 + a42b21
+                                                                                      ∗
+                                                                                          Assume n > d1 > d2 for Gazelle.
+                                                                     C[3,0]
+                b11 b12 b13 b14                  a11b12 + a12b22     C[0,1]          TABLE 1: Comparison with Gazelle and Iron. The concrete
+     B    =     b21 b22 b23 b24                  a21b12 + a22b22     C[1,1]          numbers are based on the BERT-base Linear 1 dimensions
+                                         1
+                                             3
+                                                 a31b12 + a32b22     C[2,1]          with m = 128, d1 = 768, d2 = 64, n = 8192.
+                                                 a41b12 + a42b22
+                                         2
+                                                                     C[3,1]
+     A1   A2    B1    B2     B3    B4
+                                                   C2 = A1 × B3 + A2 × B4
+    a11   a12   b11   b21    b13   b23                                               additional rotations, masking, and additions to group the
+                                                 a11b13 + a12b23     C[0,2]
+    a21   a22   b11   b21    b13   b23                                               right ciphertexts together. Rotations are expensive in HE [6],
+                                                 a21b13 + a22b23     C[1,2]
+                                                                                     and masking will increase multiplicative depth. Instead, we
+    a31   a32   b11   b21    b13   b23           a31b11 + a32b23     C[2,2]
+                                                                                     adapt Gazelle’s diagonal packing of weight matrix B and
+    a41   a42   b11   b21    b13   b23           a41b13 + a42b23     C[3,2]
+                                                                                     repeat each value bij #rows of A times. The number of
+    a12   a11   b22   b12    b24   b14           a11b14 + a12b24     C[0,3]
+    a22   a21   b22   b12    b24   b14           a21b14 + a22b24     C[1,3]
+                                                                                     rows of the left-hand matrix A , namely m, allows us to
+                                                 a31b14 + a32b24     C[2,3]
+                                                                                     compactly pack the columns in the input ciphertexts. (As
+    a32   a31   b22   b12    b24   b14                                               the input token length m for BERT is usually 64, 128, or
+                                                 a41b14 + a42b24     C[3,3]
+    a42   a41   b22   b1,2   b24   b14                                               256, and the polynomial dimensions n for HE is a power
+                                                                                     of 2 such as 2048, 4096, 8192, etc.) Note that the output
+Figure 2: BOLT’s compact packing for ciphertext-plaintext                            ciphertext automatically encodes matrix C in the form of
+matrix-matrix multiplication.                                                        columns with the same m as A , i.e., we get a perfectly
+                                                                                     compact output packing. In Tab. 1, we present the detailed
+                                                                                     comparison with Gazelle and Iron regarding the number of
+use the example A × B = C , where A ∈ Zpm×d1 , B ∈
+                                                                                     each operation and the number of ciphertexts both asymp-
+Zdp1 ×d2 , in the remaining parts of this subsection for illus-                      totically and concretely based on the dimensions of BERT-
+tration. A and C are matrices in ciphertexts.                                        base Linear 1 in Fig. 1. We show that BOLT uses much
+     Current state-of-the-art PPML works that use HE for                             fewer multiplications compared to Gazelle as the packing is
+matrix multiplication are Gazelle [35] and Iron [28]. Both                           compact and all the slots in the ciphertexts are utilized. Also,
+works compute matrix multiplication via inner dot products.                          Gazelle and Iron have higher communication overhead as
+When it comes to matrix multiplications, both Gazelle and                            they need to pack more ciphertexts. Even though Iron does
+Iron has sparse packing in the resulting ciphertext. The                             not need rotations, the communication overhead becomes
+wasted slots in the ciphertext will induce additional commu-                         significant when the matrix size is large. As we will show
+nication overhead and also introduce more multiplications                            in §7, BOLT consistently outperforms Iron under different
+in HE for Gazelle. We present the number of required HE                              network settings up to a factor of 45.7×. In the following,
+operations in Tab. 1. Interested readers can refer to App. A                         we will show how to reduce the number of rotations using
+for more detailed explanation of their methods.                                      a baby-step giant-step (BSGS) strategy.
+     Fig. 2 depicts our improved packing technique, and we
+make it possible to fully utilize all ciphertext slots. It relies
+                                                                                     4.1.2. Reducing Rotations: A Baby-step Giant-step
+on an alternative interpretation of matrix multiplication that
+                                                                                     Strategy. As multiple columns fit into one ciphertext and we
+does not explicitly depend on inner dot products. Let’s
+                                                                                     would like to fully utilize all ciphertext slots, multiple partial
+assume we have matrices A , B, andC as shown        in Fig. 2.                     results will end up in the same ciphertext. Thus, rotations are
+                                           |      |                                  not avoidable to sum those up. In this section, we introduce
+     If we denote the matrix A as  A1           A2 , where                         an optimized protocol that reduces the required number of
+                                           |      |                                  rotations in ciphertext-plaintext matrix multiplications.
+ A1 , A2 are the columns, then we can clearly see that                                   We adapt the baby-step giant-step (BSGS) strategy [27],
+                                                                                     [7] to our matrix multiplication problem to significantly
+each column of C is a linear combination of the columns
+                                                                                     reduce the number of rotations. The BSGS strategy was
+of A , and the scaling factors are scalars from B.                                   originally used for matrix-vector multiplication in HE, but
+    To compute such linear combinations, we pack the ci-                             we extend this idea to our matrix-matrix multiplication set-
+phertext matrix A in a column-wise fashion as shown                                  ting. We pack the ciphertext matrix in column as described
+in Fig. 2. However, if we simply multiply each column                                in §4.1.1, and we rotate at the column level instead of the
+of A by the column values of B, we will need to sum                                  element level. Thus, the BSGS cannot be directly applied in
+the partial products from different columns together. This                           the same way as matrix-vector scenarios. Also, in matrix-
+will result either in underutilized ciphertexts, or require                          matrix multiplications, we can also do additional partial
+
+
+                                                                              4757
+                                                     ×
+
+                                  CTA1                                    PTB1             +                  C1
+                                                     ×
+         A                     Rot(CTA1,1)                                PTB2                                C2
+                                                     ×
+                                  CTA1                          Plaintext_Rot(PTB3,2)      +                  C3
+                                                     ×
+
+         BT                    Rot(CTA1,1)                      Plaintext_Rot(PTB4,2)                         C4
+                                                 A × B = C1 + C3 + Rot((C2 + C4),2)
+                                                                                                                        q
+                                                                                                                m2 d21 d2
+Figure 3: Baby-step giant-step (BSGS) strategy reduces the number of rotations on ciphertexts from O(d1 ) to O(    n2     ).
+                                                                       m×d1                                         d1 ×d2
+This figure shows an example of computing C = A × B, where A ∈ Zp            is encrypted column-wise, and B ∈ Zp
+is in plaintext. In this example, m = 4, d1 = 8, n = 16, and d2 = 4. CTA1 is a packed ciphertext of the first 4 columns,
+while Rot(CTA1 , 1) is the same ciphertext rotated to the left by 1 column. P TB1 , P TB2 , P TB3 , P TB4 , are 4 diagonals of
+matrix B. We repeat the same multiplication as shown in the figure on the right half of the matrix A , whose corresponding
+packing is CTA2 (not shown), and the lower half of the matrix B. We don’t explicitly show this step, but assume the results
+are C3 and C4 . ( C1 , C3 ) and ( C2 , C4 ) can be partially summed together without rotations. From the figure, we
+can see that BSGS allows us to only rotate the input CTA1 and CTA2 once, followed by ciphertext SIMD multiplications
+and partial summations, and finally the partially summed results are rotated.
+
+
+summations compared to matrix-vector multiplications, es-              multiplicative depth will lead to higher noise consumption
+pecially when the RHS plaintext matrix is tall and skinny.             and larger HE parameters (§2.3). Larger HE parameters, in
+    We visualize the high-level idea of the BSGS strategy              turn, result in worse performance.
+in Fig. 3. As described, the column of the private matrix A                In BERT, there are two different packings that require
+is only rotated twice, i.e., each of its ciphertext packings           ciphertext-ciphertext matrix multiplications: 1) the LHS is
+CTA1 and CTA2 is rotated once. While the other rotations               column-packed and the RHS is row-packed, and 2) the LHS
+are done on the diagonals of the plaintext matrix B. After             is diagonal-packed and the RHS is column-packed.
+summing up the partial results, only one “backwards” rota-             Column-packed matrix × row-packed matrix. We intro-
+tion is needed to sum up C . The total number of rotations             duce our solution for the first packing scenario. Consider
+on ciphertexts is therefore 3 instead of 6 in our example.              C = A × B , where A ∈ Zm×d        p
+                                                                                                              1
+                                                                                                                , B ∈ Zdp1 ×d2 , and
+    Consider A ∈ Zm×d   p
+                             1
+                               and B ∈ Zdp1 ×d2 , and C =               C ∈ Zm×d     2
+                                                                                       . A is column-packed and B is row-packed.
+                                                                                 p
+ Aq × B ∈ Zm×dp
+                   2
+                     . Using BSGS, asymptotically, we need             Since both matrices are encrypted, directly using our matrix
+     m2 d2 d
+           1 2                                                         multiplication technique from §4.1.1 will require replicating
+O(       n2    ) ciphertext rotations. Considering that using
+                                                                       the RHS matrix via repacking into many ciphertexts. For the
+our protocol in §4.1.1, we require O(d1 ) rotations. Thus,             BERT-base dimensions with input token length m = 128,
+compared to BSGS in the matrix-vector setting, there are               repacking the RHS matrix results in 128× more ciphertexts.
+additional opportunities for partial summations across the
+                                                                           Instead, we make the observation that we can use
+rows if the RHS plaintext matrix is tall and skinny (i.e., d1
+                                                                       the columns and rows directly and use the outer prod-
+is relatively large and d2 is relatively small).
+                                                                       uct interpretation of matrix multiplication. Let us again
+    We present the detailed comparison with Gazelle and
+Iron regarding the number of HE operations in Tab. 1, our              illustrate this view with matrices A and B . Given the
+technique saves about 17.58× rotations compared to BOLT                columns Ai and rows Bj , i, j ∈ [d1 ], we have that
+without BSGS on BERT-base model’s single-head attention                              P
+                                                                        A × B = i∈[d1 ] Ai ⊗ Bi . Therefore, we can similarly
+dimensions. We present more concrete savings for other                 use this insight to complete the ciphertext-ciphertext matrix
+dimensions of BERT-base in App. F.                                     multiplication without additionally expanding and repacking
+4.1.3. Ciphertext-Ciphertext MatMul. So far, we have                   the matrix B into the diagonal form.
+the ciphertext-plaintext matrix multiplication, and in this                Directly multiplying the left ciphertext and the right
+section, we will discuss the ciphertext-ciphertext matrix              ciphertext will result in the diagonals of the output matrix.
+multiplication.                                                        To compute the other diagonals of the matrix, we need to
+    To save communication costs, we design an efficient                rotate within the rows of B . This requires 2D rotations for
+protocol that uses only HE to compute the ciphertext-                  the ciphertext — where the dimensions are 128 × 64 for
+plaintext as well as the ciphertext-ciphertext matrix-matrix           the BERT-base attention layers — but such a 2D rotation
+multiplications. The challenge in designing such an algo-              is not supported in BFV given the powers that are used for
+rithm is keeping the multiplicative depth small since higher           the roots of unity in the NTT space (in fact, it is unclear
+
+
+                                                                4758
+whether it is possible to find the appropriate generators with                           A       =      a11 a22 a33 a12 a23 a31 a13 a21 a32     Diagonal packed
+orders 64 and 128 for n = 8192, that also span the entire
+space). Instead, we rely on partial rotations that need to be                            MA      =       0     0   0   1   1   1   0   0   0
+corrected by bit masking.                                                                B       =      b11 b21 b31 b12 b22 b32 b13 b23 b33     Column packed
+     Let’s take a look at an example to ease under-
+standing. We assume that full rotations are supported                                    Br1     =      b21 b31 b12 b22 b32 b13 b23 b33 b11      Rot(B,1, ← )
+in this example even though BFV supports 2D rota-
+                                                                                        MB1      =       1     1   0   1   1   0   1   1   0
+tions of size n/2×2. A 2×4 matrix encoded in a vec-
+tor ⟨x1,1 , x1,2 , x1,3 , x1,4 , x2,1 , x2,2 , x2,3 , x2,4 ⟩ can be rotated              Br2     =      b23 b33 b11 b21 b31 b12 b22 b32 b13      Rot(B,2, → )
+within the first half and the second half to the left by 1
+by doing two separate rotations, applying an extra mask,                                MB2      =       0     0   1   0   0   1   0   0   1
+and a summation. The first rotated vector is the cipher-                                                                                        MA × MB1 × A
+                                                                                                         0     0   0 a12 a23 0     0   0   0
+text shifted to the left by 1. The second rotated vector is
+the ciphertext rotated to the right by 3. The mask vec-                                  A1      =      a12 a23 0 a12 a23 0 a12 a23 0          (Rotate and Add)^2
+tors are ⟨1, 1, 1, 0, 1, 1, 1, 0⟩ and ⟨0, 0, 0, 1, 0, 0, 0, 1⟩. By
+multiplying the rotated vectors with the masks, and then                                                 0     0   0   0   0 a31 0     0   0    MA × MB2 × A
+summing the results, we can get the correct 2D rotation                                  A2      =       0     0 a31 0     0 a31 0     0 a31   (Rotate and Add)^2
+x̃ = ⟨x1,2 , x1,3 , x1,4 , x1,1 , x2,2 , x2,3 , x2,4 , x2,1 ⟩.
+     The above approach requires an additional logarithmic
+                                                                                         A1 × Br1 + A2 × Br2       =
+number of rotations to sum up the partial products within
+each resulting ciphertext. This results in a non-compact                                        a12b21 a23b31 a31b12 a12b22 a23b32 a31b13 a12b23 a23b33 a31b11
+output packing, which can be naively solved by multiplying
+with another bit mask. However, doing so results in a mul-                             Figure 4: Diagonal-packed matrix × column-packed matrix.
+tiplicative depth of 4 (given A and B already have depth
+1), which will require larger parameters in BFV and lead to
+worse performance. Instead, we observe that it is possible
+to reduce the depth to 3 (note that depth 2 is optimal) by
+combining the first masking (for correcting rotations) and                             However, this requires repacking both ciphertexts, resulting
+the second masking (for producing a compact packing).                                  in significantly large communication overhead (as shown
+Instead of performing the first masking to get the correct                             in Tab. 1, Gazelle’s packing is very sparse in matrix-matrix
+rotations, we can directly execute the multiplications on the                          multiplications).
+partially rotated ciphertexts, which results in partially correct
+results as well. Following this, we can sum up the partial                                 Instead of repacking by communication, we apply mask-
+results before applying the compact packing masking.                                   ing, rotation, and addition to get the desired repeated pack-
+     To illustrate this in an example, we use the same vectors                         ing of the LHS. To enable the rotation within the columns
+as before to compute x · y, where x is rotated by one                                  of the RHS, we apply the same strategy as the first packing
+within the rows. Instead of using x̃, we can multiply the two                          scenario. Similarly, we combine the mask of the RHS partial
+partially rotated x with y to get ⟨x1,2 · y1,1 , x1,3 · y1,2 , x1,4 ·                  rotations with the mask of the LHS packing preparation. In
+y1,3 , x2,1 · y1,4 , x2,2 · y2,1 , x2,3 · y2,2 , x2,4 · y2,3 , x1,1 · y2,4 ⟩.          this way, we can complete the matrix-matrix multiplication
+Similarly, we get ⟨x2,2 · y1,1 , x2,3 · y1,2 , x2,4 · y1,3 , x1,1 ·                    with 3 multiplicative depth.
+y1,4 , x1,2 · y2,1 , x1,3 · y2,2 , x1,4 · y2,3 , x2,1 · y2,4 ⟩. Rotating
+these ciphertexts by half and summing, plus one final mask-                                 We present a concrete example in Fig. 4. When we
+ing, returns us the same final result, but with multiplicative                         compute the multiplication between the second diagonal of
+depth of only 3. This increases the ciphertext-ciphertext mul-                          A and the 1-step rotation of B , we first construct the
+tiplications and rotation numbers, but the reduction in depth                          plaintext mask mA , which takes the second diagonal in A ,
+allows us to use smaller HE parameters, which increases                                and the rotation masks mB1 and mB2 for B , which takes
+overall performance.
+                                                                                       the values of B ’s partial rotations in correct positions. We
+Diagonal-packed matrix × column-packed matrix. Now
+                                                                                       first multiply the masks together and then they are multiplied
+we discuss the second packing scenario, where the LHS
+is packed in diagonal and the RHS is packed in column.                                 with A . After that, we pack A via rotation and addition.
+Consider C = A × B , where A ∈ Zm×m                               , B ∈                The packed A , which are A1 and A2 are multiplied to
+                                                              p
+Zp m×d2
+         , and C ∈ Zp       m×d2
+                                    . Note that in this scenario, the                  the partial rotations of B . Summing these two multiplica-
+LHS matrix will always be a squared matrix.                                            tion results, we will get the multiplication result between the
+     One way to compute the matrix multiplication in this                              second diagonal of A and corresponding values in matrix
+packing is to use Gazelle’s packing to repeatedly pack the                              B . Repeat such procedure for each diagonal, and sum the
+LHS in diagonal and pack each column of the RHS matrix                                 results together, we will get the matrix multiplication result
+in a separate ciphertext to enable rotations within columns.                           in a compact packing.
+
+
+                                                                                4759
+4.2. Efficient Linear Computation in BERT                                  consider specific properties of the computed functions like
+                                                                           symmetry and linearity of GELU, Tanh and Softmax, re-
+Attention layer (query, key and value). This corresponds                   sulting in huge communication costs. Our accurate approx-
+to the first three MatMul in Linear 1 of Fig. 1. As we                     imation design uses these properties of the non-linear func-
+mentioned in §2.2, the input is a 2D matrix X ∈ Zpm×d .                    tions to significantly reduce the communication overhead
+The client will compactly pack the input in column and                     (§ 5.2, § 5.3, § 5.4). As an additional optimization, we use
+send the encrypted ciphertext to the server. The server will               Motzkin’s polynomial pre-processing [51], [40] (§ 5.1). This
+pack the plaintext model weights WQ      K    V
+                                    h , Wh , Wh in diagonal                method reduces the number of required multiplications by
+as we have illustrated in §4.1.1. Then the server uses our                 approximately half and can be applied to generic polynomial
+protocol in §4.1.1 to compute the multiplication results                   evaluation where the function is publicly known.
+ Qh , Kh , and Vh . These results are ciphertexts and are
+also compactly packed in column. We apply BSGS §4.1.2                      5.1. Motzkin’s Polynomial Pre-processing
+to reduce rotations, the concrete savings on rotations are
+deferred to App. F.                                                            Horner’s method [19], [73] is a popular technique for
+Attention layer (query × key). This corresponds to the                     evaluating polynomials as it is proven to optimal regarding
+last MatMul in Linear 1 of Fig. 1, which computes the                      the number of operations, if the polynomial’s coefficients are
+ Qh × KTh . Since both Qh and Kh are packed in                             not known in advance [53], [54]. Horner’s method requires
+                                                                           n − 1 multiplications for evaluating a polynomial of degree
+column, then KTh is packed in row. Thus, we can use our                    n. But in many applications, such as ML inference, the non-
+protocol in §4.1.3 under the column-packed matrix × row-                   linear functions and their polynomial approximations are
+packed matrix case to compute Qh × KTh . The packing                       publicly available. In such cases, Motzkin [51] showed how
+of the result ciphertext is also compact. The server will add              to pre-process or reformulate a polynomial so that it only
+a uniformly random mask to the multiplication result and                   requires approximately ⌈ n2 ⌉ multiplications [54]. We present
+send the masked result to the client for decryption. Then,                 the detailed Motzkin’s polynomial pre-processing procedure
+after conversion to MPC (see §7.1.2), the server and the                   in App. B.
+client can jointly evaluate Softmax(Qh × KTh ) in MPC.
+Attention layer (Softmax × V). After the server and the                    5.2. Accurate GELU Approximation
+client get the result of Softmax in secret sharing, Sh =
+Softmax(Qh × KTh ), they will compute Sh × Vh . Note                           To the best of our knowledge, Iron [28] proposes
+now the RHS of the matrix multiplication is a column-                      the state-of-the-art accurate approximations for GELU
+packed matrix. We thus pack the LHS in diagonal and use                    (cf. Eq. 4) in MPC. They approximate GELU using the
+our protocol in §4.1.3 under the scenario of diagonal-packed               following equation:
+matrix × column-packed matrix. Specifically, the client will                                1              p
+compactly pack their sharing of Sh in diagonal, convert to                     GELU(x) = x(1 + Tanh( 2/π(x + 0.04471x3 )))
+                                                                                            2
+HE §7.1.2, encrypt, and send the diagonal-packed ciphertext
+                                                                           The core part of Iron’s approximation is Tanh, they reuse
+to the server. The server will first convert the sharing to HE,
+                                                                           building blocks from SIRNN [59]. Iron further optimized
+add it to the received ciphertext, and finish the remaining
+                                                                           Tanh by leveraging the function’s symmetry, such that the
+computations according to our protocol in §4.1.3.
+                                                                           evaluation only has to be done on negative inputs. This,
+Feed-forward layers (Linear 2, 3, 4 of Fig. 1). The feed-
+                                                                           however, is still quite costly, as reported by Iron, secure
+forward layers in BERT only consist of ciphertext-plaintext
+                                                                           GELU evaluations account for more than 50% of the run-
+matrix multiplications. Thus, we utilize the ciphertext-
+                                                                           time.
+plaintext protocol in §4.1.1 to compute the feed-forward
+                                                                               We present a more performant approximation using a
+layers. Similarly, the server and client will first convert their
+                                                                           4-degree polynomial. The concrete polynomial parameters
+sharings to HE and then the client will compactly pack
+                                                                           can be found in App. C. Multiple observations and design
+their sharing in column, encrypt, and send to the server.
+                                                                           choices lead to our design.
+The server will finish the remaining computations. Note that
+we apply BSGS §4.1.2 in all the ciphertext-plaintext matrix                Linearity: We observe that GELU has good linearity
+multiplications. The concrete savings are in App. F.                       when the input is relatively large or small. Given that
+                                                                           limx→∞ erf( √x2 ) = 1, we have limx→∞ GELU(x) = x. And
+5. Non-Linear Layers                                                       also limx→−∞ GELU(x) = 0. Thus, we only need accurate
+                                                                           approximations for an inputs range. In practice, setting the
+    Securing the non-linear functions in BERT inference                    range to be [−2.7, 2.7] is sufficient to guarantee 1 × 10−3
+presents another challenge due to their complexity in cryp-                average absolute errors.
+tographic primitives. Iron demonstrated that approximately                 Symmetry: Next, we revisit the original√       GELU defini-
+75% of the total execution time is from non-linear layers.                 tion [31]: GELU(x) = 12 x[1 + erf(x/
+                                                                                                              √     2)]. We observe the
+    In this section, we introduce our novel, accurate, and                 symmetry of g(x) = x · erf(x/ 2), given that g(x) =
+efficient protocols for non-linear operations. Iron does not               g(−x). Thus, we only need to approximate g(x) for half
+
+
+                                                                    4760
+of the input range, i.e., positive input values. These obser-          smoothness, and non-linearity. However, it requires evaluat-
+vations enable us to utilize low-degree polynomial approx-             ing the exponential function and determining the reciprocal
+imations to accurately compute g(x), and thus GELU(x).                 of a secret-shared input, both being costly operations when
+Accuracy: The state-of-the-art work for approximating the              evaluated securely [59].
+plaintext error function erf(x) on integers for GELU is I-                 Iron instantiates Tanh by combining lookup-table
+BERT [38]. We take a further step upon their method by                 (LUT)-based private protocols for those two non-linear func-
+approximating x · erf(x) instead of erf(x), which enables              tions from SIRNN [59]. However, evaluating Tanh remains
+us to also apply polynomial pre-processing (§5.1) to reach             costly due to the long bit length of input.
+the optimal number of multiplications. Otherwise, if we                    Similar to our optimizations in GELU, we take the
+adopt I-BERT’s strategy to approximate erf(x) in MPC,                  symmetry into consideration and utilize the Remez method
+the polynomial pre-processing will not give us the optimal             (§5.2) to design a polynomial approximation of degree five
+number of multiplications, because the approximation will              and three intervals (as the Tanh is an odd symmetric func-
+be first evaluated on |x|, but then multiplied by x. I-BERT            tion, we only need 2 comparisons). The concrete polynomial
+used polynomial interpolation techniques [67] with grid-               parameters can be found in App. C.
+search to determine the polynomial coefficients, while we                                  
+utilize the Remez method [61] to find the optimal polyno-                                  
+                                                                                            1                     if x > 2.855
+                                                                                           ax5 +bx4 + cx3 +
+                                                                                           
+mial coefficients. Unlike polynomial interpolation with grid-
+                                                                       ApproxTanh(x) =                             if 0 ≤ x ≤ 2.855
+search, the Remez method guarantees to find an optimal                                     
+                                                                                                  dx2 + ex + f
+polynomial approximation by iteratively adjusting the poly-                                
+                                                                                           −ApproxTanh(−x) if x < 0
+nomial coefficients to minimize the maximum error (also                                                                         (7)
+known as the maximum deviation) between the polynomial                 Polynomial pre-processing. Again, we apply Motzkin’s
+and the target function over the specified interval.                   polynomial pre-processing (§5.1) to reduce the number of
+                                                                       required multiplications between secret-shared values to 3:
+                      
+                        x                       if x > 2.7
+                      
+                      a|x|4 +b|x|3 + c|x|2 +
+                                                                              TanhP0 (x) =(x + t0 ) · x + t1
+ApproxGELU(x) =                                 if |x| ≤ 2.7                   TanhP1 (x) =(TanhP0 (x) + x + t2 )·               (8)
+                             d|x| + e + 0.5x
+                      
+                                                                                          TanhP0 (x) · t3 x + t4 x + t5 ,
+                       0                       if x < −2.7
+                                                        (5)            The average ULP error [59] of our Tanh approximation is
+Polynomial pre-processing. We further optimize our                     27 with scale 12, corresponding to 6.59 × 10−3 error in
+polynomial evaluation using Motzkin’s polynomial pre-                  floating-point, with the input range [−5, 5].
+processing (§5.1). This effectively reduces the evaluation
+cost to only two multiplications among secret-shared values            5.4. Efficient Softmax in MPC
+instead of three.
+      GELUP0 (x) =(g0 |x| + g1 ) · |x| + g2                                 Similar to Tanh, Softmax (Eq. 2) also requires eval-
+      GELUP1 (x) =(GELUP0 (x) + g0 |x| + g3 ) · |x|       (6)          uating the exponential function and computing a division,
+                                                                       both inherently require floating point operations. Transform-
+                   + g4 + 0.5x                                         ers typically use 32-bit floating-point values, while MPC
+The average ULP error [59] of our GELU approximation                   floating-point protocols are imprecise and much less effi-
+is 4 with scale 12, corresponding to 9.77 × 10−4 error in              cient than integer computations [58], [16].
+floating-point, with the input range [−5, 5].                               Iron solves this by computing Softmax on fixed-point
+Two comparisons in one shot. To further optimize the                   values utilizing LUT-based protocols from SIRNN. The
+efficiency, we additionally tweak the implementation of the            LUT-based method is inefficient in communication espe-
+polynomial as follows: Naively, we need a total of two                 cially when the input has a long bit length, as we will show
+comparisons in order to pick the correct interval. We observe          in §7.
+that we can remove one of the comparisons. Recall that our                  Inspired by the plaintext integer-only approximation in
+approximation in Eq. 6 requires to determine the absolute              I-BERT, we design a secure protocol for the exponential
+value |x| = MSB(x)? − x : x. Using the absolute value,                 function with low-degree polynomials and without LUTs:
+we do not need to explicitly distinguish the upper and                 Shifting by xmax : Similar to Iron, I-BERT, and most plain-
+the lower interval but only compare b = |x| > 2.7. This                text implementations of Softmax, we normalize each input
+allows us to output res = b?RELU(x) : GELUP1 (x), where                value xi , i ∈ [d], where d is the dimension of x . So that
+RELU(x) = (|x| + x) >> 1.                                              all inputs to the exponential function become negative. The
+                                                                       normalize value is xei , where x  ei = xi − xmax .
+5.3. Accurate Tanh Approximation                                       Secure integer-only exponential function: As demon-
+                                                                       strated by I-BERT, any non-positive number can be de-
+                 2x
+   Tanh(x) = ee2x −1                                                   composed as x    ei = (− ln 2) · z + p , where z is a
+                  +1 is a hyperbolic function often used
+in neural networks, primarily because of its symmetry,                 non-negative integer and p ∈ (− ln 2, 0]. It follows that
+
+
+                                                                4761
+Algorithm 1 Secure Integer-only Exponential Function                   BERT, while maintaining high accuracy. Our technique is
+                                                                       inspired by the observation in [26] that not every token in
+ 1: function E XP ( x
+                    ei , s)   ▷ normalized input, scale                the input sentence significantly impacts the model’s infer-
+ 2:     invNegLt = − ln12                                              ence result. Therefore, by eliminating tokens with minor
+ 3:      z =(xei · invNegLt) >> s                                      contributions, we can reduce the dimensions of the input
+ 4:      p = reduce( z · ln 2 + x  ei , s + 2)                         matrix and enhance inference efficiency.
+                                                                           Transformers’ attention mechanisms offer an ideal met-
+ 5:      z = Clip( z , [0, s + 1])                                     ric for ranking input tokens’ contributions without gradi-
+ 6:     return (0.385 ∗ ( p + 1.353)2 + 0.344) >> z                    ent computation. The product of query and key matrices
+                                                                       (Qh × Kh ∈ Rm×m ) estimates the correlation among m2
+                                                                       pairs of the m input tokens, with larger values indicating
+exp( xei ) = exp( p ) >> z . To compute exp( p ), I-BERT               higher correlation. Summing Qh × Kh across one axis yields
+provides a plaintext approximation for the exponential func-           a score vector s ∈ Rm . This score vector forms key-
+tion in p ∈ (− ln 2, 0]. Since the range of p is relatively            value pairs with the input token sequence, allowing us to
+small, we can use a 2-degree polynomial approximation:                 rank tokens by their scores and discard those contributing
+         exp( p ) ≈ 0.3585( p + 1.353)2 + 0.344           (9)          minimally.
+                                                                           Based on these observations, we devise an oblivious
+We present our protocol in Alg. 1. To extract the integer z            sorting method to eliminate words with fewer contributions.
+in Line 3, we shift x
+                    ei /(− ln 2) by the scale s. In Line 4,            Specifically, we use bitonic sorting [33] to determine the
+                                                                       median of the scores. And then, tokens scoring below the
+we compute p by computing the sum of ln 2 · z and x     ei .           median are eliminated using another round of bitonic sort-
+As p ∈ (− ln 2, 0], we can safely reduce the bit width here            ing. The comprehensive procedure is outlined in Alg. 2 of
+by s+2 to enhance efficiency, where s is the public scale of           App. D.
+the fixed-point representation §7. After we compute p , we                 As shown in §7, word elimination introduces negligible
+will evaluate the polynomial in Eq. 9. And then, the result            accuracy drops, and can significantly improve the perfor-
+will be shifted by z steps. Since the output of Eq. 9 is               mance of BOLT.
+bounded by (0, 0.7), we can safely clip z to the range
+[0, s + 1] before shifting in Line 5. z is a secret-shared             6.2. Secure Computation-Aware Fine-Tuning
+value and cannot be released, we thus apply a sequence of
+MUX to get the correct shifting result in Line 6, which will               As we mentioned in §2, we use fixed-point representa-
+be the result of exp( x ei ). The average ULP error [59] is            tions in BOLT, which creates a gap between the floating-
+0.0059 with scale 12, corresponding to error 1 × 10−6 in               point model and its fixed-point representation. We aim to
+floating-point, with input range [−1000, −0.001].                      maintain high accuracy of the model using reasonably small
+     Now we have the secure protocol for evaluating expo-              scales, since large scales and floating-points increase the
+nential function, in Softmax Eq. 2, we also need to evaluate           computation overhead in MPC. To counteract the accu-
+the reciprocal of the summed exponential function’s outputs.           racy loss from this gap, we apply quantization-aware fine-
+However, compared to exponential function, reciprocal is               tuning [75]. Like many prior quantization-aware training
+only called on one dimension of the input matrix instead of            methods [38], we use symmetric and static quantization
+the entire matrix. Thus, it occupies much less computation             to calculate the quantized result of each function during
+cost compared to Softmax, so we reuse the state-of-the-art             forward propagation. As the quantization process is not dif-
+secure reciprocal protocol from SIRNN and now we can                   ferentiable, we simulate the backpropagation by computing
+securely and efficiently evaluate Softmax.                             the real gradients and then quantizing the gradients. We also
+                                                                       consider approximation errors of non-linear functions when
+6. Machine Learning Optimizations                                      fine-tuning the model. Specifically, we substitute floating-
+                                                                       point functions of GELU, Softmax, and Tanh with our ap-
+    BOLT develops a secure, end-to-end protocol for infer-             proximated versions prior to quantization-aware fine-tuning.
+ence via a co-design of cryptography and machine learn-                    Our approximated functions closely match the originals,
+ing, and in this section we explain our machine learning               eliminating the need for additional distillation processes to
+optimizations designed to enhance BOLT’s accuracy and                  enhance model accuracy as in MPCFormer [44]. Distillation
+efficiency. We introduce a word elimination technique to               might reduce accuracy, especially with smaller datasets. As
+significantly improve BOLT’s performance along with se-                demonstrated in MPCFormer, there are over 5% drops in
+cure computation-aware fine-tuning for maintaining high                accuracy on small datasets. In contrast, BOLT’s accuracy
+accuracy.                                                              decline is negligible (around 1%).
+                                                                           To further boost the accuracy of the model, we also
+6.1. Oblivious Word Elimination                                        take the word elimination into consideration when we fine-
+                                                                       tune the model. That is, during the forward propagation, the
+    In this section, we introduce a word elimination (W.E.)            tokens are dynamically eliminated and the backward propa-
+technique that is applicable to all encoder transformers like          gation can automatically compute the gradients. We note that
+
+
+                                                                4762
+fine-tuning is done only once per model, and so its cost can                   Dataset     Plaintext    Iron    w/o W.E.   w/ W.E.
+be amortized across many inferences. In the upcoming §7,                       MRPC      90.00 ± 0.23   89.87    90.53      89.95
+                                                                               RTE       69.70 ± 1.50   70.76    69.68      69.31
+we will demonstrate that our secure computation-aware fine-                    SST-2     92.36 ± 0.59   92.77    91.74      92.78
+tuning sustains BOLT with an accuracy level comparable to                      STS-B     89.62 ± 0.31   89.41    87.97      88.44
+floating-point baselines.
+                                                                         TABLE 2: Acc. of floating-point plaintext, Iron and BOLT.
+7. Evaluation
+                                                                         the protocols described in their paper. We use bit-length
+7.1. Implementation                                                      l = 37 and scale s = 12 for secret sharing. We configure
+                                                                         the HE with n = 8192, log q ≈ 180, and log p = 37 to
+7.1.1. Libraries and configurations. We implement BOLT
+                                                                         enable noise flooding. Note that Iron requires a larger scale
+using the Secure and Correct Inference (SCI) library from
+                                                                         to maintain the model’s accuracy as they did not incorporate
+EzPC [11], [58], [60] for ring secret sharing and SEAL [65]
+                                                                         secure computation-aware fine-tuning. Furthermore, the op-
+library for HE. For Softmax and LayerNorm, we use bit-
+                                                                         timization for LayerNorm in Iron is wrong, which will cause
+length l = 37 and scale s = 12. For GELU, we use bit-length
+                                                                         a significant accuracy drop (close to random guessing), as
+l = 21 and scale s = 11. The scales of linear layers are con-
+                                                                         they will break the residual architecture. Thus, we remove
+sistent with the secure computation-aware fine-tuning §6.2.
+                                                                         Iron’s optimization for LayerNorm. We provide detailed
+Please refer to App. E for more details. In BOLT, we
+                                                                         discussions on the flaws in Iron’s LayerNorm optimization
+choose our parameters according to the standard from [3]
+                                                                         in App. G. We have confirmed the implementations and the
+and use 128-bit security. Specifically, we choose n = 8192,
+                                                                         performance with the authors of Iron.
+log p ≈ 29, log q ≈ 218 for Linear 1 and Softmax × V
+of Fig. 1. And we choose log p ≈ 19, log q ≈ 180 for
+other linear layers. Because we have ciphertext-ciphertext               7.2. Experimental Setup
+matrix multiplications in Linear 1 and Softmax× V, we need
+more noise budget and larger scale compared to the layers                    We evaluate our experiments on AWS EC2 using two
+that only require ciphertext-plaintext matrix multiplications.           c6i.16xlarge instances with 64 vCPUs and 128 GB memory.
+Thus, we use larger p and q for Linear 1 and Softmax × V.                We use Linux Traffic Control (tc) to simulate different
+To guarantee circuit privacy, the server performs noise flood-           network settings. Under the LAN scenario, we set the
+ing [48], [43], which adds a large noise to the ciphertext               bandwidth to 3Gbps and the round-trip latency to 0.8 ms.
+before returning it to the client. The noise is chosen large             Our setup for the WAN network consisted of four settings:
+enough to hide additional information in the ciphertext but              {100Mbps, 40ms}, {100Mbps, 80ms}, {200Mbps, 40ms},
+still guarantee the accuracy of the decryption.                          and {200Mbps, 80ms}. These configurations allow us to
+                                                                         evaluate the system’s performance under varying bandwidths
+7.1.2. Conversion between MPC and HE. Computation                        and latencies. We set the number of threads to 32.
+in MPC is performed over a 2l ring while HE is over a                        To evaluate the accuracy of our system, we test on four
+prime. Therefore we need conversion when using results                   datasets from GLUE benchmark [72], which is widely used
+from HE in MPC, and vice versa. Each round of conversion                 to evaluate BERT’s performance. These datasets include 3
+consists of a comparison and a multiplexer. However, when                classification tasks: MRPC, RTE, SST-2, and a regression
+converting from MPC back to HE, the probability that the                 task: STS-B. Specifically, our fine-tuning is performed on
+sharings overflow is |x|  , where |x| is the absolute shared             the training sets and the accuracy is evaluated on the official
+                       2l
+secret value. When |x| is small or the ring size is large                validation sets.
+enough, we can omit the conversion from MPC to HE with-
+out affecting the accuracy. Therefore, in our implementation,            7.3. Accuracy
+we only perform conversion from HE to MPC. To reduce
+the error rate, we extend the result of GELU from 21 bits                    In Tab. 2, we compare the accuracy of BOLT, with and
+to 37 bits before converting to HE.                                      without word elimination, to that of floating-point plain-
+                                                                         text results and Iron. Similar to prior works, we present
+7.1.3. Implementation optimizations. In HE, we perform                   the F1 score for MRPC, Pearson correlation for STS-B
+lazy relinearization to reduce the total number of relineariza-          and accuracy for RTE and SST-2. In the second column,
+tions. To reduce the communication cost, we use modulus                  we present the accuracy results of the plaintext model on
+switching before sending back the ciphertexts to the client.             floating-point reported by prior works [76] and in the form
+We optimize Layernorm by moving the multiplication with                  of Avg ± STD. Overall, the accuracy achieved by BOLT
+the model weights to HE and by precomputing MSB of                       matches the accuracy of plaintext models on all datasets,
+(Xi,j − µi ) to further reduce the communication cost of the             with a maximum accuracy loss of 1.3% on the STS-B
+rest multiplications.                                                    dataset. Without word elimination (W.E.), we observe 1.04%
+                                                                         accuracy drop on SST-2 compared to BOLT with W.E.
+7.1.4. Iron’s System. Because Iron [28] is not open-                     We attribute this to the conversion approximation, described
+sourced, we implement Iron’s end-to-end system following                 in §7.1.2, from 2l ring to prime field. Without W.E., the
+
+
+                                                                  4763
+                                Iron                      BOLT w/o W.E.                           BOLT w/ W.E.
+         Component    Comm. (MB)       Round        Comm. (MB)          Round              Comm. (MB)           Round
+         Linear 1       4844.14          38        7.06    686.1×     2       19×         3.18    1524.7×     2       19×
+         Softmax×V      4918.38          36        9.88    497.6×     2       18×         2.82    1741.6×     2       18×
+         Linear 2         47.65           2        4.51     10.6×     2        1×         2.26      15.0×     2        1×
+         Linear 3         95.40           2        9.01     10.6×     2        1×         4.50      21.2×     2        1×
+         Linear 4         95.21           2       13.52      7.0×     2        1×         6.77      14.1×     2        1×
+         Softmax        3596.32         252     1447.65      2.5×   232      1.1×       450.74       8.0×   229      1.1×
+         GELU           7960.00         256     1471.67      5.4×    88      2.9×       776.84      10.2×    88      2.9×
+         LayerNorm       871.46         218      599.40      1.5×   220     0.99×       290.55       3.0×   220     0.99×
+         Tanh             20.67         150       16.64      1.2×   110      1.4×        16.64       1.2×   110      1.4×
+         end-to-end    280.99 GB       13663   59.61 GB     4.71×  10509 1.30×         25.74 GB    10.91×  10901 1.25×
+
+TABLE 3: Communication cost and rounds comparing Iron with BOLT. The costs of the components are for one layer, and
+there are 12 layers in BERT.
+
+
+dimensions of matrices in the model are twice as large                7.4.3. Word Elimination. For most of the components in
+as the model with W.E. Therefore, given the same error                BOLT, word elimination gives us another 2× less com-
+rate, we expect a higher probability of error occurring               munication because the input matrix row size m becomes
+during the conversion. However, as the results indicate, the          half of the original size. The cost of Softmax is further
+conversion approximation has negligible influence on the              reduced by 3.2× as the input dimension of Softmax is
+accuracy. To further improve the accuracy, users can use              m × m. As expected, with W.E., BOLT has more than
+correct truncation at the cost of doubling the conversion             2× communication improvement compared to BOLT w/o
+cost in BOLT. This will incur around 3%-7% performance                W.E. (25.74 GB vs. 59.61 GB).
+overhead, estimated based on the results in Fig. 5.                       Overall, we reduce nearly 11× in terms of communica-
+                                                                      tion cost and 1.3× in terms of communication rounds, which
+                                                                      is expected to improve the end-to-end inference performance
+7.4. Communication Analysis
+                                                                      significantly under practical network conditions.
+
+    In this section, we present the communication cost in
+terms of the number of bytes and the number of rounds for
+                                                                      7.5. End-to-End Performance
+each component in BOLT. Tab. 3 shows the cost breakdown
+of each component in a single encoder layer as well as the                We present the end-to-end run-time under various net-
+end-to-end total cost. Additionally, we present the improve-          work settings in Fig. 5. With W.E., BOLT consistently
+ment compared to Iron on the right side of the table.                 outperforms Iron by a magnitude of 4.8× to 9.5×, while
+    To illustrate the improvement originated from our effi-           without W.E., BOLT still outperforms Iron by 2.6× to 4.1×.
+cient MatMul and nonlinear functions, we first compare Iron           In the following, we provide a detailed analysis of the
+with BOLT w/o W.E. in the following.                                  savings in linear and non-linear layers.
+
+                                                                      7.5.1. Matrix Multiplication. As discussed in §7.4, our
+7.4.1. Matrix Multiplication. BOLT w/o W.E. achieves                  linear layers consume much less communication compared
+686.1× and 497.6× less communication on Linear 1 and                  to Iron as we have compact packing and smaller ciphertext
+Softmax × V. This is because Iron performs ciphertext-                size and Iron’s packing is much more sparse. Thus, we have
+ciphertext matrix multiplication using secret sharing, while          more run-time gains in the WAN setting where the network
+BOLT computes multiplication between encrypted matrices               is slower. For instance, for Linear 1, BOLT is 45.7× faster
+in HE.                                                                w/o W.E. under 100 Mbps, 40 ms, and 88.2× faster w/ W.E.
+    We also achieve 7.0-10.6× less communication on                   This saving is less significant in the LAN setting, but we
+ciphertext-plaintext matrix multiplication. The improvement           note that BOLT is still consistently better than Iron. For
+comes from fewer ciphertexts from compact encoding and                example, under 3 Gbps, 0.8 ms network, BOLT w/o W.E.
+smaller ciphertext size from modulus switching.                       is 2.3× faster than Iron, and BOLT w/ W.E. is 4.6× faster
+                                                                      for Linear 1.
+7.4.2. Non-linear Functions. The expensive operations in                   BOLT is consistently faster than Iron for Softmax × V
+non-linear components of Iron are Softmax and GELU,                   under different network settings because BOLT utilizes ef-
+which consume 3.6 GB and 7.9 GB per layer, respectively.              ficient ciphertext-ciphertext matrix multiplication protocols
+BOLT uses 2.5× less communication on Softmax and 5.4×                 while Iron adopts secret sharing-based matrix multiplica-
+on GELU. For LayerNorm, we achieve 1.5× less communi-                 tions. For instance, even in the LAN setting (3 Gbps, 0.8
+cation, which comes from multiplication with model weights            ms), BOLT w/o W.E. is 2.5× faster, and BOLT w/ W.E. is
+in HE and MSB optimization (see §7.1). Additionally, BOLT             6.1× faster than Iron. In the WAN setting (100 Mbps, 40
+has fewer communication rounds for Softmax, GELU and                  ms), BOLT w/o W.E. is 68.3× faster, and BOLT w/ W.E.
+Tanh.                                                                 is 158.0× faster than Iron.
+
+
+                                                               4764
+                                                                            Runtime Breakdown                                                   Total Runtime
+                                                                                                                                                                      600
+                                                                                                                                                  475
+
+
+
+
+                                                                                                  126.5
+                              122.1
+                      103
+
+
+
+
+                                                                        84.0
+      3Gbps, 0.8ms
+
+
+
+
+                                                                                     60.3
+                             53.7
+                                                                                                                                                                      400
+
+
+
+
+                                                                      33.5
+                            26.8
+
+
+
+
+                                                   21.7
+                                                   21.2
+                      102
+
+
+
+
+                                                              21.0
+                                                              18.1
+
+
+
+
+                                                                                   16.4
+
+
+
+
+                                                                                                          16.3
+                                                                                               14.4
+
+
+
+                                                                                                          14.3
+                                                                     13.7
+
+
+
+
+                                                                                                          11.5
+                                                  10.8
+
+
+
+
+                                                                                                                                        11.2
+                                                             9.4
+                                        6.9
+
+
+
+
+                                                                                 6.0
+
+
+
+
+                                                                                                                             4.9
+                                        4.8
+                      101
+
+
+
+
+                                                                                             3.6
+                                       3.1
+
+
+
+
+                                                                                                                            2.9
+
+
+                                                                                                                                     2.4
+                                                                                                                                                         185          200
+
+
+
+
+                                                                                                                                    1.3
+                        0                                                                                                                                       91
+                      10
+
+
+
+
+                                                                                                                   0.3
+                                                                                                                  0.2
+                                                                                                                  0.2
+                                                                                                                                                                      0
+                                                                                                                                                 6453
+
+
+
+
+                                                                                                 2049
+                      104
+      200Mbps, 40ms
+
+
+
+
+                            1305
+
+
+
+
+                                                                     1265
+                                                                                                                                                                      6000
+
+
+
+
+                                                                                    930
+
+
+
+
+                                                                                                           558
+                                                                                                          430
+                                                                                              389
+                                                                                  382
+                      103
+
+
+
+
+                                                                                                          312
+
+
+
+
+                                                                                                                                       207
+                                                                                             205
+                                                                                 164
+                                                                                                                                                                      4000
+
+
+
+
+                                                                                                                             104
+
+
+
+                                                                                                                                     88
+                      102
+
+
+
+
+                                                                                                                            64
+                                56
+
+
+
+
+                                                                                                                                    46
+                                                    45
+
+
+
+                                                               45
+
+
+
+
+                                                                         37
+                               29
+
+
+
+
+                                                   26
+
+
+
+                                                              22
+                                                                                                                                                        1563 913      2000
+                                       18
+
+
+
+
+                                                                        16
+                                                  13
+
+
+
+                                                             12
+                      101
+                                          8
+
+
+
+
+                                                                                                                  7
+                                                                                                                  6
+                                                                                                                  6
+                                         5
+
+                                                                                                                                                                      0
+                                                                                                                                                 6845
+Time (s)
+
+
+
+
+                                                                                                 2075
+                      104
+      200Mbps, 80ms
+
+
+
+
+                            1331
+
+
+
+
+                                                                     1282
+                                                                                                                                                                      6000
+
+
+
+
+                                                                                   964
+
+
+
+
+                                                                                                          759
+                                                                                                          653
+                                                                                                          653
+                                                                                  434
+
+
+
+                                                                                              416
+                      103
+
+
+
+
+                                                                                 283
+
+
+
+
+                                                                                                                                      237
+                                                                                             215
+                                                                                                                                                                      4000
+
+
+
+
+                                                                                                                            144
+
+
+
+
+                                                                                                                                                                            Time (s)
+                                                                                                                            108
+
+
+                                                                                                                                    105
+                                                                                                                                    78
+                      102
+                                                    59
+                                58
+
+
+
+
+                                                               58
+
+
+
+
+                                                                         41
+                                                                                                                                                        19491419
+                                                   31
+                               31
+
+                                         30
+
+
+
+
+                                                              26                                                                                                      2000
+
+
+
+                                                                        18
+                                                             15
+                                                  15
+
+
+
+
+                                                                                                                  14
+                                                                                                                  12
+                                                                                                                  11
+                                       10
+
+
+
+
+                      101
+                                       8
+
+
+
+
+                                                                                                                                                                      0
+
+
+
+
+                                                                                                 4114
+                                                                                                                                                 12759
+                            2558
+
+
+
+
+                                                                     2528
+
+
+
+                                                                                    1877
+                      104
+      100Mbps, 40ms
+
+
+
+
+                                                                                                                                                                      12000
+
+
+
+
+                                                                                                           996
+                                                                                              762
+                                                                                   754
+
+
+
+
+                                                                                                           723
+
+
+
+
+                                                                                                                                       420
+                                                                                             408
+
+
+
+                                                                                                          406
+                      103
+
+
+
+
+                                                                                                                              261
+                                                                                 249
+
+
+
+
+                                                                                                                                      171
+                                                                                                                                                                      8000
+                                                     92
+
+
+
+                                                             92
+
+
+
+
+                                                                                                                            89
+                      102
+                                56
+
+
+
+
+                                                                                                                                    53
+                                                                         37
+                                       33
+                               29
+
+
+
+
+                                                   27
+
+
+
+                                                               22
+
+
+
+
+                                                                                                                                                        2855          4000
+                                                                        16
+                                                  13
+
+
+
+                                                              12
+
+
+
+
+                      101                                                                                                                                      1343
+                                         7
+
+
+
+
+                                                                                                                  7
+                                                                                                                  6
+                                                                                                                  6
+                                         5
+
+
+
+
+                                                                                                                                                                      0
+
+
+
+                                                                                                 4118
+                                                                                                                                                 12996
+                            2563
+
+
+
+
+                                                                     2528
+
+
+
+                                                                                    1900
+                      104
+      100Mbps, 80ms
+
+
+
+
+                                                                                                           1158
+                                                                                                                                                                      12000
+
+
+
+
+                                                                                                           914
+                                                                                  775
+
+
+
+                                                                                              774
+
+
+
+
+                                                                                                          626
+
+
+
+
+                                                                                                                                       445
+                                                                                             423
+                      103
+                                                                                 315
+
+
+
+
+                                                                                                                             293
+
+
+
+                                                                                                                                     174
+                                                                                                                                                                      8000
+
+
+
+
+                                                                                                                            121
+                                                     94
+
+
+
+                                                                94
+
+
+
+
+                                                                                                                                    80
+                      102
+                                59
+
+
+
+
+                                                                         41
+                                         34
+
+
+
+
+                                                   31
+                               31
+
+
+
+
+                                                              26
+
+
+
+
+                                                                                                                                                        3139          4000
+                                                                        19
+                                                  16
+
+
+
+                                                             16
+
+
+
+
+                                                                                                                  15
+                                                                                                                  12
+                                                                                                                  11
+                                       10
+
+
+
+
+                                                                                                                                                               1744
+                      101
+                                       7
+
+
+
+
+                                                                                                                                                                      0
+                            Linear 1   Linear 2   Linear 3   Linear 4 Softmax*V Softmax GELU LayerNorm Tanh              Conversion Rescaling
+                                                              Iron          BOLT w/o W.E.    BOLT w/ W.E.
+                              Figure 5: End-to-end inference performance under various network settings, and its breakdown.
+
+
+7.5.2. Non-linear Functions. Our run-time observations                                             after HE’s computation. In BOLT, the input scale for each
+for non-linear functions are consistent with our communi-                                          linear layer varies based on the secure computation-aware
+cation analysis in §7.4, since the major bottleneck for non-                                       fine-tuning, while Iron fixed the input scale to 12. Therefore,
+linear is communication. Specifically, for Softmax, in the                                         compared to Iron, BOLT needs rescaling before converting
+LAN setting (3 Gbps, 0.8 ms), BOLT w/o W.E. is 3.7×                                                the result from secret sharing back to HE. However, BOLT
+faster and BOLT w/ W.E. is 10.0× faster than Iron. In the                                          has lower rescaling costs because BOLT uses a smaller
+WAN setting (100 Mbps, 40 ms), BOLT w/o W.E. is 2.5×                                               rescaling factor than Iron. After each HE layer, the output
+and BOLT w/ W.E. is 7.5× faster. For GELU, in the LAN                                              scale for Iron is 24. Therefore it requires a right shift of 12
+setting (3 Gbps, 0.8 ms), BOLT w/o W.E. is 8.8× and BOLT                                           to scale back. For BOLT, taking Linear 3 as an example,
+w/ W.E. is 35.1× faster than Iron. In the WAN setting (100                                         the output scale is already 11. Therefore, no rescaling is
+Mbps, 40 ms), BOLT w/o W.E. is 5.4× and BOLT w/ W.E.                                               required for this layer. The result also shows that BOLT has
+is 10.1× faster. We notice that BOLT has less magnitude                                            at least 2.3× speed-up in terms of rescaling.
+improvements in the WAN setting for non-linear functions                                               Word elimination accounts for 1%-5% overhead, de-
+and we deem that this is caused by the latency of the                                              pending on the network condition. Word elimination is
+network. Our non-linear significantly saves communication                                          cheap from the end-to-end performance perspective, as the
+costs, but our improvement on communication rounds is less                                         size of our target sorting array is only m (m = 128 in our
+significant (0.99-2.9×). Thus, in the WAN setting where                                            experiments), and only two rounds of sorting are performed
+the network latency is high, our run-time improvement is                                           during each inference.
+becoming less compared to the LAN setting. Despite this
+improvement reduction under certain conditions, BOLT still                                         8. Related Work
+greatly outperforms the state-of-the-art system.
+                                                                                                   Privacy-preserving Neural Network Inference. Due to the
+7.5.3. Conversion, Rescaling, and Word Elimination. As                                             rapidly growing concerns about data privacy in ML, signifi-
+shown in Fig. 5, Iron doesn’t have conversion costs, because                                       cant efforts have been made to design efficient cryptographic
+Iron performs HE and MPC computation over the same ring.                                           protocols that securely evaluate ML algorithms, e.g., [39],
+With our conversion approximation, the conversion overhead                                         [77], [29], [41], [78], [50]. Especially private protocols for
+is around 2-9% of the total run-time. Considering the savings                                      neural network inference, e.g. [32], [25], [49], [35], [41],
+of HE over the prime field, including compact packing and                                          [60], [4], [34], were intensively investigated due to their
+fewer rotations, such overhead is affordable.                                                      wide-spread applicability and interesting structure consisting
+    Rescaling is used in both systems to reduce the scale                                          of various linear and non-linear computations.
+
+
+                                                                                            4765
+     Cryptonets [25] proposed one of the first protocols for           However, BOLT should still outperform Iron for the variants
+HE-based private neural network inference. Gazelle [35],               of transformers with a significant margin similar to BERT.
+Delphi [49], and Cheetah [32] are hybrid 2PC neural net-               Further optimizing BOLT’s computation from a hardware
+work inference protocols combining HE for matrix-vector                perspective is an interesting direction for future work.
+multiplications with MPC for the secure evaluation of non-             Security Argument & Inference with Malicious Secu-
+linear activation functions. Cryptflow [41] is a compiler to           rity. As mentioned in § 3, our threat model assumes semi-
+automatically convert plaintext neural networks from the               honest client and server. Our methods described in § 4 and
+state-of-the-art ML framework TensorFlow in MPC proto-                 § 5 are based on established cryptographic protocol building
+cols. CrypTFlow2 [60] and SiRNN [59] optimize efficiency               blocks (using combinations of secret sharing-based MPC
+for 2PC protocols of math functions typically used in neural           and HE from the EzPC framework [11]) that were already
+networks, e.g., reciprocal or Tanh.                                    proven secure. As we do not propose new protocols, but
+Private Transformers. Secure evaluation of transformers                combine them in novel ways, the security of BOLT follows
+is very challenging due to their significantly larger size             naturally from the security of these building blocks.
+compared to traditional neural networks. So far, several                   Supporting malicious security (either for both parties or
+works have investigated how to realize transformer inference           for clients only) is a very interesting direction for future
+in a privacy-preserving manner: THE-X [12], Iron [28],                 work. It is challenging to adapt techniques from current
+MPCFormer [44], PrivFormer [2], and PUMA [18].                         state-of-the-art malicious secure protocols. For instance,
+     THE-X [12] evaluates BERT-tiny [70] (a distilled student          adapting linear layer protocols’ techniques from MUSE [42]
+model of BERT with 4.4 million parameters) under HE                    may be expensive as they use zero-knowledge proofs for HE.
+using HE-friendly replacements for GELU, Softmax, and                  Prior works like MUSE [42] and SIMC [10] support the
+LayerNorm as well as dropping pooling layers. Thereby, it,             ReLU and ReLU6 non-linear functions that are very simple
+however, inherently reduces accuracy and leaks the compar-             and involve only comparisons. The non-linear functions in
+ison result of each ReLU evaluation — which is part of the             transformers are much more complex and could be costly
+GELU and Softmax approximation — to the client. Iron [28]              to compute in protocols with malicious security.
+builds up on Cheetah [32], a HE-based private transformer              Performance in Extremely Fast Networks. The run-time
+inference system, and improves its matrix-matrix multiplica-           savings of BOLT compared to Iron become less significant
+tion with a more efficient packing that encodes multiple ma-           in extremely low-latency network settings. We tested the
+trix rows in one ciphertext. Both Cheetah [32] and Iron [28]           end-to-end run-time of BOLT and Iron in an extremely fast
+do not optimally leverage all ciphertext slots in the matrix-          network setting, with bandwidth 25 Gbps and latency 0.3
+matrix multiplications as a large number of polynomial coef-           ms. BOLT without word elimination is 1.50× faster and
+ficients are set to zero. MPCFormer [44] proposes a private            BOLT with word elimination is 2.63× faster than Iron. In
+inference system for the BERT-base model using arithmetic              this network setting, our linear layers’ run-time is 0.98-
+secret-sharing. It employs knowledge distillation to cure              1.44× faster than Iron for BOLT without word elimination,
+the accuracy drop caused by MPC-friendly approximations                and 1.98-2.70× faster for BOLT with word elimination.
+(inspired by previous works [14], [50]) for the non-linear             An interesting future direction would be a hybrid protocol
+functions. Moreover, MPCFormer requires significant effort             that can automatically choose linear protocols based on the
+to conduct additional knowledge distillation on the large              network setting to leverage our efficient communication and
+models that have been well-trained, which has a significant            Iron’s fast computation.
+accuracy drop (greater than 5%) on smaller datasets like               Conclusion. We propose BOLT, a privacy-preserving, ac-
+RTE. Two recent works, PrivFormer [2], and PUMA [18]                   curate, and efficient inference protocol for transformers.
+proposed secure inference for transformers in 3PC settings             BOLT incorporates optimizations from both cryptographic
+instead of 2PC. They rely on the honest-majority assumption            primitives and machine learning. These optimizations signif-
+and the setting is different from ours 2PC.                            icantly enhance BOLT’s inference performance, advancing
+                                                                       towards practical secure inference for transformers.
+9. Discussion & Conclusion                                             Acknowledgements
+Generalizability of BOLT. As stated in § 3, the crypto-                    We thank the anonymous shepherd and reviewers for
+graphic techniques of BOLT are applicable to all transformer           their valuable feedback. We appreciate Iron’s authors’ help
+encoders, and we use BERT as an example to demonstrate                 in explaining their implementation and confirming our re-
+the efficiency of our system. Transformer decoders like                sults. This project received funding from Google Research
+GPT [57] share the same architecture as encoder models.                Scholar 2023 and the ERC under the European Union’s
+Therefore, BOLT without word elimination is directly ap-               Horizon 2020 research and innovation program (grant agree-
+plicable to transformer decoders. Algorithms from Flash                ment No. 850990 PSOTI). It was co-funded by the DFG
+Attention [15] are also compatible with BOLT but do                    within SFB 1119 CROSSING/236615297 and GRK 2050
+not significantly speed up operations since they optimize              Privacy & Trust/251805230. Any opinions, findings, con-
+GPU memory access during attention computation, whereas                clusions, or recommendations expressed in this material are
+BOLT runs on the CPU and its bottlenecks are commu-                    those of the authors, and do not necessarily reflect the views
+nication and HE computations rather than memory access.                of the sponsors.
+
+
+                                                                4766
+References                                                                          [20] Cynthia Dwork, Aaron Roth, et al. The algorithmic foundations of
+                                                                                         differential privacy. Foundations and Trends in Theoretical Computer
+                                                                                         Science, 2014.
+[1]   Openai chatgpt. https://openai.com/blog/chatgpt.
+[2]   Yoshimasa Akimoto, Kazuto Fukuchi, Youhei Akimoto, and Jun                    [21] Junfeng Fan and Frederik Vercauteren. Somewhat practical fully ho-
+      Sakuma. Privformer: Privacy-preserving transformer with mpc. In                    momorphic encryption. Cryptology ePrint Archive, Paper 2012/144,
+      2023 IEEE 8th European Symposium on Security and Privacy (Eu-                      2012. https://eprint.iacr.org/2012/144.
+      roS&P), pages 392–410. IEEE, 2023.                                            [22] Karthik Garimella, Zahra Ghodsi, Nandan Kumar Jha, Siddharth
+[3]   Martin Albrecht, Melissa Chase, Hao Chen, Jintai Ding, Shafi Gold-                 Garg, and Brandon Reagen. Characterizing and optimizing end-to-
+      wasser, Sergey Gorbunov, Shai Halevi, Jeffrey Hoffstein, Kim Laine,                end systems for private inference. In Proceedings of the 28th ACM
+      Kristin Lauter, et al. Homomorphic encryption standard. Protecting                 International Conference on Architectural Support for Programming
+      privacy through homomorphic encryption, 2021.                                      Languages and Operating Systems, Volume 3, pages 89–104, 2023.
+
+[4]   Mauro Barni, Pierluigi Failla, Riccardo Lazzeretti, Ahmad-Reza                [23] Craig Gentry. Fully homomorphic encryption using ideal lattices. In
+      Sadeghi, and Thomas Schneider. Privacy-preserving ECG classifi-                    STOC, 2009.
+      cation with branching programs and neural networks. IEEE Transac-             [24] Craig Gentry, Amit Sahai, and Brent Waters. Homomorphic encryp-
+      tions on Information Forensics and Security (TIFS), 2011.                          tion from learning with errors: Conceptually-simpler, asymptotically-
+[5]   Som S Biswas. Role of chat GPT in public health.          Annals of                faster, attribute-based. In CRYPTO, 2013.
+      Biomedical Engineering, 2023.                                                 [25] Ran Gilad-Bachrach, Nathan Dowlin, Kim Laine, Kristin Lauter,
+[6]   Fabian Boemer, Rosario Cammarota, Daniel Demmler, Thomas                           Michael Naehrig, and John Wernsing. Cryptonets: Applying neural
+      Schneider, and Hossein Yalame. MP2ML: A mixed-protocol machine                     networks to encrypted data with high throughput and accuracy. In
+      learning framework for private inference. In ARES, 2020.                           ICML, 2016.
+[7]   Jean-Philippe Bossuat, Christian Mouchet, Juan Troncoso-Pastoriza,            [26] Saurabh Goyal, Anamitra Roy Choudhury, Saurabh Raje, Venkatesan
+      and Jean-Pierre Hubaux. Efficient bootstrapping for approximate                    Chakaravarthy, Yogish Sabharwal, and Ashish Verma. Power-bert:
+      homomorphic encryption with non-sparse keys. In EUROCRYPT,                         Accelerating bert inference via progressive word-vector elimination.
+      2021.                                                                              In International Conference on Machine Learning, pages 3690–3699.
+                                                                                         PMLR, 2020.
+[8]   Zvika Brakerski. Fully homomorphic encryption without modulus
+      switching from classical GapSVP. In CRYPTO, 2012.                             [27] Shai Halevi and Victor Shoup. Bootstrapping for Helib. Journal of
+[9]   Zvika Brakerski, Craig Gentry, and Vinod Vaikuntanathan. (leveled)                 Cryptology, 2021.
+      fully homomorphic encryption without bootstrapping. ACM Transac-              [28] Meng Hao, Hongwei Li, Hanxiao Chen, Pengzhi Xing, Guowen Xu,
+      tions on Computation Theory, 2014.                                                 and Tianwei Zhang. Iron: Private inference on transformers. In
+[10] Nishanth Chandran, Divya Gupta, Sai Lakshmi Bhavana Obbattu,                        NeurIPS, 2022.
+     and Akash Shah. {SIMC}:{ML} inference secure against malicious                 [29] Aditya Hegde, Helen Möllering, Thomas Schneider, and Hossein
+     clients at {Semi-Honest} cost. In 31st USENIX Security Symposium                    Yalame. SoK: Efficient privacy-preserving clustering. PoPETs, 2021.
+     (USENIX Security 22), pages 1361–1378, 2022.
+                                                                                    [30] Dan Hendrycks and Kevin Gimpel. Bridging nonlinearities and
+[11] Nishanth Chandran, Divya Gupta, Aseem Rastogi, Rahul Sharma, and                    stochastic regularizers with gaussian error linear units. arXiv preprint
+     Shardul Tripathi. EzPC: programmable, efficient, and scalable secure                arXiv:1606.08415, 2016.
+     two-party computation for machine learning. Cryptology ePrint
+     Archive, Paper 2012/144, 2017. https://eprint.iacr.org/2017/1109.              [31] Dan Hendrycks and Kevin Gimpel. Gaussian error linear units (gelus).
+                                                                                         arXiv preprint arXiv:1606.08415, 2016.
+[12] Tianyu Chen, Hangbo Bao, Shaohan Huang, Li Dong, Binxing Jiao,
+     Daxin Jiang, Haoyi Zhou, and Jianxin Li. THE-X: Privacy-preserving             [32] Zhicong Huang, Wen jie Lu, Cheng Hong, and Jiansheng Ding. Chee-
+     transformer inference with homomorphic encryption. Annual Meeting                   tah: Lean and fast secure Two-Party deep neural network inference.
+     of the Association for Computational Linguistics (ACL), 2022.                       In USENIX Security, 2022.
+[13] Jung Hee Cheon, Andrey Kim, Miran Kim, and Yongsoo Song.                       [33] Mihai F Ionescu and Klaus E Schauser. Optimizing parallel bitonic
+     Homomorphic encryption for arithmetic of approximate numbers. In                    sort. In Proceedings 11th International Parallel Processing Sympo-
+     ASIACRYPT, 2017.                                                                    sium, pages 303–309. IEEE, 1997.
+[14] Edward Chou, Josh Beal, Daniel Levy, Serena Yeung, Albert Haque,               [34] Xiaoqian Jiang, Miran Kim, Kristin Lauter, and Yongsoo Song.
+     and Li Fei-Fei. Faster cryptonets: Leveraging sparsity for real-world               Secure outsourced matrix computation and application to neural
+     encrypted inference. arXiv preprint arXiv:1811.09953, 2018.                         networks. In Proceedings of the 2018 ACM SIGSAC conference on
+[15] Tri Dao, Dan Fu, Stefano Ermon, Atri Rudra, and Christopher Ré.                    computer and communications security, pages 1209–1222, 2018.
+     Flashattention: Fast and memory-efficient exact attention with io-             [35] Chiraag Juvekar, Vinod Vaikuntanathan, and Anantha Chandrakasan.
+     awareness. Advances in Neural Information Processing Systems,                       GAZELLE: A low latency framework for secure neural network
+     35:16344–16359, 2022.                                                               inference. In USENIX Security, 2018.
+[16] Daniel Demmler, Ghada Dessouky, Farinaz Koushanfar, Ahmad-Reza                 [36] Jongmin Kim, Gwangho Lee, Sangpyo Kim, Gina Sohn, Minsoo Rhu,
+     Sadeghi, Thomas Schneider, and Shaza Zeitouni. Automated synthe-                    John Kim, and Jung Ho Ahn. Ark: Fully homomorphic encryption
+     sis of optimized circuits for secure computation. In CCS, 2015.                     accelerator with runtime data generation and inter-operation key
+[17] Jacob Devlin, Ming-Wei Chang, Kenton Lee, and Kristina Toutanova.                   reuse. In IEEE/ACM International Symposium on Microarchitecture,
+     Bert: Pre-training of deep bidirectional transformers for language                  2022.
+     understanding. NAACL-HLT, 2018.                                                [37] Sangpyo Kim, Jongmin Kim, Michael Jaemin Kim, Wonkyung Jung,
+[18] Ye Dong, Wen-jie Lu, Yancheng Zheng, Haoqi Wu, Derun Zhao, Jin                      John Kim, Minsoo Rhu, and Jung Ho Ahn. Bts: An accelerator for
+     Tan, Zhicong Huang, Cheng Hong, Tao Wei, and Wenguang Cheng.                        bootstrappable fully homomorphic encryption. In Annual Interna-
+     Puma: Secure inference of llama-7b in five minutes. arXiv preprint                  tional Symposium on Computer Architecture, 2022.
+     arXiv:2307.12533, 2023.
+                                                                                    [38] Sehoon Kim, Amir Gholami, Zhewei Yao, Michael W Mahoney, and
+[19] William S Dorn. Generalizations of horner’s rule for polynomial                     Kurt Keutzer. I-bert: Integer-only bert quantization. In International
+     evaluation. IBM Journal of Research and Development, 1962.                          conference on machine learning. PMLR, 2021.
+
+
+
+                                                                             4767
+[39] Brian Knott, Shobha Venkataraman, Awni Hannun, Shubho Sengupta,                [59] Deevashwer Rathee, Mayank Rathee, Rahul Kranti Kiran Goli, Di-
+     Mark Ibrahim, and Laurens van der Maaten. Crypten: Secure multi-                    vya Gupta, Rahul Sharma, Nishanth Chandran, and Aseem Rastogi.
+     party computation meets machine learning. NeurIPS, 2021.                            SiRnn: A math library for secure RNN inference. In S&P, 2021.
+[40] Donald E Knuth. Evaluation of polynomials by computer. Commu-                  [60] Deevashwer Rathee, Mayank Rathee, Nishant Kumar, Nishanth Chan-
+     nications of the ACM, 1962.                                                         dran, Divya Gupta, Aseem Rastogi, and Rahul Sharma. Cryptflow2:
+                                                                                         Practical 2-party secure inference. In CCS, 2020.
+[41] Nishant Kumar, Mayank Rathee, Nishanth Chandran, Divya Gupta,
+     Aseem Rastogi, and Rahul Sharma. Cryptflow: Secure tensorflow                  [61] Evgeny Yakovlevich Remez. Sur une classe de développement des
+     inference. In S&P, 2020.                                                            fonctions en séries trigonométriques. Comptes Rendus (Doklady) de
+                                                                                         l’Académie des Sciences de l’URSS, 1934.
+[42] Ryan Lehmkuhl, Pratyush Mishra, Akshayaram Srinivasan, and                     [62] Malik Sallam. ChatGPT utility in healthcare education, research, and
+     Raluca Ada Popa. Muse: Secure inference resilient to malicious                      practice: systematic review on the promising perspectives and valid
+     clients. In 30th USENIX Security Symposium (USENIX Security 21),                    concerns. In Healthcare, 2023.
+     pages 2201–2218, 2021.
+                                                                                    [63] Nikola Samardzic, Axel Feldmann, Aleksandar Krastev, Srinivas De-
+[43] Baiyu Li, Daniele Micciancio, Mark Schultz, and Jessica Sorrell.                    vadas, Ronald Dreslinski, Christopher Peikert, and Daniel Sanchez.
+     Securing approximate homomorphic encryption using differential pri-                 F1: A fast and programmable accelerator for fully homomorphic
+     vacy. In Annual International Cryptology Conference, pages 560–589.                 encryption. In Annual IEEE/ACM International Symposium on Mi-
+     Springer, 2022.                                                                     croarchitecture, 2021.
+[44] Dacheng Li, Rulin Shao, Hongyi Wang, Han Guo, Eric P Xing, and                 [64] Nikola Samardzic, Axel Feldmann, Aleksandar Krastev, Nathan
+     Hao Zhang. MPCFormer: fast, performant and private transformer                      Manohar, Nicholas Genise, Srinivas Devadas, Karim Eldefrawy, Chris
+     inference with MPC. In International Conference on Learning                         Peikert, and Daniel Sanchez. Craterlake: a hardware accelerator
+     Representations (ICLR), 2023.                                                       for efficient unbounded computation on encrypted data. In Annual
+                                                                                         International Symposium on Computer Architecture, 2022.
+[45] Natasha Lomas. Italy orders ChatGPT blocked citing data protection
+     concerns. https://techcrunch.com/2023/03/31/chatgpt-blocked-italy/.            [65] Microsoft SEAL (release 4.1). https://github.com/Microsoft/SEAL,
+     Last accessed: 05/28/2023.                                                          January 2023. Microsoft Research, Redmond, WA.
+                                                                                    [66] Seyedmostafa Sheikhalishahi, Riccardo Miotto, Joel T Dudley, Al-
+[46] Brady D Lund and Ting Wang. Chatting about ChatGPT: how may
+                                                                                         berto Lavelli, Fabio Rinaldi, Venet Osmani, et al. Natural language
+     AI and GPT impact academia and libraries? Library Hi Tech News,
+                                                                                         processing of clinical notes on chronic diseases: systematic review.
+     2023.
+                                                                                         JMIR medical informatics, 2019.
+[47] Cecily Mauran.        Whoops, Samsung workers accidentally                     [67] Gilbert W Stewart. Afternotes on numerical analysis. SIAM, 1996.
+     leaked trade secrets via ChatGPT. https://mashable.com/article/
+     samsung-chatgpt-leak-details. Last accessed: 05/28/2023.                       [68] Sijun Tan, Brian Knott, Yuan Tian, and David J Wu. CryptGPU: Fast
+                                                                                         privacy-preserving machine learning on the GPU. In S&P, 2021.
+[48] Daniele Micciancio and Michael Walter. On the bit security of
+                                                                                    [69] Ahmed Tlili, Boulus Shehata, Michael Agyemang Adarkwah, Aras
+     cryptographic primitives. In Annual International Conference on the
+                                                                                         Bozkurt, Daniel T Hickey, Ronghuai Huang, and Brighter Agyemang.
+     Theory and Applications of Cryptographic Techniques, pages 3–28.
+                                                                                         What if the devil is my guardian angel: ChatGPT as a case study of
+     Springer, 2018.
+                                                                                         using chatbots in education. Smart Learning Environments, 2023.
+[49] Pratyush Mishra, Ryan Lehmkuhl, Akshayaram Srinivasan, Wenting                 [70] Iulia Turc, Ming-Wei Chang, Kenton Lee, and Kristina Toutanova.
+     Zheng, and Raluca Ada Popa. Delphi: a cryptographic inference                       Well-read students learn better: On the importance of pre-training
+     service for neural networks. In USENIX Security, 2020.                              compact models. arXiv preprint arXiv:1908.08962, 2019.
+[50] Payman Mohassel and Yupeng Zhang. SecureML: a system for                       [71] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion
+     scalable privacy-preserving machine learning. In S&P, 2017.                         Jones, Aidan N Gomez, Łukasz Kaiser, and Illia Polosukhin. Atten-
+                                                                                         tion is all you need. NeurIPS, 2017.
+[51] Theodore Samuel Motzkin. Evaluation of polynomials and evaluation
+     of rational functions. Bulletin of the American Mathematical Society,          [72] Alex Wang, Amanpreet Singh, Julian Michael, Felix Hill, Omer
+     1955.                                                                               Levy, and Samuel R Bowman. Glue: A multi-task benchmark and
+                                                                                         analysis platform for natural language understanding. In International
+[52] OpenAI. GPT-4 technical report. arXiv preprint arXiv:2303.08774,                    Conference on Learning Representations, 2018.
+     2023.
+                                                                                    [73] Ling Wang, Joseph Needham, and Wang Ling. Horner’s method in
+[53] Alexander M Ostrowski. On two problems in abstract algebra con-                     chinese mathematics: Its origins in the root-extraction procedures of
+     nected with horner’s rule. In Studies in Mathematics and Mechanics                  the han dynasty. T’oung Pao, 1954.
+     presented to Richard von Mises, 1954.                                          [74] Andrew C Yao. Protocols for secure computations. In Annual
+[54] V Ya Pan. Methods of computing values of polynomials. Russian                       Symposium on Foundations of Computer Science (SFCS), 1982.
+     Mathematical Surveys, 1966.                                                    [75] Zhewei Yao, Zhen Dong, Zhangcheng Zheng, Amir Gholami, Jiali
+[55] Kate Park.             Samsung bans use of generative AI                            Yu, Eric Tan, Leyuan Wang, Qijing Huang, Yida Wang, Michael
+     tools like ChatGPT after April internal data leak.                                  Mahoney, et al. Hawq-v3: Dyadic neural network quantization. In
+     https://techcrunch.com/2023/05/02/samsung-bans-use-of-generative-                   International Conference on Machine Learning, pages 11875–11886.
+     ai-tools-like-chatgpt-after-april-internal-data-leak. Last accessed:                PMLR, 2021.
+     05/28/2023.                                                                    [76] Ofir Zafrir, Guy Boudoukh, Peter Izsak, and Moshe Wasserblat.
+                                                                                         Q8bert: Quantized 8bit bert. In 2019 Fifth Workshop on Energy Ef-
+[56] Alec Radford, Karthik Narasimhan, Tim Salimans, and Ilya Sutskever.                 ficient Machine Learning and Cognitive Computing-NeurIPS Edition
+     Improving language understanding by generative pre-training. 2018.                  (EMC2-NIPS), pages 36–39. IEEE, 2019.
+[57] Alec Radford, Jeffrey Wu, Rewon Child, David Luan, Dario Amodei,               [77] Wenting Zheng, Ryan Deng, Weikeng Chen, Raluca Ada Popa,
+     Ilya Sutskever, et al. Language models are unsupervised multitask                   Aurojit Panda, and Ion Stoica. Cerebro: A platform for multi-party
+     learners. OpenAI blog, 1(8):9, 2019.                                                cryptographic collaborative learning. In USENIX Security, 2021.
+[58] Deevashwer Rathee, Anwesh Bhattacharya, Rahul Sharma, Divya                    [78] Wenting Zheng, Raluca Ada Popa, Joseph E Gonzalez, and Ion Stoica.
+     Gupta, Nishanth Chandran, and Aseem Rastogi. Secfloat: Accurate                     Helen: Maliciously secure coopetitive learning for linear models. In
+     floating-point meets secure 2-party computation. In S&P, 2022.                      S&P, 2019.
+
+
+
+                                                                             4768
+Appendix A.                                                                    The choices in the later steps depend on whether the
+Gazelle & Iron Methods for MatMul                                          reduction equation is solvable or not. This gives us n−r −1
+                                                                           multiplications, where r is the number of reduction equa-
+    In this section, we present the methods of Gazelle and                 tions we are able to solve. Approximately, we need ⌈n/2⌉
+Iron for computing ciphertext-plaintext matrix multiplica-                 multiplications and n + 1 additions. Using the above pro-
+tions.                                                                     cedure, degree-4 polynomials need 2 multiplications, while
+    Gazelle [35] packs multiple copies of the same encrypted               degree-5 only need 3 [40].
+input vector in a ciphertext, sends this to the server, and ar-
+ranges the plain weight matrix in a diagonal format in order               Appendix C.
+to compute dot products efficiently. Unfortunately, extending              Approximation Details
+this to the transformer architecture will produce inefficient
+packing for three reasons. First, the multiplication input (i.e.,              In this section, we give the exact parameters for our
+ A in our example) is a matrix instead of a vector, which                  approximations presented in §5.2 and §5.3.
+could be realized with Gazelle’s technique by encoding each                GELU:
+matrix row as one vector-ciphertext. However, this increases                    a = 0.020848611754127593,
+the number of expensive HE multiplications to m × d1 .                          b = −0.18352506127082727,
+This is significantly more than actually needed. Second,                        c = 0.5410550166368381,
+Gazelle has to rotate (a) the encrypted rows of A , or                          d = −0.03798164612714154, and
+(b) the multiplication products before summing them up to                       e = 0.001620808531841547.
+match corresponding ciphertext slots. Third, Gazelle pads                  Pre-processed GELU:
+the vector’s size to the next power of 2 to enable correct
+                                                                                g0 = 0.14439048359960427,
+summations after rotations. Taking BERT-base’s parameters
+                                                                                g1 = −0.7077117131613893,
+as an example, this essentially blows up the matrix size to
+                                                                                g2 = 4.5702822654246535,
+210 = 1024 to accommodate d = 768 model dimensions,
+                                                                                g3 = −8.15444702051307.
+resulting in 25% “wasted” ciphertext slots.
+                                                                                g4 = 16.382265425072532.
+    Iron transfers the idea of Cheetah [32] to matrix-matrix
+multiplications. They leverage polynomial coefficient pack-                Tanh:
+ing and encode the values in the polynomial coefficients.                       a = −0.013232131886235352,
+Iron arranges packing indices of the two matrices in a                          b = 0.09948747962825866,
+smart way, such that the multiplication result polynomial’s                     c = −0.20093640347818847,
+coefficients contain the inner product results of the sub-                      d = −0.17616532856475706,
+vectors of the matrices. In this way, Iron gets rid of the                      e = 1.0542492677156243,
+expensive rotations in HE. However, the result packings are                     f = −0.0024920889620412097.
+very sparse, and most of the coefficients are useless, which               Pre-processed Tanh:
+causes great communication overhead.                                            t0 = −4.259314087994767,
+                                                                                t1 = 18.86353816972803,
+Appendix B.                                                                     t2 = −36.42402897526823,
+Motzkin’s Polynomial Pre-Processing                                             t3 = −0.013232131886235352,
+                                                                                t4 = −3.3289339650097993,
+   In this section, we present the detailed Motzkin’s poly-                     t5 = −0.0024920889620412097.
+nomial pre-processing procedure.
+Theorem 1 (Motzkin’s polynomial pre-processing). Let f                     Appendix D.
+   be a polynomial of degree n:                                            Detailed Algorithm of Word Elimination
+              f (x) = xn + an−1 xn−1 + · · · + a0 .         (10)
+                                                                               In this section, we present our detailed algorithm of word
+    t, αi , βi , i ∈ [n] are constant parameters. Then f can               elimination in Alg. 2.
+    be transformed into a polynomial P . The evaluation of                     Recall that in §6.1, we sort the score vector s ∈ Rm ,
+    this new polynomial P requires evaluating the following                which forms key-value pairs with the input token sequence.
+    sequence of polynomials [40]:                                          This allows us to rank tokens by their scores and discard
+                                                                           those contributing minimally.
+          y = x + t, w = y 2 ,
+               (                                                               However, we need to maintain the relative order of
+                 w + y + β0 if n mod 2 = 0                                 remaining tokens while eliminating those with smaller con-
+          P0 =                                                             tributions. To address this, a comparison with the median
+                 y + β0        if n mod 2 = 1,
+                                                            (11)           will yield either m or 0. We then add token indices to these
+          P1 = P0 · [(w − α1 ) + β1 ],                                     comparison results and get another vector c as indicated
+          P2 = P1 · [(w − α2 ) + β2 ],                                     in line 6 of Alg. 2. In the second sorting round, we sort
+          etc.                                                              c , ensuring that tokens scoring higher than the median are
+
+
+                                                                    4769
+Algorithm 2 Oblivious Word Elimination                                  as shown in Linear 4 of Tab. 5, where the size of the RHS
+                                                                        matrix is 3072 × 768. Overall, BSGS can significantly save
+ 1: function W ORD E LIMINATE( s , X , Att )
+                                                                        rotations numbers, with a factor of 2.33× to 9.33×.
+ 2:     ▷ contribution scores, input matrix, attention result
+ 3:      s′ = BitonicSort( s )
+                                                                        Appendix G.
+ 4:      median = s′ m/2                                                Clarification on Iron’s LayerNorm Optimiza-
+ 5:     Create v ∈ Zm with vi = i
+ 6:      c = Compare( s , median ) × m + v
+                                                                        tion
+ 7:      X′ , Att′ = BitonicSortSwap( c , X , Att )                         Iron’s LayerNorm optimization is inaccurate and will
+ 8:     return X′ 1:m/2 , Att′ 1:m/2                                    introduce large errors to the inference and make the model’s
+                                                                        performance close to random guessing. LayerNorm is de-
+                                                                        fined as
+always chosen and their relative order is preserved by their                                            γ j (Xi,j − µi )
+                                                                                 LayerNorm(X)i,j =                       + βj .
+index sequence.                                                                                               σi
+    Given that bitonic sorting is a classic sorting algorithm,          Iron proposes to combine the weights of the LayerNorm
+we omit the details of its implementation. Note that the                  γ
+                                                                        ( σji and βj ) with the next linear layer’s weight to save one
+function BitonicSort in Alg. 2 returns the sorted vector s′ ,           matrix multiplication. Now the output of the LayerNorm is
+and the function BitonicSortSwap will sort c and obviously
+swap the rows of X and Att together with the elements                                 LayerNorm′ (X)i,j = Xi,j − µi .
+in c during sorting.                                                    However, Iron does not account for the residual connections
+                                                                        in transformers – the output of LayerNorm is added to
+Appendix E.                                                             subsequent layers. Given that the optimized LayerNorm does
+Scales of Linear Layers                                                 not directly produce accurate outputs, the residual connec-
+                                                                        tions will lead to significant errors, making the model’s
+    In this section, we present the scales of the different             performance close to random guessing. We have confirmed
+linear layers in secure computation-aware fine-tuning. The              this flawed optimization with Iron’s authors.
+detailed scales are shown in Tab. 4.
+             Layer      Linear #   Input   Weights
+             0,1,3-11      1         5       6
+             0-11          1         5       6
+             0-11          2         6       6
+             0-11          3         5       6
+             0-8, 11       4         4       5
+             8,9           4         4       4
+
+TABLE 4: Input and weights scale of each linear layer in
+each attention layer.
+
+
+Appendix F.
+BSGS Rotation Savings for Different Matrix
+Dimensions in BERT
+    In this section, we present the detailed savings on
+rotations of our BSGS technique applied for ciphertext-
+plaintext matrix multiplications §4.1.2. The concrete savings
+are shown in Tab. 5
+                    Linear 1   Linear 2    Linear 3   Linear 4
+ BOLT w/ BSGS         288        168         324         324
+ BOLT w/o BSGS        756        756         756        3024
+
+TABLE 5: BSGS rotation savings for different linear layers
+of BERT.
+
+    Consistent with our findings in §4.1.2, we save more
+rotations when the RHS plaintext matrix is tall and skinny
+
+
+                                                                 4770
+Appendix H.
+Meta-Review
+    The following meta-review was prepared by the program
+committee for the 2024 IEEE Symposium on Security and
+Privacy (S&P) as part of the review process as detailed in
+the call for papers.
+
+H.1. Summary
+
+    The reviewers appreciated the various cryptographic im-
+provements and system optimizations along with the effi-
+cient approximations proposed by the authors. Overall, the
+paper focuses on a timely research topic and the evaluation
+results demonstrate significant improvement over the prior
+state of the art.
+
+H.2. Scientific Contributions
+
+  •   Provides a valuable step forward in an established field.
+
+H.3. Reasons for Acceptance
+
+  •   The paper focuses on an important problem of improv-
+      ing the efficiency of secure inference.
+
+H.4. Noteworthy Concerns
+
+  •   The paper does not include a formal security proof of
+      the BOLT protocol, besides the fact that it consists of
+      secure building blocks.
+
+
+
+
+                                                                  4771
+

@@ -1,0 +1,1344 @@
+                          Homomorphic Encryption Standard
+
+ Martin Albrecht, Melissa Chase, Hao Chen, Jintai Ding, Shafi Goldwasser, Sergey Gorbunov, Jeffrey
+Hoffstein, Kristin Lauter, Satya Lokam, Daniele Micciancio, Dustin Moody, Travis Morrison, Amit Sahai,
+                                         Vinod Vaikuntanathan
+
+                                             March 12, 2018
+
+We met as a group during the Homomorphic Encryption Standardization Workshop on July 13-14, 2017,
+hosted at Microsoft Research in Redmond. Researchers from around the world represented a number of
+different communities: government, industry, and academia. There are at least 6 research groups
+around the world who have made libraries for general-purpose homomorphic encryption available
+([SEAL], [HElib], [Palisade], [cuHE], [NFLLib], [HEAAN]) for applications and general-purpose use, and
+demos were shown of all 6 libraries. [TFHE] is another library which was not demoed at the first
+workshop. All 6 of these general-purpose libraries for homomorphic encryption were based on RLWE-
+based systems (Ring Learning With Errors), and all libraries implemented one of two encryption schemes
+described below in Section 3 (BGV or B/FV) and also displayed common choices for the underlying ring,
+error distribution, and parameter selection.
+
+Homomorphic Encryption is a breakthrough new technology which can enable private cloud storage and
+computation solutions. Demos shown at the workshop included a SEAL demo of CryptoNets, which
+performs efficient computation of image processing tasks such as hand-writing recognition on encrypted
+data using neural nets. Many other applications are described in detail in the white paper by the
+Applications group. In order for Homomorphic Encryption to be adopted in medical, health, and financial
+sectors to protect data and patient and consumer privacy, it will have to be standardized, most likely by
+multiple standardization bodies and government agencies. An important part of standardization is broad
+agreement on security levels for varying parameter sets. Although extensive research and benchmarking
+has been done in the research community to establish the foundations for this effort, it is hard to find all
+the information in one place, along with concrete parameter recommendations for applications and
+deployment.
+
+This document is an attempt to capture the collective knowledge at the workshop regarding the
+currently known state of security of these schemes, to specify the schemes, and to recommend a wide
+selection of parameters to be used for homomorphic encryption at various security levels. We describe
+known attacks and their estimated running times in order to make these parameter recommendations.
+We also describe additional features of these encryption schemes which make them useful in different
+applications and scenarios. Many sections of this document are intended for direct use as a first draft of
+parts of the standard to be prepared by the Working Group formed at this workshop.
+Outline of the document:
+
+HES Section 1.0 standardizes the encryptions schemes to be used. Section 1.0 consists of:
+
+        Section 1.0.1: introduces notation and definitions.
+        Section 1.0.2: defines the security properties for homomorphic encryption.
+        Section 1.0.3: describes the BGV and B/FV schemes.
+        Section 1.0.4 describes alternative schemes: YASHE, NTRU/LTV, and GSW.
+        Section 1.0.5 describes additional features of the schemes.
+
+HES Section 2.0 recommends parameter choices to achieve security. Section 2.0 consists of:
+
+        Section 2.0.1: describes the hard problems: the LWE and RLWE assumptions.
+        Section 2.0.2: describes known attacks and their estimated running times.
+        Section 2.0.3: recommends concrete parameters to achieve various security levels.
+
+It is expected that future work to update and expand this Homomorphic Encryption Standard will use
+the following numbering convention:
+      • updates to the encryption schemes or additional schemes may be added as Sections 1.1, 1.2,…
+      • updates to security level or recommended parameters may be added as Sections 2.1, 2.2,…
+      • a new section to cover API design is planned to be added as Section 3.0, and updated as 3.1, …
+      • a new section to cover applications may be added as Section 4.0, and updated as 4.1, …
+                             Homomorphic Encryption Standard Section 1.0
+                                 Recommended Encryption Schemes
+
+Section 1.0.1 Notation and Definitions
+
+•   ParamGen(𝜆, 𝑃, 𝐾, 𝐵) → Params
+
+The parameter generation algorithm is used to instantiate various parameters used in the HE algorithms
+outlined below. As input, it takes:
+    • 𝜆 denotes the desired security level of the scheme. For instance, 128-bit security (𝜆 = 128) or
+        256-bit security.
+    • 𝑃 denotes the modulus of the plaintext numbers one wants to encrypt. For instance, 𝑃 = 1024
+        implies that each individual element of the message space is chosen from range (0, 1023) and all
+        operations over individual elements are performed modulo P.
+    • 𝐾 denotes the dimension of the vectors to be encrypted. For instance, 𝐾 = 100, 𝑃 = 1024
+        means the messages to be encrypted are vectors (𝑉0 , … , 𝑉2 ) where each 𝑉3 is chosen from the
+        range (0, 1023) and operations are performed component-wise. That is, by defintion,
+        (𝑉0 , … , 𝑉2 ) + (𝑉05 , … , 𝑉25 ) = (𝑉0 + 𝑉05 , … , 𝑉2 + 𝑉25 ). The multiplication operation over two
+        vectors is defined similarly. The space of all possible vectors (𝑉0 , … , 𝑉2 ) is referred to as the
+        message space (MS).
+    • 𝐵: denotes an auxiliary parameter that is used to control the complexity of the
+        programs/circuits that one can expect to run over the encrypted messages. Lower parameters
+        denotes “smaller”, or less expressive, or less complex programs/circuits. Lower parameters,
+        generally means smaller parameters of the entire scheme. This, as a result, translates into
+        smaller ciphertexts and more efficient evaluation procedures. Higher parameters, generally
+        increases key sizes, ciphertext sizes, and complexity of the evaluation procedures. Higher
+        parameters are, of course, necessary to evaluate more complex programs.
+
+•   PubKeygen(Params) → SK, PK, EK
+
+The public key-generation algorithm is used to generate a pair of secret and public keys. The public key
+can be shared and used by anyone to encrypt messages. The secret key should be kept private by a user
+and can be used to decrypt messages. The algorithm also generates an evaluation key that is needed to
+perform homomorphic operations over the ciphertexts. It should be given to any entity that will perform
+homomorphic operations over the ciphertexts. Any entity that has only the public and the evaluation
+keys cannot learn anything about the messages from the ciphertexts only.
+
+•   SecKeygen(Params) → SK, EK
+The secret key-generation algorithm is used to generate a secret key. This secret key is needed to both
+encrypt and decrypt messages by the scheme. It should be kept private by the user. The algorithm also
+generates an evaluation key that is needed to perform homomorphic operations over the ciphertexts.
+The evaluation key should be given to any entity that will perform homomorphic operations over the
+ciphertexts. Any entity that has only the evaluation key cannot learn anything about the messages from
+the ciphertexts only.
+
+•   PubEncrypt(PK, M) → C
+
+The public encryption algorithm takes as input the public key of the scheme and any message M from
+the message space. The algorithm outputs a ciphertext C. This algorithm generally needs to be
+randomized (that is, use random or pseudo-random coins) to satisfy the security properties.
+
+•   SecEncrypt(SK, M) → C
+
+The secret encryption algorithm takes as input the secret key of the scheme and any message M from
+the message space. The algorithm outputs a ciphertext C. This algorithm generally needs to be
+randomized (that is, use random or pseudo-random coins) to satisfy the security properties.
+
+•   Decrypt(SK, C) → M
+
+The decryption algorithm takes as input the secret key of the scheme, SK, and a ciphertext C. It outputs a
+message M from the message space. The algorithm may also output special symbol FAIL, if the
+decryption cannot successfully recover the encrypted message M.
+
+•   EvalAdd(Params, EK, C1, C2) → C3.
+
+EvalAdd is a randomized algorithm that takes as input the system parameters Params, the evaluation
+key EK, two ciphertexts C1 and C2, and outputs a ciphertext C3.
+
+The correctness property of EvalAdd is that if C1 is an encryption of plaintext element M1 and C2 is an
+encryption of plaintext element M2, then C3 should be an encryption of M1+M2.
+
+•   EvalAddConst(Params, EK, C1, M2) → C3.
+
+EvalAddConst is a randomized algorithm that takes as input the system parameters Params, the
+evaluation key EK, a ciphertext C1, and a plaintext M2, and outputs a ciphertext C3.
+
+The correctness property of EvalAddConst is that if C1 is an encryption of plaintext element M1, then C3
+should be an encryption of M1+M2.
+•   EvalMult(Params, EK, C1, C2) → C3.
+
+EvalMult is a randomized algorithm that takes as input the system parameters Params, the evaluation
+key EK, two ciphertexts C1 and C2, and outputs a ciphertext C3.
+
+The correctness property of EvalMult is that if C1 is an encryption of plaintext element M1 and C2 is an
+encryption of plaintext element M2, then C3 should be an encryption of M1*M2.
+
+•   EvalMultConst(Params, EK, C1, M2) → C3.
+
+EvalMultConst is a randomized algorithm that takes as input the system parameters Params, the
+evaluation key EK, a ciphertexts C1, and a plaintext M2, and outputs a ciphertext C3.
+
+The correctness property of EvalMultConst is that if C1 is an encryption of plaintext element M1, then
+C3 should be an encryption of M1*M2.
+
+•   Refresh(Params, flag, EK, C1) → C2.
+
+Refresh is a randomized algorithm that takes as input the system parameters Params, a multi-valued flag
+(which can be either one of “Relinearize”, “ModSwitch” or “Bootstrap”), the evaluation key EK, and a
+ciphertext C1, and outputs a ciphertext C2.
+
+The correctness property of Refresh is that if C1 is an encryption of plaintext element M1, then C2
+should be an encryption of M1 as well.
+
+The desired property of the Refresh algorithm is that it turns a “complex” ciphertext of a message into a
+“simple” one of the same message. Two embodiments of the Refresh algorithm are (a) the
+bootstrapping procedure, which takes a ciphertext with large noise and outputs a ciphertext of the same
+message with a fixed amount of noise; and (b) the key-switching procedure, which takes a ciphertext
+under one key and outputs a ciphertext of the same message under a different key.
+
+•   ValidityCheck(Params, EK, [C], COMP) → flag.
+
+ValidityCheck is a deterministic algorithm that takes as input the system parameters Params, the
+evaluation key EK, an array of ciphertexts [C], and a specification of the homomorphic computation
+encoded as a straight-line program COMP, and outputs a Boolean flag.
+
+The correctness property of ValidityCheck is that if ValidityCheck outputs flag = 1, then doing the
+homomorphic computation COMP on the vector of ciphertexts [C] produces a ciphertext that decrypts
+to the correct answer.
+Section 1.0.2 Properties
+
+Semantic Security or IND-CPA Security: At a high level, a homomorphic encryption scheme is said to be
+secure if no adversary has an advantage in guessing (better than ½ chance) whether a given ciphertext is
+an encryption of two different messages. This requires encryption to be randomized so that two
+different encryptions of the same message do not look the same.
+
+Suppose a user runs the parameter and the key-generation algorithms to provide the key tuple. An
+adversary is assumed to have the parameters, the evaluation key EK, a public key PK (only in the public-
+key scheme), and can obtain encryptions of messages of its choice. The adversary is then given an
+encryption of one of two messages (computed by the above encryption algorithm) of its choice without
+knowing which message the encryption corresponds to. The security of HE then guarantees that the
+adversary cannot guess which message the encryption corresponds to with significant advantage better
+than a ½ chance. This captures the fact that no information about the messages is revealed in the
+ciphertext.
+
+Compactness: The compactness property of a homomorphic encryption scheme guarantees that
+homomorphic operations on the ciphertexts do not expand the length of the ciphertexts. That is, any
+evaluator can perform an arbitrary supported list of evaluation function calls and obtain a ciphertext in
+the ciphertext space (that does not depend on the complexity of the evaluated functions).
+
+Efficient decryption: Efficient decryption property says that the homomorphic encryption scheme
+always guarantees that the decryption runtime does not depend on the functions which was evaluated
+on the ciphertexts.
+
+Section 1.0.3. Homomorphic Encryption Schemes
+
+In this section, we describe the two primary schemes that we recommend for implementation of
+homomorphic encryption, [BGV12] and [B12]/[FV12]. In Section 1.0.4 below, we refer to 3 alternative
+schemes [YASHE], [NTRU]/[LTV], [GSW]. These alternative schemes have features which BGV and B/FV
+do not have, however they also have disadvantages with respect to performance and security.
+
+a. Brakerski-Gentry-Vaikuntanathan (BGV)
+
+We focus here on describing the basic version of the BGV encryption scheme. Optimizations to the basic
+scheme will be discussed at the end of this section.
+
+•   BGV.ParamGen(λ, P, K, B) → Params.
+
+Recall that λ is the security level parameter, 𝑃 > 1 is an integer plaintext modulus and 𝐾 ≥ 1 is an
+integer vector length.
+In the basic BGV scheme, the auxiliary input 𝐵 is simply an integer that determines the maximum
+multiplicative depth of the homomorphic computation which is simply the maximum number of
+sequential multiplications required to perform the computation. For example, the function
+𝑓(𝑥0 , 𝑥: , 𝑥; , 𝑥< ) = 𝑥0 𝑥: + 𝑥; 𝑥< has multiplicative depth 1.
+
+In the basic BGV scheme, the parameters param consists of the degree parameter 𝑛, the ciphertext
+modulus parameter 𝑞, and the error distribution 𝜒 which is a discrete Gaussian distribution with
+standard deviation parameter 𝛼 set according to the security guidelines specified in Section 5.
+
+•   BGV.SecKeygen(params) → SK, EK
+
+In the basic BGV scheme, the secret key SK is an element s chosen from the error distribution 𝜒.
+
+In the basic BGV scheme, there is no evaluation key EK.
+
+•   BGV.PubKeygen(params) → SK, PK, EK.
+
+In the basic BGV scheme, PubKeygen first runs SecKeygen and obtains (SK, EK) where SK is an element 𝑠
+that belongs to the ring R.
+
+PubKeygen chooses a uniformly random element a from the ring 𝑅/𝑞𝑅 and outputs the public key PK
+which is a pair of ring elements (𝑎, 𝑏) = (𝑎, 𝑎 ∗ 𝑠 + 𝑝 ∗ 𝑒) where 𝑒 is chosen from the error distribution
+𝜒.
+
+•   BGV.SecEncrypt(SK, M) → C
+
+In the basic BGV scheme, SecEncrypt first maps the message M which comes from the plaintext space
+𝑍JK into an element of the ring 𝑅/𝑝𝑅.
+
+SecEncrypt then samples a uniformly random element a from the ring R/qR and outputs the pair of ring
+elements (𝑐M , 𝑐0 ) = (𝑎, 𝑎 ∗ 𝑠 + 𝑝 ∗ 𝑒 + 𝑀) where 𝑒 is chosen from the error distribution 𝜒.
+
+•   BGV.PubEncrypt(PK, M) → C
+
+In the basic BGV scheme, Pub.Encrypt first maps the message 𝑀 which comes from the plaintext space
+𝑍JK into an element of the ring 𝑅/𝑝𝑅. Recall that the public key PK is a pair of elements (𝑎, 𝑏).
+
+PubEncrypt then samples three uniformly random elements 𝑟, 𝑓 and 𝑓’ from the error distribution 𝜒 and
+outputs the pair of ring elements (𝑐M , 𝑐0 ) = (𝑎 ∗ 𝑟 + 𝑓, 𝑏 ∗ 𝑟 + 𝑝 ∗ 𝑓’ + 𝑀).
+•   BGV.Decrypt(SK, C) → M
+
+In the basic BGV scheme, Decrypt takes as input the secret key which is an element 𝑠 of the ring 𝑅, and a
+ciphertext C = (𝑐M , 𝑐0 ) which is a pair of elements from the ring 𝑅/𝑞𝑅.
+
+We remark that a ciphertext C produced as the output of the encryption algorithm has two elements in
+𝑅/𝑞𝑅, but upon homomorphic evaluation, ciphertexts can grow to have more ring elements. The
+decryption algorithm has to be modified appropriately to handle such ciphertexts.
+
+Decrypt first computes the ring element 𝑐M ∗ 𝑠 + 𝑐0 over 𝑅/𝑞𝑅 and interprets it as an element 𝑐’ in the
+ring 𝑅. It then computes 𝑐’ (mod 𝑝), an element of 𝑅/𝑝𝑅, which it outputs.
+
+•   BGV.EvalAdd(Params, EK, C1, C2) → C3.
+
+In the basic BGV scheme, EvalAdd takes as input ciphertexts C1 = (𝑐0,M , 𝑐0,0 ) and C2 = (𝑐:,M , 𝑐:,0 ) and
+outputs C3 = (𝑐0,M + 𝑐:,M , 𝑐0,0 + 𝑐:,0 ).
+
+•   BGV.EvalMult(Params, EK, C1, C2) → C3.
+
+In the basic BGV scheme, EvalMult takes as input ciphertexts C1 = (𝑐0,M , 𝑐0,0 ) and C2 = (𝑐:,M , 𝑐:,0 ) and
+outputs C3 = (𝑐0,M ∗ 𝑐:,M , 𝑐0,M ∗ 𝑐:,0 + 𝑐0,0 ∗ 𝑐:,M , 𝑐0,0 ∗ 𝑐:,0 ).
+
+The Full BGV Scheme
+
+In the basic BGV scheme, ciphertexts grow as a result of EvalMult. For example, given two ciphertexts
+each composed of two ring elements, EvalMult as described above results in three ring elements. This
+can be further repeated, but has the disadvantage that upon evaluating a degree-𝑑 polynomial on the
+plaintexts, the resulting ciphertext has 𝑑 + 1 ring elements.
+
+This deficiency is mitigated in the full BGV scheme, with two additional procedures. The first is called
+“Key Switching” or “Relinearization” which is implemented by calling the Refresh subroutine with flag =
+“KeySwitch”, and the second is “Modulus Switching” or “Modulus Reduction” which is implemented by
+calling the Refresh subroutine with flag = “ModSwitch”. Support for key switching and modulus
+switching also necessitates augmenting the key generation algorithm.
+
+For details on the implementation of the full BGV scheme, we refer the reader to [BGV12].
+
+Properties Supported. The BGV scheme supports many features described in Section 6, including
+packed evaluations of circuits and can be extended into a threshold homomorphic encryption scheme.
+In terms of security, the BGV homomorphic evaluation algorithms can be augmented to provide
+evaluation privacy. Note that evaluation privacy is defined below with respect to semi-honest
+adversaries.
+
+b. Brakerski/Fan-Vercauteren (BFV)
+
+We assume the parameters are instantiated following the recommendations outlined in Section 5. The
+parameters include:
+    • Two distributions 𝐷0 , 𝐷:
+    • a ring 𝑅 and its corresponding integer modulo q
+    • Integer 𝑇, and 𝐿 = log Y 𝑞. T is the bit-decomposition modulus.
+    • Plaintext modulus 𝑃, and plaintext ring 𝑅/𝑃𝑅
+    • Integer 𝑊 = ⌊𝑞/𝑃 ⌋
+
+
+•   BFV.SecKeygen(Params)
+
+The secret key SK of the encryption scheme is a random element 𝑆 from the distribution 𝐷: defined as
+per Section 5. The evaluation key consists of 𝐿 LWE samples encoding the secret 𝑆 in a specific fashion.
+In particular, for 𝑖 = 0, … , 𝐿, sample a random 𝐴3 from 𝑅 and error 𝐸3 from 𝐷0 , compute
+
+                                  𝐸𝐾3 = a−(𝐴3 𝑆 + 𝐸3 ) + 𝑇 3 𝑆 : , 𝐴3 c,
+and set 𝐸𝐾 = (𝐸𝐾M , … , 𝐸𝐾d ).
+
+•   BFV.PubKeygen(params):
+
+The secret key SK of the encryption scheme is a random element S from the distribution D2 defined as
+per Section XYZ. The public key is a random LWE sample with the secret S. In particular, it is computed
+by sampling a random element 𝐴 from 𝑅 and an error 𝐸 from the distribution 𝐷0 and setting:
+𝑃𝐾 = (−(𝐴𝑆 + 𝐸), 𝐴), where all operations are performed over the ring 𝑅.
+
+The evaluation key is computed as in BFV.SecKeygen.
+
+•   BFV.PubEncrypt(PK, M):
+
+BFV.Pub.Encrypt first maps the message 𝑀 which comes from the message space into an element in the
+ring 𝑅/𝑃𝑅 .
+
+To encrypt a message 𝑀 from 𝑅/𝑃𝑅, parse the public key as a pair 𝑃𝐾M , 𝑃𝐾0 . Encryption consists of two
+LWE samples using a secret 𝑈 where 𝑃𝐾M , 𝑃𝐾0 is treated as public randomness. The first LWE sample
+encodes the message 𝑀, whereas the second sample is auxiliary.
+In particular, C = (𝑃𝐾M ∗ 𝑈 + 𝐸0 + 𝑊 ∗ 𝑀, 𝑃𝐾0 ∗ 𝑈 + 𝐸: ) where 𝑈 is a sampled from 𝐷: , and 𝐸0 , 𝐸:
+are sampled from 𝐷0 .
+
+•   BFV.SecEncrypt(PK, M):
+
+•   BFV.Decrypt(SK, C):
+
+The main invariant of the BFV scheme is that when we interpret the elements of a ciphertext
+C as the coefficients of a polynomial then, C(S) = 𝑊 ∗ 𝑀 + 𝐸 for some “small” error 𝐸. From it, 𝑀 can
+be recovered easily by dividing by 𝑊 and rounding the result.
+
+•   BFV.EvalAdd(EK, C1, C2):
+
+Parse the ciphertexts as Ci = (𝐶3,M , 𝐶3,0 ). Then, addition simply corresponds to component-wise addition
+of two ciphertext components.
+That is, 𝐶 g = (𝐶0,M + 𝐶:,M , 𝐶0,0 + 𝐶:,0 ).
+It is easy to verify that 𝐶 g (𝑆) = 𝑊 ∗ (𝑀0 + 𝑀: ) + 𝐸, where M1, M2 are messages encrypted in C1,
+C2 and E is the new error component.
+
+•   BFV.EvalMult(EK, C1, C2):
+
+To multiple two ciphertexts, we interpret each ciphertext as a list of polynomial coefficients over a
+variable. EvalMult is just a polynomial multiplication (followed by a rounding step to the nearest
+integer).
+Concretely, 𝐶 ∗ = 𝑟𝑜𝑢𝑛𝑑((𝑃/𝑞)𝐶0 ∗ 𝐶: ) 𝑚𝑜𝑑 𝑞. Recalls that 𝑊 = ⌊𝑞/𝑃 ⌋).
+It is somewhat easy to verify that 𝐶 ∗ (𝑆) = 𝑊 ∗ (𝑀0 ∗ 𝑀: ) + 𝐸, for some new error 𝐸.
+
+One may note that the ciphertext size increases in this operation. One may apply a Refresh algorithm to
+obtain a new compact ciphertext of the original size encoding the same message 𝑀0 ∗ 𝑀: .
+
+Properties Supported. The complete BFV scheme supports many features described in Section 6,
+including packed evaluations of circuits and can be extended into a threshold homomorphic encryption
+scheme. In terms of security, the BFV homomorphic evaluation algorithms can be augmented to provide
+evaluation privacy.
+
+For details on the implementation of the full BFV scheme, we refer the reader to [B12], [FV12].
+
+c. Comparison between BGV and BFV
+
+When implementing HE schemes, there are many choices which can be made to optimize performance
+for different architectures and different application scenarios. This makes a direct comparison of these
+schemes quite challenging. A paper by Costache and Smart [CS16] gives some initial comparisons
+between BGV, B/FV and two of the schemes described below: YASHE and LTV/NTRU. A paper by Kim and
+Lauter [KL15] compares the performance of the BGV and YASHE schemes in the context of applications.
+Since there is further ongoing work in this area, we leave this comparison as an open research question.
+
+Section 1.0.4. Other Schemes
+
+Yet Another Somewhat Homomorphic Encryption ([YASHE]) is similar to the BGV and BFV schemes and
+offers the same set of features.
+
+The scheme NTRU/Lopez-Alt-Tromer-Vaikuntanathan ([NTRU]/[LTV]) relies on the NTRU assumption
+(also called the “small polynomial ratios assumption”). It offers all the features of BGV and BFV, and in
+addition, also offers an extension that supports multi-key homomorphism.
+
+The scheme proposed by Gentry-Sahai-Waters [GSW13] offers a different set of trade-offs between
+advantages and disadvantages.
+
+The GSW scheme and Bootstrapping
+
+Currently, the most practical homomorphic encryption schemes only allow to perform bounded depth
+computations. These schemes can be transformed into fully homomorphic ones (capable of arbitrary
+computations) using a “bootstrapping” technique introduced by Gentry [G09], which essentially consists
+of a homomorphic evaluation of the decryption algorithm given the encryption of the secret key.
+Bootstrapping is a very time consuming operation, and improving on its efficiency is still a very active
+research area. So, it may still not be ready for standardization, but it is the next natural step to be
+considered.
+
+Bootstrapping using the BGV or BFV schemes requires assuming that lattice problems are
+computationally hard to approximate within factors that grow superpolynomially in the lattice
+dimension n. This is a stronger assumption than the inapproximability within polynomial factors
+required by standard (non-homomorphic) lattice-based public key encryption.
+
+In [GSW13], Gentry, Sahai and Waters proposed a new homomorphic encryption scheme (still based on
+lattices) that offers a different set of trade-offs than BGV and BFV. An important feature of this scheme
+is that it can be used to bootstrap homomorphic encryption based on the assumption that lattice
+problems are hard to approximate within polynomial factors. Here we briefly describe the GSW
+encryption, and show how both its security and applicability to bootstrapping are closely related to LWE
+encryption, as used by the BGV and BFV schemes. So, future standardization of bootstrapping (possibly
+based on the GSW scheme) could build on the current standardization effort.
+For simplicity, we focus on secret key encryption, as this is typically enough for applications to
+bootstrapping. The GSW secret key encryption scheme (or, more specifically, its secret key, ring-based
+variant presented in [AP14, DM15]) can be described as follows:
+    •   GSW.Keygen(params):
+        This is essentially the same as the key generation procedure of the BGV or BFV schemes, taking
+        a similar set of security parameters, and producing a random ring element S which serves as a
+        secret key.
+
+    •   GSW.SecEncrypt(S,M):
+        Choose a 2*log(q) dimensional uniformly random vector A in R2 log(q), a small random vector E
+        (with entries chosen independently at random from the error distribution), and output the
+        ciphertext C = (A,A*S+E) + M*G where G=[I,2 I,…,2k-1 I] is a gadget matrix consisting of k=log(q)
+        copies of the 2x2 identity matrix I (over the ring), scaled by powers of 2.
+
+We omit the description of the decryption procedure, as it is not needed for bootstrapping. Notice that:
+
+    •   The secret key generation process is the same as most other LWE-based encryption schemes,
+        including BGV and BFV.
+    •   The encryption procedure essentially consists of 2*log(q) independent application of the basic
+        LWE/BGV/BFV encryption: choose random key elements a and e, and outputs (a,as+e+m), but
+        applied to scaled copies of the message 2i M. (The even rows of the GSW ciphertext encrypt the
+        message as (a+m,as+e), but this is just a minor variant on LWE encryption, and equivalent to it
+        from a security standpoint.)
+    •   Security rests on the standard LWE assumption, as used also by BGV and BFV, which says that
+        the distribution (A,A*S+E) is pseudorandom.
+
+So, GSW can be based on LWE security estimates similar to those used to instantiate the BGV or BFV
+cryptosystems.
+
+In [GSW13] it is shown how (a public key version of) this cryptosystem supports both addition and
+multiplication, without the need for an evaluation key, which has applications to identity-based and
+attribute-based homomorphic encryption. Later, in [BV14] it was observed how the GSW multiplication
+operation exhibits an asymmetric noise growth that can be exploited to implement bootstrapping based
+on the hardness of approximating lattice problems within polynomial factors. Many subsequent papers
+(e.g., [AP14, DM15, GINX16, CGGI16]) improve on the efficiency of [BV14], but they all share the
+following features with [BV14]:
+     • They all use variants of the GSW encryption to implement bootstrapping.
+     • Security only relies on the hardness of approximating lattice problems within polynomial factors.
+     • They are capable of bootstrapping any LWE-based encryption scheme, i.e., any scheme which
+         includes an LWE encryption of the message as part of the ciphertext. LWE-based schemes
+         include BGV, BFV and GSW.
+In particular, GSW can be used to implement the bootstrapping procedure for BGV and BFV, and turn
+them into fully homomorphic encryption (FHE) schemes.
+Section 1.0.5. Additional Features & Discussion
+
+Distributed HE
+
+Homomorphic Encryption is especially suitable to use for multiple users who may want to run
+computations on an aggregate of their sensitive data. For the setting of multiple users, an additional
+property which we call threshold-HE is desirable. In threshold-HE the key-generation algorithms,
+encryption and decryption algorithms are replaced by a distributed-key-generation (DKG) algorithm,
+distributed-encryption (DE) and distributed-decryption (DD) algorithms. Both the distributed-key-
+generation algorithm and the distributed-decryption algorithm are executed via an interactive process
+among the participating users. The evaluation algorithms EvalAdd, EvalMult, EvalMultConst,
+EvalAddConst and Refresh remain unchanged.
+
+We will now describe the functionality of the new algorithms.
+
+We begin with the distributed-key-generation (DKG) algorithm to be implemented by an interactive
+protocol among 𝑡 parties 𝑝0 , … , 𝑝l . The DKG algorithm is a randomized algorithm. The inputs to DKG are:
+security parameter, number of parties 𝑡, and threshold parameter 𝑑.
+The output of DKG is a vector of secret keys 𝑠 = (𝑠0 , . . . . , 𝑠l ) of dimension 𝑡 and a public evaluation key
+Ek where party 𝑝3 receives (Ek,𝑠3 ).
+We remark that party 𝑝3 doesn’t receive 𝑠m for 𝑖 ≠ 𝑗 and party 𝑖 should maintain the secrecy of its secret
+key 𝑠3 .
+
+Next, the distributed-encryption (DE) algorithm is described.
+The DE algorithm is a randomized algorithm which can be run by any party 𝑝3
+The inputs to DE run by party 𝑝3 are: the secret key 𝑠3 and the plaintext 𝑀
+The output of DE is a ciphertext C.
+
+Finally, we describe the distributed-decryption (DD) algorithm to be implemented by an interactive
+protocol among a subset of the 𝑡 parties 𝑝0 , … , 𝑝l .
+The DD algorithm is a randomized algorithm.
+The inputs to DD are: a subset of secret keys 𝑠 = (𝑠0 , . . . . , 𝑠l ), the threshold parameter 𝑑, and a
+ciphertext C. In particular, every participating party 𝑝3 provides the input𝑠3 . The ciphertext C can be
+provided by any party.
+The output of DD is: plaintext 𝑀.
+
+The correctness requirement that the above algorithms should satisfy is as follows.
+If at least 𝑑 of the parties correctly follow the prescribed interactive protocol that implements the DD
+decryption algorithm, then the output of the decryption algorithm will be correct.
+The security requirement is for semantic security to hold as long as fewer than 𝑑 parties collude
+adversarially.
+An example usage application for (DKG,DE,DD) is for two hospitals, 𝑡 = 2 and 𝑑 = 2 with sensitive data
+sets 𝑀0 and 𝑀: (respectively) who want to compute some analytics 𝐹 on the joint data set without
+revealing anything about 𝑀0 and 𝑀: except for what is revealed by 𝐹(𝑀0 , 𝑀: ).
+
+In such a case the two hospitals execute the interactive protocol for DKG and obtain their respective
+secret keys 𝑠0 and 𝑠: and the evaluation key EK. They each use DE on secret key 𝑠3 and data 𝑀3 to
+produce ciphertext Ci. The evaluation algorithms on C1, C2 and the evaluation key EK allow the
+computation of a ciphertext C which is an encryption of 𝐹(𝑀0 , 𝑀: ). Now, the hospitals execute the
+interactive protocol DD using their secret keys and ciphertext C to obtain 𝐹(𝑀0 , 𝑀: ).
+
+Active Attacks
+
+One can consider stricter security requirements beyond semantic security. For example,
+Suppose a client holds data 𝑀 and wishes to compute 𝐹(𝑀) for a specified algorithm 𝐹.
+
+The client outsources the computation of 𝐹(𝑀) to a cloud maintaining the privacy of 𝑀 as follows. The
+client encrypts 𝑀 into ciphertext C and hands C to the cloud server. The server is supposed to use the
+evaluation algorithms to compute a ciphertext C’ which is an encryption of 𝐹(𝑀) and return this to the
+client for decryption.
+Suppose that instead the cloud computes some other C’’ which is the encryption of 𝐺(𝑀) for some
+other function 𝐺. This may be problematic to the client as it would introduce errors of potentially
+significant consequences. This is an example of an active attack which is not ruled out by semantic
+security.
+
+We remark that to such attacks against homomorphic encryption schemes cannot be prevented without
+additional measures.
+
+Another, possibly even more severe attack, is the situation where the adversary somehow gains
+temporary ability to decrypt certain C’s of its choice with the goal of learning sensitive data of the client.
+Again, this attack is not addressed by the semantic security guarantee.
+
+Evaluation Privacy
+
+A desirable additional security property beyond semantic security would be that the ciphertext C hides
+which computations were performed homomorphically to obtain C. We call this security requirement
+Evaluation Privacy.
+For example, suppose a cloud service offers a service in the form of computing a proprietary machine
+learning algorithm 𝐹 on the client’s sensitive data. As before, the client encrypts its data 𝑀 to obtain C
+and sends the cloud C and the evaluation key EK. The cloud now computes C’ which is an encryption of
+𝐹(𝑀) to hand back to the client. Evaluation privacy will guarantee that C’ does not reveal anything
+about the algorithm 𝐹 which is not derivable from the pair (𝑀, 𝐹(𝑀)). Here we can also distinguish
+between semi-honest and malicious evaluation privacy depending on whether the ciphertext C is
+generated correctly according to the Encrypt algorithm.
+
+A weaker requirement would be to require evaluation privacy only with respect to an adversary who
+does not know the secret decryption key. This may be relevant for an adversary who intercepts
+encrypted network traffic.
+
+Key Evolution
+
+Say that a corpus of ciphertexts encrypted under a secret key SK is held by a server, and the client who
+owns SK realizes that SK may have been compromised.
+It is desirable for an encryption scheme to have the following key evolution property. Allow the client to
+generate a new secret key SK’ which replaces SK, a new evaluation key EK’, and a transformation key TK
+such that: the server, given only TK and EK’, may convert all ciphertexts in the corpus to new ciphertexts
+which (1) can be decrypted using SK’ and (2) satisfy semantic security even for an adversary who holds
+SK.
+
+Any sufficiently homomorphic encryption scheme satisfies the key evolution property as follows. Let TK
+be the encryption of SK under SK’. Namely, TK is a ciphertext which when decrypted using secret key SK’
+yields SK. A server given TK and EK’, can convert a ciphertext C in the corpus into C’ by homomorphically
+evaluating the decryption process. Security follows from semantic security of the original homomorphic
+encryption scheme.
+
+Proxy Re-encryption
+
+Imagine two parties each with a different secret key SK1 and Sk2 respectively.
+They wish to enable a third party to convert ciphertext decryptable with SK1 to ciphertext (with the
+same underlying plaintext) decryptable with SK2.
+The idea is to generate a so called re-encryption key TK, the knowledge of which allows this conversion
+to occur and to hand TK to the third party. We they say that the third party is a proxy which performs
+proxy re-encryption.
+Note that the key evolution procedure described above can also be utilized to achieve
+Proxy re-encryption. In this case SK1=SK and SK2=Sk’.
+
+The security property required is that the third party holding TK cannot decrypt ciphertexts which can be
+decrypted with SK1 or SK2 alone.
+This security property follows from semantic security of the original homomorphic encryption scheme.
+
+
+
+Side Channel Attacks
+Side channel attacks consider adversaries who can obtain partial information about the secret key of an
+encryption scheme, for example by running timing attacks during the execution of the decryption
+algorithm. A desirable security requirement from an encryption scheme is resiliency against such
+attacks, often referred to as leakage resiliency. That is, it should be impossible to violate semantic
+security even in presence of side channel attacks. Naturally, leakage resilience can hold only against
+limited information leakage about the secret key.
+
+An attractive feature of encryption schemes based on intractability of integer lattice problems, and in
+particular known HE schemes based on intractability of integer lattice problems, is that they satisfy
+leakage resilience to a great extent. This is in contrast to public-key cryptosystems such as RSA.
+
+
+
+Identity Based Encryption
+
+In an identity based encryption scheme it is possible to send encrypted messages to users without
+knowing either a public key or a secret key, but only the identity of the recipient where the identity can
+be a legal name or an email address.
+
+This is possible as long as there exists a trusted party (TP) that publishes some public parameters PP and
+holds a master secret key MSK. A user with identity X upon authenticating herself to the TP (e.g. by
+showing a government issued ID), will receive a secret key SKx that the user can use to decrypt any
+ciphertext that was sent to the identity X. To encrypt message M to identity X, one needs only to know
+the public parameters PP and X.
+
+Identity based homomorphic encryption is a variant of public key homomorphic encryption which may
+be desirable.
+Remark: A modification of GSW supports identity based homomorphic encryption.
+                             Homomorphic Encryption Standard Section 2.0
+                                 Recommended Security Parameters
+
+Section 2.0.1 Hard Problems
+
+This section describes the problems which are assumed to be hard as the basis for the security of the
+homomorphic encryption schemes. Known security reductions to other problems are not included here.
+Section 2.0.2 below describes the best currently known attacks on these problems and their concrete
+running times. Section 2.0.3 below recommends concrete parameter choices to achieve various security
+levels against currently known attacks.
+
+a. The Learning with Errors (LWE) Assumption
+
+The LWE assumption is defined by a triple of parameters (𝑛, 𝑚, 𝑞, 𝜒) where 𝑛 is a positive integer
+referred to as the “dimension parameter”, 𝑞 is a positive integer referred to as the “modulus
+parameter” and 𝜒 is a probability distribution over rational integers referred to as the “error
+distribution”.
+
+The LWE assumption requires that the following two probability distributions are computationally
+indistinguishable:
+
+Distribution 1. Choose a uniformly random matrix 𝑛 × 𝑚 matrix 𝐴, a uniformly random (row) vector 𝑠
+from the vector space 𝑍st , and a (row) vector 𝑒 from 𝑍 u where each coordinate is chosen from the error
+distribution 𝜒. Compute 𝑏 ∶= 𝑠𝐴 + 𝑒. By definition, all computations here are carried out modulo 𝑞.
+Output (𝐴, 𝑏).
+
+Distribution 2. Choose a uniformly random 𝑛 × 𝑚 matrix 𝐴, and a uniformly random (row) vector 𝑏 from
+𝑍su . Output (𝐴, 𝑏).
+
+The error distribution 𝜒 can be either a discrete Gaussian distribution over the integers, or another
+distribution supported on small integers. We refer the reader to Section 2.0.2 for more details on
+particular error distributions, algorithms for sampling from these distributions, and the associated
+security implications.
+
+b. The Ring Learning with Errors (RLWE) Assumption
+
+The RLWE assumption is a specific case of LWE where the matrix 𝐴 is chosen to have special algebraic
+structure.
+
+The RLWE assumption is defined by a triple of parameters (𝑛, 𝑚, 𝑞, 𝜒) where 𝑛 is a positive integer
+which is a power of two, referred to as the “degree parameter”, 𝑞 is a positive integer referred to as the
+“modulus parameter” and 𝜒 is a probability distribution over the ring R referred to as the “error
+distribution”.
+
+The RLWE assumption requires that the following two probability distributions are computationally
+indistinguishable:
+
+Distribution 1. Choose a uniformly random element a from the ring 𝑅/𝑞𝑅, a uniformly random element
+𝑠 from the ring 𝑅/𝑞𝑅, and an element 𝑒 from the ring 𝑅 chosen from the error distribution 𝜒. Compute
+𝑏 ∶= 𝑠𝑎 + 𝑒. By definition, all computations here are carried out over the ring 𝑅/𝑞𝑅. Output (𝑎, 𝑏).
+
+Distribution 2. Choose a uniformly random element 𝑎 from the ring 𝑅/𝑞𝑅, and a uniformly random
+element 𝑏 from the ring 𝑅/𝑞𝑅. Output (𝑎, 𝑏).
+
+The error distribution 𝜒 can be either a discrete Gaussian distribution over the ring 𝑅, or another
+distribution supported on “small” ring elements. We refer the reader to Section 2.0.3 for more details
+on particular error distributions, algorithms for sampling from these distributions, and the associated
+security implications.
+
+Section 2.0.2 Known Attacks and Running Times
+
+We review algorithms for solving the LWE problem and use them to suggest concrete parameter
+choices. The schemes described above all have versions based on the LWE and the RLWE assumptions.
+When the schemes based on RLWE are instantiated with rings which are 2-power or prime cyclotomic
+rings, we do not currently know better attacks on RLWE than on LWE. The following estimates and
+attacks refer to attacks on the LWE problem with the specified parameters. In a later section, we will
+discuss security issues related to varying the choice of ring.
+
+Much of this section is based on the paper by Albrecht, Player, and Scott (Albrecht, Player, & Scott,
+2015), the online Estimator tool which accompanies that paper, and (Albrecht, 2017; Albrecht, Göpfert,
+Virdia, & Wunderer, 2017). Indeed, we reuse text from those works here. Estimated security levels in all
+the tables in this section were obtained by running the Estimator based on its state in July 2017. The
+tables in this section give the best attacks (in terms of running time expressed in 𝑙𝑜𝑔: ) among all known
+attacks as implemented by the Estimator tool. As attacks or implementations of attacks change, or as
+new attacks are found, these tables will need to be updated. First, we describe all the attacks which give
+the best running times when working on parameter sizes in the range which are interesting for
+Homomorphic Encryption.
+The LWE problem asks to recover a secret vector 𝑠 ∈ 𝑍st , given a matrix 𝐴 ∈ 𝑍su×t and a vector 𝑐 ∈ 𝑍su
+such that 𝐴𝑠 + 𝑒 = 𝑐 𝑚𝑜𝑑 𝑞 for a short error vector 𝑒 ∈ 𝑍su sampled coordinate-wise from an error
+distribution 𝜒. The decision variant of LWE asks to distinguish between an LWE instance (𝐴, 𝑐) and
+uniformly random (𝐴, 𝑐) ∈ 𝑍su×t × 𝑍su . To assess the security provided by a given set of parameters
+𝑛, 𝜒, 𝑞, two strategies are typically considered.
+The primal strategy finds the closest vector to 𝑐 in the integral span of columns of 𝐴 mod 𝑞 ([LP11]),
+i.e. it solves the corresponding Bounded Distance Decoding problem (BDD) directly.
+a. Primal (uSVP variant)
+
+Writing [𝐼t |𝐴′] for the reduced row echelon form of 𝐴Y ∈ 𝑍st×u (with high probability and after
+appropriate permutation of columns), this task can be reformulated as solving the unique Shortest
+Vector Problem (uSVP) in the 𝑚 + 1 dimensional 𝑞-ary lattice
+
+                                                   𝐼t       𝐴′       0
+                                      𝛬 = 𝑍 ug0 ⋅ • 0     𝑞𝐼u‚t      0ƒ.
+                                                   𝑐Y                𝑡
+by Kannan’s embedding with embedding factor 𝑡.
+
+The lattice 𝛬 has volume 𝑡 ⋅ 𝑞u‚t and contains a vector of norm „∥ 𝑒 ∥: + 𝑡 : which is unusually short,
+i.e. the gap between the first and second Minkowski minimum 𝜆: (𝛬)⁄𝜆0 (𝛬) is large. If the secret
+vector 𝑠 is also short, there is a second established embedding reducing LWE to uSVP. By inspection, we
+seen that the vector (𝜈𝑠|𝑒|1), for some 𝜈 ≠ 0, is contained in the lattice 𝛬
+                                                            ‹
+                                    t   ug0
+                                                  1
+                                (  )
+                        𝛬 = ˆ𝑥 ∈ 𝜈𝑍 × 𝑍             |  |
+                                            |𝑥 ⋅ ‰ 𝐴 𝐼u − 𝑐Š ≡ 0 𝑚𝑜𝑑 𝑞•,
+                                                  𝜈
+
+where 𝜈 allows to balance the size of the secret and the noise. An (𝑛 + 𝑚 + 1) × (𝑛 + 𝑚 + 1) basis 𝑀
+for 𝛬 can be constructed as
+
+                                             𝜈𝐼t        −𝐴‹    0
+                                          𝑀=• 0         𝑞𝐼u    0ƒ.
+                                              0          𝑐     1
+To find short vectors, lattice reduction can be applied. Thus, to establish the cost of solving an LWE
+instance, we may consider the cost of lattice reduction for solving uSVP. In (Alkim, Ducas, Pöppelmann,
+& Schwabe, 2016) it is predicted that 𝑒 can be found if:
+
+                               „𝛽⁄𝑑 ∥ (𝑒|1) ∥≈ „𝛽𝜎 ≤ 𝛿M:“‚” 𝑉𝑜𝑙(𝛬)0⁄” ,
+
+where 𝛿M depends on 𝛽 which is the block size of the underlying blockwise lattice reduction algorithm.
+This prediction was experimentally verified in (Albrecht et al., 2017).
+
+b. Primal by BDD Enumeration (decoding).
+
+This attack is due to Lindner and Peikert [LP11]. It starts with a sufficiently reduced basis, e.g., using BKZ
+in block size 𝛽, and then applies a modified version of the recursive Nearest Plane algorithm due to
+Babai [Bab86]. Given a basis 𝐵 and a target vector 𝑡, the Nearest Plane algorithm finds a vector such that
+the error vector lies in the fundamental parallelepiped of the Gram-Schmidt orthogonalization (GSO) of
+𝐵.
+
+Lindner and Peikert note that for a BKZ-reduced basis 𝐵, the fundamental parallelepiped is long and
+thin, by the Geometric Series Assumption (GSA) due to Schnorr that the GSO of a BKZ-reduced basis
+decay geometrically and this makes the probability that the Gaussian error vector 𝑒 falls in the
+corresponding fundamental parallelepiped very low. To improve this success probability, they “fatten”
+the parallelepiped by essentially scaling its principal axes. They do this by running the Nearest Plane
+algorithm on several distinct planes at each level of recursion. For a Gaussian error vector, the
+probability that it falls in this fattened parallelepiped is expressed in terms of the scaling factors and the
+lengths of the GSO of 𝐵. This can be seen as a form of pruned CVP enumeration (Liu & Nguyen, 2013).
+The run time of the Nearest Planes algorithm mainly depends on the number of points enumerated,
+which is the product of the scaling factors. The run time of the basis reduction step depends on the
+quality of the reduced basis, expressed, for instance, by the root Hermite factor 𝛿M. The scaling factors
+and the quality of the basis together determine the success probability of the attack. Hence to maximize
+the success probability, the scaling factors are determined based on the (predicted) quality of the BKZ-
+reduced basis. There is no closed formula for the scaling factors. The Estimator uses a simple greedy
+algorithm to find these parameters due to ([LP11]), but this is known to not be optimal. The scaling
+factors and the quality of the basis are chosen to achieve a target success probability and to minimize
+the running time (by balancing the running time of BKZ reduction and the final enumeration step).
+c. Dual. The dual strategy finds short vectors in the lattice
+                                   𝑞𝛬∗ = •𝑥 ∈ 𝑍su ∨ 𝑥 ⋅ 𝐴 ≡ 0 𝑚𝑜𝑑 𝑞—,
+
+i.e. it solves the Short Integer Solutions problem (SIS). Given such a short vector 𝑣, we can decide if an
+instance is LWE by computing ⟨𝑣, 𝑐⟩ = ⟨𝑣, 𝑒⟩ which is short whenever 𝑣 and 𝑒 are sufficiently short
+(Micciancio & Regev, 2009).
+
+We must however ensure that ⟨𝑣, 𝑒⟩ indeed is short enough, since if is too large, the (Gaussian)
+distribution of will be too flat to distinguish from random. Following ([LP11]), for an LWE instance with
+parameters 𝑛, 𝛼, 𝑞 and a vector 𝑣 of length ∥ 𝑣 ∥ such that 𝑣 ⋅ 𝐴 ≡ 0 𝑚𝑜𝑑 𝑞, the advantage of
+distinguishing ⟨𝑣, 𝑒⟩ from random is close to
+                                            𝑒𝑥𝑝(−𝜋(∥ 𝑣 ∥⋅ 𝛼 ): ).
+
+To produce a short enough 𝑣, we may again call a lattice-reduction algorithm. In particular, we may call
+the BKZ algorithm with block size 𝛽. After performing BKZ-𝛽 reduction the first vector in the
+transformed lattice basis will have norm 𝛿Mu ⋅ 𝑉𝑜𝑙(𝑞𝛬∗ )0⁄u . In our case, the expression above simplifies
+                                                                                    t•žŸs
+to ∥ 𝑣 ∥≈ 𝛿Mu ⋅ 𝑞t⁄u whp. The minimum of this expression is attained at 𝑚 = œ                (Micciancio &
+                                                                                     •žŸ ¡
+Regev, 2009). The attack can be modified to take small or sparse secrets into account (Albrecht, 2017).
+
+Lattice Reduction algorithm: BKZ
+
+BKZ is an iterative, block-wise algorithm for basis reduction. It requires solving the SVP problem (using
+sieving or enumeration, say) in a smaller dimension 𝛽, the block size. First, the input lattice 𝛬 is LLL
+reduced, giving a basis 𝑏M , … , 𝑏t‚0 . For 0 ≤ 𝑖 < 𝑛, the vectors 𝑏3 , … , 𝑏u3t(3g“‚0,t‚0) are projected onto
+the orthogonal complement of the span of 𝑏M , … 𝑏3‚0 ; this projection is called a local block. In the local
+block, we find a shortest vector, view it as a vector 𝑏 ∈ 𝛬 of and perform LLL on the list of vectors
+𝑏3 , … , 𝑏u3t(3g“‚0,t‚0) , 𝑏 to remove linear dependencies. We use the resulting vectors to update
+𝑏3 , … , 𝑏u3t(3g“‚0,t‚0) . This process is repeated until a basis is not updated after a full pass.
+
+There have been improvements to BKZ, which are collectively referred to BKZ 2.0 (see [CN11] for
+example). In particular, in our use of the Estimator we make two assumptions about the cost of running
+BKZ, distinguished by how conservative they are — “sieve” and “ADPS16” — as explained below.
+a. Block Size.
+
+To establish the required block size 𝛽, we solve
+
+                                                    𝛽      0        1
+                                  𝑙𝑜𝑔𝛿M = 𝑙𝑜𝑔 £        (𝜋𝛽)“ ¤ ⋅
+                                                   2𝜋𝑒           2 𝛽 − 1)
+                                                                  (
+
+for 𝛽, see the PhD Thesis of Yuanmi Chen (Chen, 2013) for a justification of this.
+
+b. Cost of SVP.
+
+Several algorithms can be used to realize the SVP oracle inside BKZ. Asymptotically, the fastest known
+algorithms are sieving algorithms. The fastest, known classical algorithm runs in time 2M.:¥:“gž(“)
+(Becker, Ducas, Gama, & Laarhoven, 2016). The fastest, known quantum algorithm runs in time
+2M.:¦§“gž(“) (Laarhoven, 2015). The “sieve” estimate approximates 𝑜 (𝛽) by 16.4 based on some
+experimental evidence in (Becker et al., 2016). The “ADPS16” from (Alkim et al., 2016) suppresses the
+𝑜(𝛽) term completely. All times are expressed in elementary operations mod 𝑞.
+
+c. Calls to SVP.
+
+The BKZ algorithm proceeds by repeatedly calling an oracle for computing a shortest vector on a smaller
+lattice of dimension 𝛽. In each “tour” on a 𝑑-dimensional lattice, 𝑑 such calls are made and the
+algorithm is typically terminated once it stops making sufficient progress in reducing the basis.
+Experimentally, it has been established that only the first few tours make significant progress (Chen,
+2013), so the “sieve” cost model assumes that one BKZ call costs as much as 8𝑑 calls to the SVP oracle.
+However, it seems plausible that the cost of these calls can be amortized across different calls, which is
+why the “ADPS16” cost model from (Alkim et al., 2016) assumes the cost of BKZ to be the same as one
+SVP oracle call.
+
+d. BKZ Cost. In summary:
+sieve
+a call to BKZ-𝛽 costs 8𝑑 ⋅ 2M.:¥:“g0¦.< operations classically and 8𝑑 ⋅ 2M.:¦§“g0¦.< operations quantumly.
+
+ADPST16
+a call to BKZ-𝛽 costs 2M.:¥:“ operations classically and 2M.:¦§“ operations quantumly.
+
+We stress that both of these cost models are very conservative and that no known implementation of
+lattice reduction achieves these running times. Furthermore, these estimates completely ignore
+memory consumption, which, too, is 2©(“).
+
+e. Calls to BKZ.
+
+To pick parameters, we normalize running times to a fixed success probability. That is, all our expected
+costs are for an adversary winning with probability 51%. However, as mentioned above, it is often more
+efficient to run some algorithm many times with parameters that have a low probability of success
+instead of running the same algorithm under parameter choices which ensure a high probability of
+success. Thus, in general, we would expect several calls to BKZ to be required: ≈ 1⁄𝜀 for search
+problems resp.~≈ 1⁄𝜀 : for decision problems.
+2.0.3 Secure Parameter Selection
+Specifying an LWE or a Ring-LWE scheme for encryption requires specifying a ring, 𝑅, of a given
+dimension, 𝑛, along with a ciphertext modulus 𝑞, and a choice for the error distribution and a choice for
+a secret distribution.
+Ring. In practice, we take the ring 𝑅 to be a 2-power cyclotomic ring 𝑅 = 𝑍[𝑥]/(𝑥 t + 1), where 𝑛 is a
+power of 2, because for these rings there are no known attacks better than attacks on the LWE problem.
+Error distribution. The error is usually chosen from a Discrete Gaussian distribution with width 𝜎 =
+ 8/√2𝜋. Selecting the error according to a Discrete Gaussian distribution is motivated by theoretical
+security reductions proved in [LPR13]. However, those theoretical guarantees do not apply to fixed small
+error widths such as 𝜎 = 8/√2𝜋, and would instead require that the error width grow with the square
+root of the dimension of the lattice, √𝑛 . None of the known attacks appear to take advantage of the
+shape of the error distribution, only the width; however, the analysis of the security levels given below
+relies on running time estimates which assume that the shape of the error distribution is Discrete
+Gaussian. For that reason we continue to assume that the error is chosen from a Discrete Gaussian
+distribution of fixed small width. The width is chosen to be small for practical performance reasons, and
+is justified by the concrete running times of known attacks with those error widths. However, over time
+if attacks improve or new attacks are found, the width of the error may need to be increased in practice.
+Secret key. For efficiency reasons, in practice we often choose the secret from a non-uniform
+distribution, such as the ternary distribution, which means to select uniformly from {−1,0,1}. In the
+recommended parameters given below, we will present tables for three choices of secret-distribution:
+{uniform, error, and ternary}. We will not present tables for sparse secrets because we do not suggest
+standardizing the case of sparse secret due to significantly better known attacks.
+Number of samples. For most of the attacks listed in the tables below, it is assumed that a certain
+number of samples are used in the attack. From an RLWE ciphertext, we can obtain 𝑛 log Y 𝑞 LWE
+samples, where T is the bit-decomposition modulus.
+Sampling Methods. We restrict to the case where 𝑅 = 𝑍[𝑥]/(𝑥 t + 1), where 𝑛 is a power of 2. In this
+case, the Discrete Gaussian distribution on 𝑅 can be generated as
+                                                  t‚0
+
+                                             𝑒 = ® 𝑒3 𝑥 3 ,
+                                                   3¯M
+where each 𝑒3 follows a discrete Gaussian distribution over the integers. Therefore, it suffices to sample
+from a discrete Gaussian distribution over the integers of width 𝑠 > 0, which we denote by 𝐷°,± .
+
+There are several known methods to sample from 𝐷°,± , including rejection sampling, inversion sampling,
+Discrete Zuggurat, Bernoulli-type, Knuth-Yao and Von Neumann-type. For efficiency, we recommend the
+Von Neumann-type sampling method introduced by Karney in [Kar16].
+
+Constant-time sampling. In the aforementioned sampling methods, the time it takes to generate one
+sample could leak information about the actual sample. Therefore, it is important that the entire error-
+sampling process is constant-time. To achieve this, one possible method is to fix some upper bound 𝑇 >
+ 0 such that sampling all the 𝑛 coordinates 𝑒3 sequentially without interruption takes time less than 𝑇
+time with overwhelming probability. Then after these samples are generated, using time 𝑡, we wait for
+(𝑇 − 𝑡) time units, so that the entire error-generating time always takes time 𝑇. In this way, the total
+time does not reveal information about the generated error polynomial.
+Ring-LWE security for other rings. As noted above, in practice in the application of homomorphic
+encryption, we use error distributions of small width. When using error distributions with small width
+and considering other rings besides the 2-power cyclotomic rings, there are better known attacks on the
+RLWE problem. These attacks and examples of weak rings were first given in [ELOS15] and [CLS15], and
+were subsequently improved in [CIV16a], [CIV16b], and [CLS16]. Because rings can be weak with respect
+to these attacks in many different ways depending on their geometry, and we don’t have uniform ways
+to check for such weakness yet, we do not recommend using non-cyclotomic rings for cryptography. For
+general cyclotomic rings (which are not 2-power cyclotomics), there is more research to be done: for
+prime cyclotomics an efficient concrete attack on search RLWE was given in [CLS15] when q is the
+ramified prime, and an efficient attack on the decision RLWE problem was given for other choices of q.
+There are also strong incentives to use 2-power cyclotomic rings for performance reasons, so unless
+there are better attacks it makes sense to standardize those anyway.
+                                TABLES of RECOMMENDED PARAMETERS
+In practice, in order to implement homomorphic encryption for a particular application or task, the
+application will have to select a dimension 𝑛, and a ciphertext modulus 𝑞, (along with a plaintext
+modulus and a choice of encoding which are not discussed here). For that reason, we give pairs of (𝑛, 𝑞)
+which achieve different security levels for each 𝑛. In other words, given 𝑛, the table below recommends
+a value of 𝑞 which will achieve a given level of security (e.g. 128 bits) for the given error width 𝜎 ≈ 3.2.
+We have the following tables for 3 different security levels, 128-bit, 192-bit, and 256-bit security, where
+the secret follows the uniform, error, and ternary distributions. For applications, we give values of 𝑛
+from 𝑛 = 2K where 𝑘 = 10, … ,15. We note that we used commit (560525) of the lwe-estimator of
+[APS15], which the authors continue to develop and improve. The tables give estimated running times
+(in bits) for the three attacks described in Section 5.1: uSVP, dec (decoding attack), and dual.
+We also consider two cost models used by the estimator, namely BKZ.sieve and BKZ.ADPS16.
+Table 1: Cost model = BKZ.sieve
+
+ distribution   n               security       logq            uSVP           dec             dual
+                                level
+ uniform        1024            128            29              131.2          145.9           161.0
+                                192            21              192.5          225.3           247.2
+                                256            16              265.8          332.6           356.7
+                2048            128            56              129.8          137.9           148.2
+                                192            39              197.6          217.5           233.7
+                                256            31              258.6          294.3           314.5
+                4096            128            111             128.2          132.0           139.5
+                                192            77              194.7          205.5           216.4
+                                256            60              260.4          280.4           295.1
+                8192            128            220             128.5          130.1           136.3
+                                192            154             192.2          197.5           205.3
+                                256            120             256.5          267.3           277.5
+                16384           128            440             128.1          129.0           133.9
+                                192            307             192.1          194.7           201.0
+                                256            239             256.6          261.6           269.3
+                32768           128            880             128.8          129.1           133.6
+                                192            612             193.0          193.9           198.2
+                                256            478             256.4          258.8           265.1
+
+
+
+
+ distribution   n               security       logq            uSVP           dec             dual
+                                level
+ error          1024            128            29              131.2          145.9           141.8
+                                192            21              192.5          225.3           210.2
+                                256            16              265.8          332.6           300.5
+                2048            128            56              129.8          137.9           135.7
+                                192            39              197.6          217.5           209.6
+                              256           31         258.6   294.3   280.3
+                4096          128           111        128.2   132.0   131.4
+                              192           77         194.7   205.5   201.5
+                              256           60         260.4   280.4   270.1
+                8192          128           220        128.5   130.1   130.1
+                              192           154        192.2   197.5   196.9
+                              256           120        256.5   267.3   263.8
+                16384         128           440        128.1   129.3   130.2
+                              192           307        192.1   194.7   196.2
+                              256           239        256.6   261.6   264.5
+                32768         128           883        128.5   128.8   130.0
+                              192           613        192.7   193.6   193.4
+                              256           478        256.4   258.8   257.9
+
+
+ distribution   n             security      logq       uSVP    dec     dual
+                              level
+ (-1, 1)        1024          128           27         131.6   160.2   138.7
+                              192           19         193.0   259.5   207.7
+                              256           14         265.6   406.4   293.8
+                2048          128           54         129.7   144.4   134.2
+                              192           37         197.5   233.0   207.8
+                              256           29         259.1   321.7   273.5
+                4096          128           109        128.1   134.9   129.9
+                              192           75         194.7   212.2   198.5
+                              256           58         260.4   292.6   270.1
+                8192          128           218        128.5   131.5   129.2
+                              192           152        192.2   200.4   194.6
+                              256           118        256.7   273.0   260.6
+                16384         128           438        128.1   129.9   129.0
+                              192           305        192.1   196.2   193.2
+                              256           237        256.9   264.2   259.8
+                32768         128           881        128.5   129.1   128.5
+                              192           611        192.7   194.2   193.7
+                              256           476        256.4   260.2   258.2
+
+
+Table 2: Cost model = BKZ.ADPS16, mode = “classical”
+
+ distribution   n             security      logq       uSVP    dec     dual
+                              level
+ uniform        1024          128           24         133.4   160.1   175.8
+                              192           18         200.9   254.3   273.0
+                              256           15         256.1   340.3   360.3
+                2048          128           46         131.1   146.3   157.8
+                              192           35         192.7   221.1   236.8
+                              256           28         260.5   308.3   329.1
+                4096          128           90         129.9   138.1   146.5
+                              192           68         192.7   208.1   219.8
+                       256        55     256.1   282.1   297.1
+               8192    128        179    128.5   132.3   138.8
+                       192        134    192.1   200.9   209.2
+                       256        108    257.0   271.4   282.3
+               16384   128        355    128.5   130.2   135.3
+                       192        265    193.0   197.4   204.0
+                       256        215    256.1   263.1   271.1
+               32768   128        708    128.5   129.1   132.1
+                       192        529    192.7   194.5   199.6
+                       256        428    256.1   259.6   266.1
+
+
+distribution   n       security   logq   uSVP    dec     dual
+                       level
+error          1024    128        24     133.4   160.1   150.5
+                       192        18     200.9   254.3   228.9
+                       256        15     256.1   340.3   302.3
+               2048    128        46     131.1   146.3   141.0
+                       192        35     192.7   221.1   208.8
+                       256        28     260.5   308.3   289.8
+               4096    128        90     129.9   138.1   136.9
+                       192        68     192.7   208.1   200.3
+                       256        55     256.1   282.1   268.9
+               8192    128        179    128.5   132.3   131.4
+                       192        134    192.1   200.9   199.4
+                       256        108    257.0   271.4   266.9
+               16384   128        355    128.5   130.2   132.0
+                       192        265    193.0   197.4   199.1
+                       256        215    256.1   263.1   266.3
+               32768   128        708    128.5   129.1   131.1
+                       192        529    192.7   194.5   193.6
+                       256        428    256.1   259.6   261.3
+
+
+distribution   n       security   logq   uSVP    dec     dual
+                       level
+(-1, 1)        1024    128        22     134.3   184.0   149.9
+                       192        16     200.9   306.7   227.5
+                       256        13     256.1   428.6   296.4
+               2048    128        44     131.4   156.5   139.3
+                       192        33     193.0   241.2   206.2
+                       256        26     260.5   344.7   280.0
+               4096    128        88     129.9   143.1   134.6
+                       192        66     192.7   217.4   199.7
+                       256        53     256.7   297.3   269.5
+               8192    128        177    128.5   134.3   130.2
+                       192        132    192.1   205.0   196.5
+                       256        106    257.0   278.5   263.1
+                16384         128          353            128.5         131.4         129.9
+                              192          264            192.1         198.3         194.2
+                              256          213            256.1         266.6         260.5
+                32768         128          706            128.5         129.6         129.1
+                              192          527            192.7         195.6         194.2
+                              256          426            256.1         261.3         261.6
+
+
+
+Post-quantum security. The BKZ.qsieve model assumes access to a quantum computer and gives lower
+estimates than BKZ.sieve. In what follows, we give tables of recommended (“Post-quantum”)
+parameters which achieve the desired levels of security against a quantum computer. We also present
+tables computed using the ``quantum” mode of the BKZ.ADPS16 model, which contain more
+conservative parameters.
+
+
+Table 3: Cost model = BKZ.qsieve
+
+ distribution   n           security     logq         uSVP                 dec          dual
+                            level
+ uniform        1024        128          27           132.2                149.3        164.5
+                            192          19           199.3                241.6        261.6
+                            256          15           262.9                341.1        360.8
+                2048        128          53           128.1                137.6        147.6
+                            192          37           193.6                215.8        231.4
+                            256          29           257.2                297.9        316.6
+                4096        128          103          129.1                134.2        141.7
+                            192          72           193.8                206.2        217.2
+                            256          56           259.2                281.9        296.5
+                8192        128          206          128.2                130.7        136.6
+                            192          143          192.9                199.3        207.3
+                            256          111          258.4                270.8        280.7
+                16384       128          413          128.2                129.0        132.7
+                            192          286          192.1                195.3        201.4
+                            256          222          257.2                263.1        270.6
+                32768       128          829          128.1                128.4        130.8
+                            192          573          192.0                193.3        197.5
+                            256          445          256.1                259.0        265.2
+
+
+ distribution   n             security     logq           uSVP          dec           dual
+                              level
+ error          1024          128          27             132.2         149.3         144.5
+                              192          19             199.3         241.6         224.0
+                              256          15             262.9         341.1         302.3
+                2048          128          53             128.1         137.6         134.8
+                              192          37             193.6         215.8         206.7
+                              256          29             257.2         297.9         281.4
+                4096        128          103         129.1   134.2   133.1
+                            192          72          193.8   206.2   201.8
+                            256          56          259.2   281.9   270.4
+                8192        128          206         128.2   130.7   130.1
+                            192          143         192.9   199.3   198.5
+                            256          111         258.4   270.8   266.6
+                16384       128          413         128.2   129.0   130.1
+                            192          286         192.1   195.3   196.6
+                            256          222         257.2   263.1   265.8
+                32768       128          829         128.1   128.4   129.8
+                            192          573         192.0   193.3   192.8
+                            256          445         256.1   259.0   260.4
+
+
+ distribution   n           security     logq        uSVP    dec     dual
+                            level
+ (-1, 1)        1024        128          25          132.6   165.5   142.3
+                            192          17          199.9   284.1   222.2
+                            256          13          262.6   423.1   296.6
+                2048        128          51          128.6   144.3   133.4
+                            192          35          193.5   231.9   205.2
+                            256          27          257.1   327.8   274.4
+                4096        128          101         129.6   137.4   131.5
+                            192          70          193.7   213.6   198.8
+                            256          54          259.7   295.2   270.6
+                8192        128          202         129.8   130.7   128.0
+                            192          141         192.9   202.5   196.1
+                            256          109         258.3   276.6   263.1
+                16384       128          411         128.2   129.5   129.0
+                            192          284         192.0   196.8   193.7
+                            256          220         257.2   265.8   260.7
+                32768       128          827         128.1   128.7   128.4
+                            192          571         192.0   194.1   193.1
+                            256          443         256.1   260.4   260.4
+
+
+Table 4: Cost model = BKZ.ADPS16, mode = “quantum”
+
+ distribution   n           security     logq        uSVP    dec     dual
+                            level
+ uniform        1024        128          23          128.8   157.7   172.1
+                            192          17          196.6   257.2   273.2
+                            256          13          280.1   398.5   404.5
+                2048        128          43          131.4   148.2   159.4
+                            192          32          197.7   231.7   246.9
+                            256          26          260.8   316.4   333.3
+                4096        128          84          130.1   139.7   147.6
+                            192          63          193.7   211.9   223.3
+                            256          51          256.8   286.3   301.4
+               8192    128        167    128.5   133.0   139.4
+                       192        124    193.7   203.8   212.3
+                       256        100    258.4   274.7   285.4
+               16384   128        331    128.8   130.9   136.2
+                       192        247    192.7   197.4   204.4
+                       256        199    257.3   265.5   273.8
+               32768   128        661    128.5   129.3   132.4
+                       192        493    192.1   194.5   199.8
+                       256        398    256.3   260.2   266.4
+
+
+distribution   n       security   logq   uSVP    dec     dual
+                       level
+error          1024    128        23     128.8   157.7   147.5
+                       192        17     196.6   257.2   228.5
+                       256        13     280.1   398.5   332.6
+               2048    128        43     131.4   148.2   142.0
+                       192        32     197.7   231.7   215.2
+                       256        26     260.8   316.4   285.7
+               4096    128        84     130.1   139.7   137.8
+                       192        63     193.7   211.9   203.0
+                       256        51     256.8   286.3   271.6
+               8192    128        167    128.5   133.0   132.0
+                       192        124    193.7   203.8   201.9
+                       256        100    258.4   274.7   269.5
+               16384   128        331    128.8   130.9   132.5
+                       192        247    192.7   197.4   199.5
+                       256        199    257.3   265.5   269.0
+               32768   128        661    128.5   129.3   131.4
+                       192        493    192.1   194.5   193.7
+                       256        398    256.3   260.2   261.6
+
+
+
+
+distribution   n       security   logq   uSVP    dec     dual
+                       level
+(-1, 1)        1024    128        21     129.6   182.8   146.4
+                       192        15     197.2   315.3   227.7
+                       256        11     277.7   526.3   335.2
+               2048    128        41     131.7   159.4   140.5
+                       192        30     198.0   255.5   213.6
+                       256        24     260.2   357.1   290.4
+               4096    128        82     130.1   144.8   135.4
+                       192        61     193.7   222.0   203.0
+                       256        49     257.3   303.3   269.0
+               8192    128        165    128.8   135.4   130.9
+                       192        122    193.7   208.6   198.0
+                       256        98     258.4   282.4   265.5
+                16384          128            329            128.8          132.0          130.6
+                               192            245            192.7          199.8          195.3
+                               256            197            257.3          269.5          262.6
+                32768          128            659            128.5          129.8          129.1
+                               192            491            192.1          195.6          194.2
+                               256            396            256.3          261.8          262.1
+
+
+Appendix A
+
+Organizers
+
+ Kristin Lauter                                      klauter@microsoft.com
+ Vinod Vaikuntanathan                                vinod.nathan@gmail.com
+
+
+
+Contributors
+
+ Martin Albrecht                                     martinralbrecht@googlemail.com
+ Melissa Chase                                       melissac@microsoft.com
+ Hao Chen                                            haoche@microsoft.com
+ Jintai Ding                                         jintai.ding@gmail.com
+ Shafi Goldwasser                                    shafi@theory.csail.mit.edu
+ Sergey Gorbunov                                     sgorbunov100@gmail.com
+ Jeffrey Hoffstein                                   hoffsteinjeffrey@gmail.com
+ Satya Lokam                                         Satya.Lokam@microsoft.com
+ Daniele Micciancio                                  daniele@cs.ucsd.edu
+ Dustin Moody                                        dustin.moody@nist.gov
+ Travis Morrison                                     txm950@psu.edu
+ Amit Sahai                                          amitsahai@gmail.com
+
+
+References
+
+[Alb17] Albrecht, M. R. (2017). On dual lattice attacks against small-secret LWE and parameter choices in
+HElib and SEAL. In J. Coron & J. B. Nielsen (Eds.), EUROCRYPT 2017, part ii (Vol. 10211, pp. 103–129).
+Springer, Heidelberg.
+
+[AFG14] Martin R. Albrecht, Robert Fitzpatrick, and Florian Gopfert: On the Efficacy of Solving
+LWE by Reduction to Unique-SVP. In Hyang-Sook Lee and Dong-Guk Han, editors, ICISC 13,
+volume 8565 of LNCS, pages 293-310. Springer, November 2014.
+[AGVW17] Albrecht, M. R., Göpfert, F., Virdia, F., & Wunderer, T. (2017). Revisiting the expected cost of
+solving uSVP and applications to LWE. In T. Takagi & T. Peyrin (Eds.), ASIACRYPT 2017, part i (Vol. 10624,
+pp. 297–322). Springer, Heidelberg.
+
+[APS15] Martin R. Albrecht, Rachel Player and Sam Scott. On the concrete hardness of Learning with
+Errors. Journal of Mathematical Cryptology. Volume 9, Issue 3, Pages 169–203, ISSN (Online) 1862-2984,
+October 2015.
+
+[ADPS16] Alkim, E., Ducas, L., Pöppelmann, T., & Schwabe, P. (2016). Post-quantum key exchange - A
+new hope. In T. Holz & S. Savage (Eds.), 25th USENIX security symposium, USENIX security 16 (pp. 327–
+343). USENIX Association. Retrieved from
+https://www.usenix.org/conference/usenixsecurity16/technical-sessions/presentation/alkim
+
+[AP14] Alperin-Sheriff, J., Peikert, C.: Faster bootstrapping with polynomial error. In: Garay, J.A.,
+Gennaro, R. (eds.) CRYPTO 2014. LNCS, vol. 8616, pp. 297–314.
+
+[Bab86] László Babai: On Lovász’ lattice reduction and the nearest lattice point problem, Combinatorica,
+6(1):1-3, 1986.
+
+[BDGL16] Becker, A., Ducas, L., Gama, N., & Laarhoven, T. (2016). New directions in nearest neighbor
+searching with applications to lattice sieving. In R. Krauthgamer (Ed.), 27th soda (pp. 10–24). ACM-SIAM.
+https://doi.org/10.1137/1.9781611974331.ch2
+
+[BGV12]: Zvika Brakerski, Craig Gentry, Vinod Vaikuntanathan. (Leveled) fully homomorphic encryption
+without bootstrapping. In ITCS '12 Proceedings of the 3rd Innovations in Theoretical Computer Science
+Conference. Pages 309-325.
+
+[B12] Zvika Brakerski. Fully Homomorphic Encryption without Modulus Switching from Classical
+GapSVP, In CRYPTO 2012. Pages 868 – 886.
+
+[CIV16a] W. Castryck, I. Iliashenko, F. Vercauteren, Provably weak instances of ring-lwe revisited. In:
+Eurocrypt 2016. vol. 9665, pp. 147–167. Springer (2016)
+
+[CIV16b] W. Castryck, I. Iliashenko, F. Vercauteren, On error distributions in ring-based LWE. LMS Journal
+of Computation and Mathematics 19(A), 130–145 (2016) 7.
+
+[Che13 ] Chen, Y. (2013). Réduction de réseau et sécurité concrète du chiffrement complètement
+homomorphe (PhD thesis). Paris 7.
+
+[CLS15] Hao Chen, Kristin Lauter, Katherine E. Stange, Attacks on the Search RLWE Problem with Small
+Errors, SIAM J. Appl. Algebra Geometry, Society for Industrial and Applied Mathematics, Vol. 1, pp. 665–
+682. (2017) https://eprint.iacr.org/2015/971
+
+[CLS16] Hao Chen, Kristin Lauter, Katherine E. Stange. Security Considerations for Galois Non-dual RLWE
+Families, SAC 2016: Selected Areas in Cryptography – SAC 2016 Lecture Notes in Computer Science, Vol.
+10532. Springer pp 443-462.
+[CN11] Y. Chen, P.Q. Nguyen. BKZ 2.0: Better Lattice Security Estimates. In: Lee D.H., Wang X. (eds)
+Advances in Cryptology – ASIACRYPT 2011. ASIACRYPT 2011. Lecture Notes in Computer Science, vol.
+7073. Springer, Berlin, Heidelberg.
+
+[CGGI16] Chillotti, I., Gama, N., Georgieva, M., Izabachène, M.: Faster fully homomorphic encryption:
+bootstrapping in less than 0.1 seconds. In: Cheon, J.H., Takagi, T. (eds.) ASIACRYPT 2016. LNCS, vol.
+10031, pp. 3–33.
+
+[CS16] Ana Costache, Nigel P. Smart, Which Ring Based Somewhat Homomorphic Encryption Scheme is
+Best? Topics in Cryptology - CT-RSA 2016, LNCS, volume 9610, Pages 325-340.
+
+[DM15] Ducas, L., Micciancio, D.: FHEW: bootstrapping homomorphic encryption in less than a second.
+In: Oswald, E., Fischlin, M. (eds.) EUROCRYPT 2015. LNCS, vol. 9056, pp. 617–640.
+
+[ELOS15] Yara Elias, Kristin Lauter, Ekin Ozman, Katherine E. Stange, Provably weak instances of Ring-
+LWE, CRYPTO 2015
+[FV12] J. Fan and F. Vercauteren. Somewhat practical fully homomorphic encryption. Cryptology ePrint
+Archive, Report 2012/144, 2012. http://eprint.iacr.org/2012/144.pdf
+
+[GINX16] Gama, N., Izabachène, M., Nguyen, P.Q., Xie, X.: Structural lattice reduction: generalized worst-
+case to average-case reductions. In: EUROCRYPT 2016, ePrint Archive, 2014/283
+
+
+[GSW] C. Gentry, A. Sahai, and B. Waters. Homomorphic Encryption from Learning with Errors:
+Conceptually-Simpler, Asymptotically-Faster, Attribute-Based. In CRYPTO 2013 (Springer).
+
+[Kar16] C.F.F. Karney, Sampling Exactly from the Normal Distribution. ACM Transactions on Mathematical
+Software, 42, Article No. 3.
+
+[KL15] Miran Kim and Kristin Lauter, Private Genome Analysis through Homomorphic Encryption,
+BioMedCentral Journal of Medical Informatics and Decision Making 2015 15 (Suppl 5):S3.
+
+[Laa15] Laarhoven, T. (2015). Search problems in cryptography: From fingerprinting to lattice sieving
+(PhD thesis). Eindhoven University of Technology.
+
+[LMvP13] Laarhoven T., Mosca M., van de Pol J. (2013) Solving the Shortest Vector Problem in Lattices
+Faster Using Quantum Search. In: Gaborit P. (eds) Post-Quantum Cryptography. PQCrypto 2013. Lecture
+Notes in Computer Science, vol 7932. Springer, Berlin, Heidelberg.
+
+[LP11] Richard Lindner and Chris Peikert: Better key sizes (and attacks) for LWE-based encryption. In
+Topics in Cryptology - CT-RSA 2011 - The Cryptographers' Track at the RSA Conference 2011, Aggelos
+Kiayias, Editor, volume 6558 of LNCS, pages 319—339.
+[LN13] Liu, M., & Nguyen, P. Q. (2013). Solving BDD by enumeration: An update. In E. Dawson (Ed.), CT-
+rsa 2013 (Vol. 7779, pp. 293–309). Springer, Heidelberg. https://doi.org/10.1007/978-3-642-36095-4_19
+
+[LTV] A. Lopez-Alt, E. Tromer, and V. Vaikuntanathan. On-the-ﬂy multiparty computation on the cloud
+via multikey fully homomorphic encryption. In STOC, pages 1219–1234, 2012.
+[LPR13] Vadim Lyubashevsky, Chris Peikert, and Oded Regev : On Ideal Lattices and Learning with Errors
+over Rings. Journal of the ACM (JACM), Volume 60, Issue 6, November 2013, Article No. 43.
+
+[MR09] Micciancio, D., & Regev, O. (2009). Lattice-based cryptography. In D. J. Bernstein, J. Buchmann,
+& E. Dahmen (Eds.), Post-quantum cryptography (pp. 147–191). Berlin, Heidelberg, New York: Springer,
+Heidelberg.
+
+[NTRU] J. Hoﬀstein, J. Pipher, and J. H. Silverman. NTRU: A ring-based public key cryptosystem. In J.
+Buhler, editor, ANTS, volume 1423 of Lecture Notes in Computer Science, pages 267–288. Springer,
+1998.
+[YASHE] Joppe W. Bos, Kristin Lauter, Jake Loftus, and Michael Naehrig. Improved Security for a Ring-
+Based Fully Homomorphic Encryption Scheme, in IMA CC 2013. http://eprint.iacr.org/2013/075.pdf
+Software references for 7 Homomorphic Encryption libraries:
+[SEAL] http://sealcrypto.org
+[HElib] https://github.com/shaih/HElib
+[NFLlib] https://github.com/CryptoExperts/FV-NFLlib
+[Palisade] https://git.njit.edu/groups/palisade
+[cuHE] https://github.com/vernamlab/cuHE
+[HEAAN] https://github.com/kimandrik/HEAAN
+[TFHE] https://tfhe.github.io/tfhe/
+
