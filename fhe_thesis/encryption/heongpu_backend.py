@@ -445,7 +445,7 @@ class HEonGPUBackend(CKKSBackend):
                 w_poly[base + (n - 1 - j)] = float(W[i, j])
         pt_w = self._encode_coeff_pad(w_poly)
 
-        out = self._clone(ct_x_coeff)
+        out = self._ops.clone_ct(ct_x_coeff)
         target_depth = self._ops.depth(out)
         while self._ops.depth_of_plaintext(pt_w) < target_depth:
             self._ops.mod_drop_inplace_pt(pt_w)

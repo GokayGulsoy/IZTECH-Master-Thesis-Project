@@ -221,6 +221,15 @@ struct Operator {
         *out = ops.regular_bootstrapping(*a.ct, *g.gk, *rk.rk);
         return Ciphertext{out};
     }
+
+    // Shallow copy of a ciphertext that preserves all metadata (depth,
+    // scale, encoding type). Used by Python wrappers that need an
+    // out-of-place result.
+    Ciphertext clone_ct(Ciphertext& a) {
+        auto out = std::make_shared<heongpu::Ciphertext<SCHEME>>();
+        *out = *a.ct;  // class-defined copy
+        return Ciphertext{out};
+    }
 };
 
 // -----------------------------------------------------------------------------
@@ -307,5 +316,7 @@ PYBIND11_MODULE(_heongpu, m) {
              py::arg("less_key_mode") = true)
         .def("bootstrapping_key_indexs", &Operator::bootstrapping_key_indexs)
         .def("regular_bootstrapping",    &Operator::regular_bootstrapping,
-             py::arg("ct"), py::arg("galois_key"), py::arg("relin_key"));
+             py::arg("ct"), py::arg("galois_key"), py::arg("relin_key"))
+        .def("clone_ct",                 &Operator::clone_ct,
+             "Shallow copy preserving depth/scale/encoding metadata.");
 }

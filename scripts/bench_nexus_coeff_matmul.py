@@ -22,7 +22,7 @@ def main() -> int:
     t0 = time.time()
     be = HEonGPUBackend(
         poly_modulus_degree=1 << 16,
-        q_prime_bits=(60, 50, 50, 60),
+        q_prime_bits=(60, 50, 50, 50, 50, 60),
         p_prime_bits=(60,),
         scale_bits=50,
         sec_none=True,
