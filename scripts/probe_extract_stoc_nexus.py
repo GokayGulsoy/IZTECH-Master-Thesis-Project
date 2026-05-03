@@ -14,7 +14,6 @@ import time
 import numpy as np
 
 from fhe_thesis.encryption.heongpu_backend import HEonGPUBackend
-from fhe_thesis.encryption.matrix_pack import MatrixPackedTensor
 
 
 def main():
