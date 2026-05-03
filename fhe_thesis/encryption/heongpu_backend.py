@@ -19,7 +19,9 @@ Scope
 
 from __future__ import annotations
 
-from typing import List, Optional, Sequence
+import hashlib
+from threading import Lock
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -103,6 +105,10 @@ class HEonGPUBackend(CKKSBackend):
             n_slots=self._num_slots,
             initial_levels=len(q_bits) - 1,
         )
+
+        # Cache for Halevi-Shoup diagonals — keyed by sha1(weight.bytes()).
+        self._diag_cache: Dict[str, Tuple[List[Optional[List[float]]], int]] = {}
+        self._diag_cache_lock = Lock()
 
     # ── helpers ───────────────────────────────────────────────────────
     def _pad(self, values: Sequence[float]) -> List[float]:
