@@ -67,7 +67,6 @@ set_target_properties(_heongpu PROPERTIES
 target_link_libraries(_heongpu PRIVATE
     heongpu
     CUDA::cudart
-    CUDA::cudadevrt
     OpenMP::OpenMP_CXX
 )
 
