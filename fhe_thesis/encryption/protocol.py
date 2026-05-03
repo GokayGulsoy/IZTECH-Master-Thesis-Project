@@ -627,6 +627,7 @@ def encrypt_inference_linear_mixing(
     max_seq_len: Optional[int] = None,
     n_jobs: int = 1,
     kept_token_indices: Optional[np.ndarray] = None,
+    bootstrap_plan: Optional[object] = None,
 ) -> Tuple[np.ndarray, Dict[str, float]]:
     """Full linear-mixing encoder + classifier under FHE.
 
@@ -650,6 +651,13 @@ def encrypt_inference_linear_mixing(
 
     h = ct_x
     for i, layer in enumerate(weights.layers):
+        if bootstrap_plan is not None:
+            from .bootstrap_scheduler import maybe_bootstrap
+            t_bs = time.time()
+            h = maybe_bootstrap(backend, h, bootstrap_plan, i)
+            bs_dt = time.time() - t_bs
+            if bs_dt > 0:
+                timings[f"L{i}.bootstrap"] = bs_dt
         h, layer_t = encrypt_layer_linear_mix(
             backend, h, layer, coeffs[i], n_jobs=n_jobs,
             kept_token_indices=kept_token_indices,
@@ -682,6 +690,7 @@ def encrypt_inference(
     coeffs: Dict[int, Dict[str, PolyCoeffs]],
     max_seq_len: Optional[int] = None,
     n_jobs: int = 1,
+    bootstrap_plan: Optional[object] = None,
 ) -> Tuple[np.ndarray, Dict[str, float]]:
     """Full encoder + (optional) classifier head under FHE.
 
@@ -710,6 +719,13 @@ def encrypt_inference(
 
     h = ct_x
     for i, layer in enumerate(weights.layers):
+        if bootstrap_plan is not None:
+            from .bootstrap_scheduler import maybe_bootstrap
+            t_bs = time.time()
+            h = maybe_bootstrap(backend, h, bootstrap_plan, i)
+            bs_dt = time.time() - t_bs
+            if bs_dt > 0:
+                timings[f"L{i}.bootstrap"] = bs_dt
         h, layer_t = encrypt_layer(backend, h, layer, coeffs[i], weights.num_heads, n_jobs=n_jobs)
         for k, v in layer_t.items():
             timings[f"L{i}.{k}"] = v

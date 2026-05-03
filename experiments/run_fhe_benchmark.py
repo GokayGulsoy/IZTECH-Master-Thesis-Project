@@ -81,6 +81,22 @@ def _parse_args():
                         "Only applied when --hybrid or --linear-mixing.")
     p.add_argument("--keep-ratio", type=float, default=0.5,
                    help="Fraction of tokens to keep for content_teacher elimination (default: 0.5)")
+    p.add_argument("--bootstrap-strategy", default="none",
+                   choices=["none", "uniform", "adaptive"],
+                   help="Bootstrap insertion strategy. "
+                        "'none' (default) = no explicit inter-layer bootstraps. "
+                        "Note: depth.py reports each LPAN layer as ~33 levels (worst case) "
+                        "vs mult_depth=25, but PS + level-absorption typically halve this. "
+                        "Use --measure-depth to log actual ciphertext level consumption. "
+                        "'uniform' = bootstrap every --bootstrap-period layers. "
+                        "'adaptive' = greedy region-adaptive scheduler (Ext 1).")
+    p.add_argument("--bootstrap-period", type=int, default=2,
+                   help="For --bootstrap-strategy=uniform: bootstrap every K layers (default: 2)")
+    p.add_argument("--bootstrap-budget", type=int, default=22,
+                   help="Per-window depth budget after bootstrap (default: 22; budget [3,3] consumes ~12 of 25 levels => 13 left, but PS-actual often lower)")
+    p.add_argument("--measure-depth", action="store_true",
+                   help="Log ciphertext level consumption per layer (1 sample only) "
+                        "to calibrate LAYER_DEPTH constants in depth.py")
     return p.parse_args()
 
 
@@ -192,6 +208,7 @@ def _run_fhe_sample(
     linear_mixing=False,
     hybrid=False,
     kept_token_indices=None,
+    bootstrap_plan=None,
 ):
     """Encrypt, infer, decrypt one sample. Returns (logits, timings)."""
     if hybrid:
@@ -205,6 +222,7 @@ def _run_fhe_sample(
             max_seq_len=max_seq_len,
             n_jobs=n_jobs,
             kept_token_indices=kept_token_indices,
+            bootstrap_plan=bootstrap_plan,
         )
     elif linear_mixing:
         from fhe_thesis.encryption.protocol import encrypt_inference_linear_mixing
@@ -217,6 +235,7 @@ def _run_fhe_sample(
             max_seq_len=max_seq_len,
             n_jobs=n_jobs,
             kept_token_indices=kept_token_indices,
+            bootstrap_plan=bootstrap_plan,
         )
     elif phase == "model":
         from fhe_thesis.encryption.protocol import encrypt_inference
@@ -228,6 +247,7 @@ def _run_fhe_sample(
             coeffs,
             max_seq_len=max_seq_len,
             n_jobs=n_jobs,
+            bootstrap_plan=bootstrap_plan,
         )
     else:
         from fhe_thesis.encryption.protocol import run_phase
@@ -368,6 +388,36 @@ def main():
     else:
         results["word_elimination"] = "none"
 
+    # ── Bootstrap plan (Ext 1: region-adaptive scheduler) ─────────────
+    bootstrap_plan = None
+    if args.bootstrap_strategy != "none" and not args.no_bootstrap:
+        from fhe_thesis.encryption.bootstrap_scheduler import (
+            composition_to_kinds, schedule_bootstraps, schedule_uniform,
+        )
+        # Determine layer composition
+        from fhe_thesis.config import MODEL_REGISTRY
+        num_layers = MODEL_REGISTRY[args.model]["layers"]
+        if args.hybrid:
+            lm = [int(x) for x in args.linear_mixing_layers.split(",") if x.strip()]
+            qa = [int(x) for x in args.quad_attention_layers.split(",") if x.strip()]
+        elif args.linear_mixing:
+            lm = list(range(num_layers)); qa = []
+        else:
+            lm = []; qa = []  # pure LPAN: all layers are 'L'
+        kinds = composition_to_kinds(num_layers, lm, qa)
+        if args.bootstrap_strategy == "adaptive":
+            bootstrap_plan = schedule_bootstraps(kinds, args.bootstrap_budget)
+        else:
+            bootstrap_plan = schedule_uniform(num_layers, args.bootstrap_period,
+                                              kinds, args.bootstrap_budget)
+        print(f"\n[Bootstrap plan: {args.bootstrap_strategy}]")
+        print(f"  layer_kinds       = {kinds}")
+        print(f"  insertion_indices = {bootstrap_plan.insertion_indices}")
+        print(f"  num_bootstraps    = {bootstrap_plan.num_bootstraps}")
+        print(f"  total_depth       = {bootstrap_plan.total_depth}")
+        print(f"  budget_per_window = {bootstrap_plan.budget_per_window}")
+        results["bootstrap_plan"] = bootstrap_plan.to_dict()
+
     # ── FHE inference loop ────────────────────────────────────────────
     print(f"\nRunning FHE inference on {len(samples)} samples...")
     fhe_correct = 0
@@ -410,6 +460,7 @@ def main():
             linear_mixing=args.linear_mixing,
             hybrid=args.hybrid,
             kept_token_indices=kept_indices,
+            bootstrap_plan=bootstrap_plan,
         )
         wall = time.time() - t_start
 
