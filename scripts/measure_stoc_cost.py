@@ -39,8 +39,8 @@ def main():
     print(f"  StoC requires depth ≤ {30 - target_lvl}")
     # Drop to that depth.
     while be._ops.depth(ct0) < (30 - target_lvl):
-        be._ops.mod_drop_inplace(ct0)
-        be._ops.mod_drop_inplace(ct1)
+        be._ops.mod_drop_inplace_ct(ct0)
+        be._ops.mod_drop_inplace_ct(ct1)
 
     # warmup
     _ = be._ops.slot_to_coeff(ct0, ct1, be._gk)
@@ -49,8 +49,8 @@ def main():
         ct0 = be._ops.clone_ct(ct_slot)
         ct1 = be._ops.clone_ct(ct_slot)
         while be._ops.depth(ct0) < (30 - target_lvl):
-            be._ops.mod_drop_inplace(ct0)
-            be._ops.mod_drop_inplace(ct1)
+            be._ops.mod_drop_inplace_ct(ct0)
+            be._ops.mod_drop_inplace_ct(ct1)
         t = time.time()
         _ = be._ops.slot_to_coeff(ct0, ct1, be._gk)
         times.append(time.time() - t)
