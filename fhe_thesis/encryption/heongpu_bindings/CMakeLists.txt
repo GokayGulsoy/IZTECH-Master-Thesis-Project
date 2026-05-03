@@ -47,18 +47,27 @@ find_package(pybind11 CONFIG REQUIRED)
 find_package(CUDAToolkit REQUIRED)
 find_package(OpenMP REQUIRED)
 
+# bindings.cpp is intentionally compiled as CUDA so the device-link step
+# performed by CMake for this target can resolve relocatable device code
+# pulled in from the heongpu static library (which is built with
+# CUDA_SEPARABLE_COMPILATION ON). Without this, the resulting .so misses
+# the embedded fatbin and import fails with `undefined symbol: fatbinData`.
+set_source_files_properties(bindings.cpp PROPERTIES LANGUAGE CUDA)
+
 pybind11_add_module(_heongpu MODULE bindings.cpp)
 
 set_target_properties(_heongpu PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
+    CUDA_RESOLVE_DEVICE_SYMBOLS ON
     POSITION_INDEPENDENT_CODE ON
-    CUDA_RUNTIME_LIBRARY Static
+    CUDA_RUNTIME_LIBRARY Shared
     CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
 )
 
 target_link_libraries(_heongpu PRIVATE
     heongpu
     CUDA::cudart
+    CUDA::cudadevrt
     OpenMP::OpenMP_CXX
 )
 

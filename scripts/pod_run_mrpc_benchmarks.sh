@@ -9,7 +9,10 @@
 #  Run on the Pod after setup_pod.sh + checkpoint rsync:
 #    bash /workspace/thesis/scripts/pod_run_mrpc_benchmarks.sh
 #
-#  Time: ~2× (n_samples × per-sample) ≈ 30-90 min for 20 samples.
+#  Time: ~12-17 min total for 20 samples
+#    - OpenFHE keygen ~3-5 min per backend init (run twice)
+#    - LPAN     : ~5-10s/sample with pt×ct + HEXL + n_jobs=32
+#    - HyPER-LPAN v3: ~4-8s/sample (fewer ct×ct in attention)
 #  Memory peak: ~110 GB (rotation keys at ring_dim=65536).
 # ============================================================
 set -euo pipefail
@@ -50,7 +53,7 @@ echo "  checkpoints OK ✓"
 # ── Bench 1: pure LPAN ───────────────────────────────────────────────
 echo
 echo "[1/2] Pure LPAN baseline (b=1.00, all 12 layers LPAN)..."
-echo "      Expected per-sample: 12-25s (depends on packing efficiency)"
+echo "      Expected per-sample: 5-10s (with HEXL + pt×ct + n_jobs=$N_JOBS)"
 LPAN_LOG="$OUT_DIR/lpan_baseline.log"
 python experiments/run_fhe_benchmark.py \
     --model base --task mrpc \
@@ -64,7 +67,7 @@ python experiments/run_fhe_benchmark.py \
 # ── Bench 2: HyPER-LPAN v4b (LPAN×8 + Quad×4 from MCKP plan) ──────
 echo
 echo "[2/2] HyPER-LPAN v3 (b=0.67: Quad@[0,1,2,3,4,7,8,9,10,11], LPAN@[5,6])..."
-echo "      Expected per-sample: 6-14s"
+echo "      Expected per-sample: 4-8s (fewer ct×ct in attention)"
 HYPER_LOG="$OUT_DIR/hyper_lpan.log"
 python experiments/run_fhe_benchmark.py \
     --model base --task mrpc \
