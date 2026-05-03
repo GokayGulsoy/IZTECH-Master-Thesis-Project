@@ -27,16 +27,23 @@ from fhe_thesis.encryption.heongpu_backend import HEonGPUBackend
 
 
 def canonical_embedding_slots(coeffs: np.ndarray, N: int) -> np.ndarray:
-    """Reference: p(zeta_k) for slot k in [0, N/2)."""
-    n_slots = N // 2
-    # Standard CKKS uses zeta_k = exp(i * pi * (2k + 1) / N) bit-reversed,
-    # but we'll just check magnitudes / patterns — the bit-rev only
-    # permutes the slots.
-    k = np.arange(n_slots)
-    zetas = np.exp(1j * np.pi * (2 * k + 1) / N)
-    # Vandermonde-style evaluation: p(zeta_k) = sum_i c_i * zeta_k^i
-    powers = zetas[:, None] ** np.arange(N)[None, :]  # (n_slots, N)
-    return powers @ coeffs
+    """Reference: p(zeta_k) for slot k in [0, N/2) using length-2N FFT.
+
+    Standard CKKS canonical embedding uses zeta_k = exp(i*pi*(2k+1)/N).
+    Equivalently, eval p at the odd 2N-th roots of unity. Done via a
+    length-2N DFT of the zero-padded coeffs * exp(i*pi*j/N) phase, then
+    pick the first N/2 outputs.
+    """
+    j = np.arange(N)
+    twiddle = np.exp(1j * np.pi * j / N)  # so that zeta_k = w^{2k+1} where w = exp(i*pi/N)
+    twisted = coeffs.astype(np.complex128) * twiddle
+    # Now sum_j (c_j * w^j) * w^{2k j}  =  p(w^{2k+1})
+    # length-N FFT over k of the twisted sequence gives p(w^{2k+1}) for k in [0, N).
+    spectrum = np.fft.fft(twisted)  # spectrum[k] = sum_j twisted[j] * exp(-2*pi*i * j * k / N)
+    # We need + sign: p(w^{2k+1}) = sum_j twisted[j] * w^{2 k j} = sum_j twisted[j] * exp(2*pi*i * j * k / N)
+    # That's IFFT * N
+    spectrum = np.fft.ifft(twisted) * N
+    return spectrum[: N // 2]
 
 
 def main() -> int:
@@ -101,14 +108,11 @@ def main() -> int:
 
     # Try with the 5^k indexing (CKKS standard)
     five_pow = np.array([pow(5, i, 2 * be._N) for i in range(n_slots)])
-    # Map slot k → which root of unity it represents
-    # Standard CKKS: slot k uses zeta^{5^k} where zeta = exp(2*pi*i / 2N)
-    zeta_2N = np.exp(2j * np.pi / (2 * be._N))
-    powers_5k = zeta_2N ** five_pow
-    powers_mat = powers_5k[:, None] ** np.arange(be._N)[None, :]
-    ref_5k = powers_mat @ coeffs
-    err_re_5k = np.max(np.abs(s_re - ref_5k.real))
-    err_im_5k = np.max(np.abs(s_im - ref_5k.imag))
+    # Slot k in standard CKKS uses zeta = exp(i*pi*5^k / N) — i.e. odd power 5^k of w=exp(i*pi/N).
+    # Equivalently: pick output index of canonical embedding at position (5^k - 1)/2.
+    pick = ((five_pow - 1) // 2) % n_slots
+    err_re_5k = np.max(np.abs(s_re - ref.real[pick]))
+    err_im_5k = np.max(np.abs(s_im - ref.imag[pick]))
     print(f"\n5^k indexing compare (standard CKKS):")
     print(f"  real err: {err_re_5k:.3e}")
     print(f"  imag err: {err_im_5k:.3e}")
