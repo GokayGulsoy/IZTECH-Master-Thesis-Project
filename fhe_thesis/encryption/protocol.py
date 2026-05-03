@@ -46,6 +46,13 @@ from .ops import (
     enc_self_attention,
     enc_self_quad_attention,
 )
+from .matrix_packing import MatrixPackedTensor, next_pow2
+from .ops_matrix import (
+    enc_gelu_matrix,
+    enc_layernorm_matrix,
+    enc_linear_matrix,
+    enc_self_attention_matrix,
+)
 from .packing import TokenPackedTensor
 
 
@@ -758,6 +765,217 @@ def encrypt_inference(
     t = time.time()
     out = out_ct.decrypt(backend)
     timings["decrypt"] = time.time() - t
+
+    timings["total"] = sum(timings.values())
+    return out, timings
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Matrix-packed encoder — same pipeline, B× fewer ciphertexts
+# ──────────────────────────────────────────────────────────────────────
+
+
+def encrypt_attention_block_matrix(
+    backend: CKKSBackend,
+    x: MatrixPackedTensor,
+    layer: LayerWeights,
+    coeffs: Dict[str, PolyCoeffs],
+    num_heads: int,
+) -> Tuple[MatrixPackedTensor, Dict[str, float]]:
+    """MHA + post-LN under FHE on a matrix-packed activation."""
+    timings: Dict[str, float] = {}
+
+    t = time.time()
+    sm = coeffs["Softmax"]
+    h = enc_self_attention_matrix(
+        backend, x,
+        layer.Wq, layer.bq, layer.Wk, layer.bk,
+        layer.Wv, layer.bv, layer.Wo, layer.bo,
+        softmax_coeffs=sm, num_heads=num_heads,
+    )
+    timings["MHA"] = time.time() - t
+
+    t = time.time()
+    res_cts = [backend.add(h.cts[i], x.cts[i]) for i in range(len(x.cts))]
+    res = MatrixPackedTensor.from_ciphertexts(
+        res_cts, seq_len=x.seq_len, hidden_dim=x.hidden_dim,
+        block=x.block, tokens_per_ct=x.tokens_per_ct, num_slots=x.num_slots,
+    )
+    timings["residual"] = time.time() - t
+
+    t = time.time()
+    ln = coeffs["LN"]
+    out = enc_layernorm_matrix(
+        backend, res, ln.power_coeffs, ln.interval,
+        gamma=layer.ln1_gamma, beta=layer.ln1_beta,
+    )
+    timings["LN"] = time.time() - t
+    return out, timings
+
+
+def encrypt_ffn_block_matrix(
+    backend: CKKSBackend,
+    x: MatrixPackedTensor,
+    layer: LayerWeights,
+    coeffs: Dict[str, PolyCoeffs],
+) -> Tuple[MatrixPackedTensor, Dict[str, float]]:
+    """FFN + post-LN under FHE on a matrix-packed activation.
+
+    Note: ``W1`` expands hidden→4·hidden which may exceed the per-token
+    block. We allocate a wider intermediate by re-packing only when the
+    expansion overflows (BERT-base: 768→3072 fits if block≥4096, else
+    needs MPT re-pack — addressed in a follow-up if/when triggered).
+    """
+    timings: Dict[str, float] = {}
+
+    # Sanity: FFN expansion width must fit within block.
+    out_dim = layer.W1.shape[0]
+    if next_pow2(out_dim) > x.block:
+        raise ValueError(
+            f"FFN expansion out_dim={out_dim} (next_pow2={next_pow2(out_dim)}) "
+            f"exceeds packing block={x.block}; re-pack with a larger block "
+            f"or use token-packed FFN."
+        )
+
+    t = time.time()
+    h = enc_linear_matrix(backend, x, layer.W1, bias=layer.b1)
+    timings["W1"] = time.time() - t
+
+    t = time.time()
+    g = coeffs["GELU"]
+    h = enc_gelu_matrix(backend, h, g.power_coeffs, g.interval)
+    timings["GELU"] = time.time() - t
+
+    t = time.time()
+    h = enc_linear_matrix(backend, h, layer.W2, bias=layer.b2)
+    timings["W2"] = time.time() - t
+
+    t = time.time()
+    res_cts = [backend.add(h.cts[i], x.cts[i]) for i in range(len(x.cts))]
+    res = MatrixPackedTensor.from_ciphertexts(
+        res_cts, seq_len=x.seq_len, hidden_dim=x.hidden_dim,
+        block=x.block, tokens_per_ct=x.tokens_per_ct, num_slots=x.num_slots,
+    )
+    timings["residual"] = time.time() - t
+
+    t = time.time()
+    ln = coeffs["LN"]
+    out = enc_layernorm_matrix(
+        backend, res, ln.power_coeffs, ln.interval,
+        gamma=layer.ln2_gamma, beta=layer.ln2_beta,
+    )
+    timings["LN"] = time.time() - t
+    return out, timings
+
+
+def encrypt_layer_matrix(
+    backend: CKKSBackend,
+    x: MatrixPackedTensor,
+    layer: LayerWeights,
+    coeffs: Dict[str, PolyCoeffs],
+    num_heads: int,
+) -> Tuple[MatrixPackedTensor, Dict[str, float]]:
+    """One full BERT encoder layer (matrix-packed)."""
+    h, t_attn = encrypt_attention_block_matrix(backend, x, layer, coeffs, num_heads)
+    h, t_ffn = encrypt_ffn_block_matrix(backend, h, layer, coeffs)
+    timings = {f"attn.{k}": v for k, v in t_attn.items()}
+    timings.update({f"ffn.{k}": v for k, v in t_ffn.items()})
+    return h, timings
+
+
+def encrypt_inference_matrix(
+    backend: CKKSBackend,
+    x_plain: np.ndarray,
+    weights: ModelWeights,
+    coeffs: Dict[int, Dict[str, PolyCoeffs]],
+    max_seq_len: Optional[int] = None,
+    block: int = 0,
+    bootstrap_plan: Optional[object] = None,
+    measure_depth: bool = False,
+) -> Tuple[np.ndarray, Dict[str, float]]:
+    """Matrix-packed end-to-end FHE inference.
+
+    Mirrors :func:`encrypt_inference` but every encoder layer uses the
+    matrix-packed kernels in :mod:`ops_matrix`. The classifier head and
+    pooler still use the token-packed primitives (one ct only).
+
+    Parameters
+    ----------
+    block : int
+        Packing block (per-token slot stride). 0 → ``next_pow2(out_dim_max)``
+        across the layer set so the FFN expansion fits in-block.
+    """
+    timings: Dict[str, float] = {}
+
+    if max_seq_len is not None and x_plain.shape[0] > max_seq_len:
+        x_plain = x_plain[:max_seq_len]
+
+    # Pick a block large enough for every linear in the model. The widest
+    # expansion is W1's out_dim (4·hidden for BERT) — round to next pow2.
+    if block <= 0:
+        max_dim = max(
+            (max(layer.W1.shape[0], layer.W2.shape[0]) for layer in weights.layers),
+            default=weights.hidden,
+        )
+        block = next_pow2(max(max_dim, weights.hidden))
+
+    t = time.time()
+    ct_x = MatrixPackedTensor.encrypt(backend, x_plain, block=block)
+    timings["encrypt"] = time.time() - t
+    timings["pack.tokens_per_ct"] = float(ct_x.tokens_per_ct)
+    timings["pack.num_cts"] = float(len(ct_x.cts))
+    timings["pack.block"] = float(ct_x.block)
+
+    h = ct_x
+    if measure_depth:
+        timings["level.initial"] = float(backend.get_level(h.cts[0]))
+    for i, layer in enumerate(weights.layers):
+        if bootstrap_plan is not None:
+            from .bootstrap_scheduler import maybe_bootstrap
+            t_bs = time.time()
+            # bootstrap_plan operates on TokenPackedTensor today; treat
+            # MatrixPackedTensor as a list of cts for refresh purposes.
+            for j in range(len(h.cts)):
+                refreshed = maybe_bootstrap(backend, h.cts[j], bootstrap_plan, i)
+                if refreshed is not h.cts[j]:
+                    h.cts[j] = refreshed
+            bs_dt = time.time() - t_bs
+            if bs_dt > 0:
+                timings[f"L{i}.bootstrap"] = bs_dt
+        h, layer_t = encrypt_layer_matrix(
+            backend, h, layer, coeffs[i], weights.num_heads
+        )
+        for k, v in layer_t.items():
+            timings[f"L{i}.{k}"] = v
+        if measure_depth:
+            timings[f"L{i}.level_after"] = float(backend.get_level(h.cts[0]))
+
+    # Classifier head: extract [CLS] (token 0) into a single-ct
+    # token-packed tensor so we can reuse the existing classifier path.
+    t = time.time()
+    if weights.cls_W is not None:
+        # Decrypt-then-take-cls would defeat FHE; instead extract the
+        # [CLS] block (slots [0..hidden_dim)) of the first ciphertext.
+        cls_ct = h.cts[0]
+        # Mask out everything but the first hidden_dim slots.
+        n_slots = h.num_slots
+        mask = [0.0] * n_slots
+        for j in range(h.hidden_dim):
+            mask[j] = 1.0
+        cls_ct = backend.mul_plain(cls_ct, mask)
+        cls = TokenPackedTensor.from_ciphertexts([cls_ct], hidden_dim=h.hidden_dim)
+        if weights.pooler_W is not None:
+            cls = enc_linear(backend, cls, weights.pooler_W, weights.pooler_b)
+        out_ct = enc_linear(backend, cls, weights.cls_W, weights.cls_b)
+        timings["classifier"] = time.time() - t
+        t = time.time()
+        out = out_ct.decrypt(backend)
+        timings["decrypt"] = time.time() - t
+    else:
+        timings["classifier"] = 0.0
+        t = time.time()
+        out = h.decrypt(backend)
+        timings["decrypt"] = time.time() - t
 
     timings["total"] = sum(timings.values())
     return out, timings

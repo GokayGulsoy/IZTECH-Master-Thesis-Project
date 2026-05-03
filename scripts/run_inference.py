@@ -52,6 +52,10 @@ def _parse_args():
                    help="Run plaintext LPAN model (skips encryption, for comparison)")
     p.add_argument("--backend", default="openfhe", choices=["openfhe", "heongpu"],
                    help="CKKS backend (heongpu requires the H100 wrapper)")
+    p.add_argument("--layout", default="token", choices=["token", "matrix"],
+                   help="ciphertext packing: token (1 ct/token) or matrix (B tokens/ct)")
+    p.add_argument("--block", type=int, default=0,
+                   help="matrix-pack block (0 = auto = next_pow2(max_dim))")
     return p.parse_args()
 
 
@@ -162,14 +166,22 @@ def main():
     coeffs = load_coefficients(args.model, task=args.task)
 
     # FHE inference
-    print("\nRunning encrypted inference...")
-    from fhe_thesis.encryption.protocol import encrypt_inference
+    print(f"\nRunning encrypted inference (layout={args.layout})...")
     t0 = time.time()
-    logits, timings = encrypt_inference(
-        backend, emb_np, weights, coeffs,
-        max_seq_len=args.max_seq_len,
-        n_jobs=args.n_jobs,
-    )
+    if args.layout == "matrix":
+        from fhe_thesis.encryption.protocol import encrypt_inference_matrix
+        logits, timings = encrypt_inference_matrix(
+            backend, emb_np, weights, coeffs,
+            max_seq_len=args.max_seq_len,
+            block=args.block,
+        )
+    else:
+        from fhe_thesis.encryption.protocol import encrypt_inference
+        logits, timings = encrypt_inference(
+            backend, emb_np, weights, coeffs,
+            max_seq_len=args.max_seq_len,
+            n_jobs=args.n_jobs,
+        )
     wall = time.time() - t0
 
     # Classify using CLS token output (index 0)
