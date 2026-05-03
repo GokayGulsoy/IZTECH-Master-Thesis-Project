@@ -191,6 +191,9 @@ class HEonGPUBackend(CKKSBackend):
         out = self._clone(a)
         da = self._ops.depth(out)
         db = self._ops.depth(b)
+        import os as _os
+        if _os.environ.get("HEONGPU_DEBUG_DEPTH"):
+            print(f"[mul] da={da} db={db}", flush=True)
         if da < db:
             for _ in range(db - da):
                 self._ops.mod_drop_inplace_ct(out)
