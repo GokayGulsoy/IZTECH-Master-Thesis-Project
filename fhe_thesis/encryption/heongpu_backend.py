@@ -463,12 +463,15 @@ class HEonGPUBackend(CKKSBackend):
         coeffs = self.decrypt_coeff(ct)
         return [coeffs[(i + 1) * in_dim - 1] for i in range(out_dim)]
 
-    def coeff_to_slot(self, ct: Ciphertext) -> Ciphertext:
-        """Homomorphic conversion: coefficient-encoded → slot-encoded.
+    def coeff_to_slot(self, ct: Ciphertext) -> List[Ciphertext]:
+        """Homomorphic conversion: coefficient-encoded → 2× slot-encoded.
 
-        After this call, the slot vector at indices ``[0, N/2)`` holds
-        the first half of the polynomial coefficients of ``ct``. Useful
-        for chaining a :meth:`coeff_matvec` output into slot-domain
+        Returns a list of 2 ciphertexts:
+
+        - ``out[0]``: slot vector ``[0, N/2)`` holds polynomial coefficients ``[0, N/2)``
+        - ``out[1]``: slot vector ``[0, N/2)`` holds polynomial coefficients ``[N/2, N)``
+
+        Useful for chaining a :meth:`coeff_matvec` output into slot-domain
         polynomial / element-wise ops.
 
         Requires :meth:`configure_bootstrapping` to have been called.
@@ -478,18 +481,19 @@ class HEonGPUBackend(CKKSBackend):
                 "coeff_to_slot requires configure_bootstrapping() first "
                 "(populates the CtoS BSGS matrices and rotation keys)"
             )
-        return self._ops.solo_coeff_to_slot(ct, self._gk)
+        return self._ops.coeff_to_slot(ct, self._gk)
 
-    def slot_to_coeff(self, ct: Ciphertext) -> Ciphertext:
-        """Homomorphic conversion: slot-encoded → coefficient-encoded.
+    def slot_to_coeff(self, ct0: Ciphertext, ct1: Ciphertext) -> Ciphertext:
+        """Homomorphic conversion: 2× slot-encoded → coefficient-encoded.
 
-        Inverse of :meth:`coeff_to_slot`.
+        Inverse of :meth:`coeff_to_slot`; takes the 2 halves and produces
+        a single coefficient-encoded ciphertext of length N.
         """
         if not self._bootstrap_ready:
             raise RuntimeError(
                 "slot_to_coeff requires configure_bootstrapping() first"
             )
-        return self._ops.solo_slot_to_coeff(ct, self._gk)
+        return self._ops.slot_to_coeff(ct0, ct1, self._gk)
 
     def dot(self, a: Ciphertext, b: Ciphertext) -> Ciphertext:
         """Inner product ⟨a, b⟩ broadcast across slots."""

@@ -58,16 +58,16 @@ def main() -> int:
 
     print("\n[2] solo_coeff_to_slot (homomorphic CtoS)...")
     t = time.time()
-    ct_y_slot = be.coeff_to_slot(ct_y_coeff)
-    print(f"  wall: {time.time() - t:.3f}s")
+    ct_y_slots = be.coeff_to_slot(ct_y_coeff)
+    print(f"  wall: {time.time() - t:.3f}s   returned {len(ct_y_slots)} cts")
 
-    # Decode in slot domain.
-    slots = np.asarray(be.decrypt(ct_y_slot))
-    print(f"  slot vector len: {len(slots)}")
+    # Decode in slot domain.  out[0] holds coeffs [0..N/2), out[1] holds [N/2..N).
+    slots0 = np.asarray(be.decrypt(ct_y_slots[0]))
+    slots1 = np.asarray(be.decrypt(ct_y_slots[1]))
+    full = np.concatenate([slots0[:be._num_slots], slots1[:be._num_slots]])
+    print(f"  reconstructed coeff vec len: {len(full)}  (expected N={be._N})")
 
-    # The polynomial coefficients are at slot indices 0..N/2-1.
-    # Our values of interest live at indices [n-1, 2n-1, ..., m·n - 1].
-    extracted_slots = np.array([slots[(i + 1) * in_dim - 1] for i in range(out_dim)])
+    extracted_slots = np.array([full[(i + 1) * in_dim - 1] for i in range(out_dim)])
     err_slot = np.max(np.abs(extracted_slots - expected))
     print(f"  slot-domain extract max-err: {err_slot:.3e}")
 

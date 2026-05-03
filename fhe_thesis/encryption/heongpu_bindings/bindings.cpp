@@ -236,17 +236,9 @@ struct Operator {
     // key built from bootstrapping_key_indexs() to have been issued
     // ahead of time (HEonGPU stores the BSGS matrices on the operator).
 
-    // solo_coeff_to_slot: converts the *first N/2* polynomial
-    // coefficients of a coefficient-encoded ciphertext into the slot
-    // values of the returned slot-encoded ciphertext.
-    Ciphertext solo_coeff_to_slot(Ciphertext& ct, GaloisKey& g) {
-        auto out = std::make_shared<heongpu::Ciphertext<SCHEME>>();
-        *out = ops.solo_coeff_to_slot(*ct.ct, *g.gk);
-        return Ciphertext{out};
-    }
-
-    // coeff_to_slot: returns *both* halves — slots[0..N/2) of result[0]
-    // hold poly coeffs [0..N/2); slots of result[1] hold coeffs [N/2..N).
+    // coeff_to_slot returns 2 ciphertexts:
+    //   result[0]: slots[0..N/2) hold polynomial coefficients [0..N/2)
+    //   result[1]: slots[0..N/2) hold polynomial coefficients [N/2..N)
     std::vector<Ciphertext> coeff_to_slot(Ciphertext& ct, GaloisKey& g) {
         auto pair = ops.coeff_to_slot(*ct.ct, *g.gk);
         std::vector<Ciphertext> out;
@@ -259,10 +251,11 @@ struct Operator {
         return out;
     }
 
-    // solo_slot_to_coeff: inverse — slot-encoded → coefficient-encoded.
-    Ciphertext solo_slot_to_coeff(Ciphertext& ct, GaloisKey& g) {
+    // slot_to_coeff: takes 2 slot-encoded cts (representing the two
+    // halves of a polynomial), returns 1 coefficient-encoded ct.
+    Ciphertext slot_to_coeff(Ciphertext& ct0, Ciphertext& ct1, GaloisKey& g) {
         auto out = std::make_shared<heongpu::Ciphertext<SCHEME>>();
-        *out = ops.solo_slot_to_coeff(*ct.ct, *g.gk);
+        *out = ops.slot_to_coeff(*ct0.ct, *ct1.ct, *g.gk);
         return Ciphertext{out};
     }
 };
@@ -354,13 +347,10 @@ PYBIND11_MODULE(_heongpu, m) {
              py::arg("ct"), py::arg("galois_key"), py::arg("relin_key"))
         .def("clone_ct",                 &Operator::clone_ct,
              "Shallow copy preserving depth/scale/encoding metadata.")
-        .def("solo_coeff_to_slot",       &Operator::solo_coeff_to_slot,
-             py::arg("ct"), py::arg("galois_key"),
-             "NEXUS Phase 3: convert first N/2 polynomial coefficients to slots.")
         .def("coeff_to_slot",            &Operator::coeff_to_slot,
              py::arg("ct"), py::arg("galois_key"),
-             "NEXUS Phase 3: returns 2 cts holding polynomial coefficients [0..N/2) and [N/2..N) as slots.")
-        .def("solo_slot_to_coeff",       &Operator::solo_slot_to_coeff,
-             py::arg("ct"), py::arg("galois_key"),
-             "NEXUS Phase 3: inverse of solo_coeff_to_slot.");
+             "NEXUS Phase 3: returns 2 cts; slots of [0]/[1] hold polynomial coefficients [0..N/2) / [N/2..N).")
+        .def("slot_to_coeff",            &Operator::slot_to_coeff,
+             py::arg("ct0"), py::arg("ct1"), py::arg("galois_key"),
+             "NEXUS Phase 3: inverse of coeff_to_slot.");
 }
