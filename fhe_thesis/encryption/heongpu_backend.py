@@ -348,6 +348,31 @@ class HEonGPUBackend(CKKSBackend):
             step <<= 1
         return out
 
+    def broadcast_first_slot(
+        self, ct: Ciphertext, n: int, scale: float = 1.0
+    ) -> Ciphertext:
+        """Mask first n slots of an already-broadcast scalar (after sum_slots).
+
+        sum_slots leaves every slot holding the same value; we just keep
+        the first n and zero the rest, scaled by ``scale``. One mul_plain
+        instead of the n×mul_plain default — saves levels and time.
+        """
+        mask = [scale] * n + [0.0] * (self._num_slots - n)
+        return self.mul_plain(ct, mask)
+
+    def place_scaled_at_slot(
+        self, ct: Ciphertext, slot: int, n: int, scale: float = 1.0
+    ) -> Ciphertext:
+        """Mask out slot 0 of `ct` (broadcast scalar) into a one-hot at `slot`.
+
+        Caller is expected to pass a ct whose slot 0 holds the scalar (e.g.
+        after `dot`/`sum_slots`). One mul_plain.
+        """
+        mask = [0.0] * self._num_slots
+        if slot < n:
+            mask[slot] = scale
+        return self.mul_plain(ct, mask)
+
     # ── ciphertext utilities ──────────────────────────────────────────
     def _clone(self, ct: Ciphertext) -> Ciphertext:
         """Return a fresh ciphertext with the same plaintext as ``ct``.
