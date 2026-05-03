@@ -628,6 +628,7 @@ def encrypt_inference_linear_mixing(
     n_jobs: int = 1,
     kept_token_indices: Optional[np.ndarray] = None,
     bootstrap_plan: Optional[object] = None,
+    measure_depth: bool = False,
 ) -> Tuple[np.ndarray, Dict[str, float]]:
     """Full linear-mixing encoder + classifier under FHE.
 
@@ -650,6 +651,8 @@ def encrypt_inference_linear_mixing(
     timings["encrypt"] = time.time() - t
 
     h = ct_x
+    if measure_depth:
+        timings["level.initial"] = float(backend.get_level(h.cts[0]))
     for i, layer in enumerate(weights.layers):
         if bootstrap_plan is not None:
             from .bootstrap_scheduler import maybe_bootstrap
@@ -664,6 +667,8 @@ def encrypt_inference_linear_mixing(
         )
         for k, v in layer_t.items():
             timings[f"L{i}.{k}"] = v
+        if measure_depth:
+            timings[f"L{i}.level_after"] = float(backend.get_level(h.cts[0]))
 
     if weights.cls_W is not None:
         t = time.time()
@@ -691,6 +696,7 @@ def encrypt_inference(
     max_seq_len: Optional[int] = None,
     n_jobs: int = 1,
     bootstrap_plan: Optional[object] = None,
+    measure_depth: bool = False,
 ) -> Tuple[np.ndarray, Dict[str, float]]:
     """Full encoder + (optional) classifier head under FHE.
 
@@ -718,6 +724,8 @@ def encrypt_inference(
     timings["encrypt"] = time.time() - t
 
     h = ct_x
+    if measure_depth:
+        timings["level.initial"] = float(backend.get_level(h.cts[0]))
     for i, layer in enumerate(weights.layers):
         if bootstrap_plan is not None:
             from .bootstrap_scheduler import maybe_bootstrap
@@ -729,6 +737,8 @@ def encrypt_inference(
         h, layer_t = encrypt_layer(backend, h, layer, coeffs[i], weights.num_heads, n_jobs=n_jobs)
         for k, v in layer_t.items():
             timings[f"L{i}.{k}"] = v
+        if measure_depth:
+            timings[f"L{i}.level_after"] = float(backend.get_level(h.cts[0]))
 
     # Pooler + classifier on the [CLS] token only.
     if weights.cls_W is not None:
@@ -1032,6 +1042,7 @@ def encrypt_inference_hybrid(
     n_jobs: int = 1,
     kept_token_indices: Optional[np.ndarray] = None,
     bootstrap_plan: Optional[object] = None,
+    measure_depth: bool = False,
 ) -> Tuple[np.ndarray, Dict[str, float]]:
     """End-to-end HyPER-LPAN encrypted forward pass.
 
@@ -1068,6 +1079,8 @@ def encrypt_inference_hybrid(
     timings["encrypt"] = time.time() - t
 
     h = ct_x
+    if measure_depth:
+        timings["level.initial"] = float(backend.get_level(h.cts[0]))
     for i, layer in enumerate(weights.layers):
         if bootstrap_plan is not None:
             from .bootstrap_scheduler import maybe_bootstrap
@@ -1083,6 +1096,8 @@ def encrypt_inference_hybrid(
         )
         for k, v in layer_t.items():
             timings[f"L{i}.{k}"] = v
+        if measure_depth:
+            timings[f"L{i}.level_after"] = float(backend.get_level(h.cts[0]))
 
     if weights.cls_W is not None:
         t = time.time()

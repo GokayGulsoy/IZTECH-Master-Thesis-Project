@@ -209,6 +209,7 @@ def _run_fhe_sample(
     hybrid=False,
     kept_token_indices=None,
     bootstrap_plan=None,
+    measure_depth=False,
 ):
     """Encrypt, infer, decrypt one sample. Returns (logits, timings)."""
     if hybrid:
@@ -223,6 +224,7 @@ def _run_fhe_sample(
             n_jobs=n_jobs,
             kept_token_indices=kept_token_indices,
             bootstrap_plan=bootstrap_plan,
+            measure_depth=measure_depth,
         )
     elif linear_mixing:
         from fhe_thesis.encryption.protocol import encrypt_inference_linear_mixing
@@ -236,6 +238,7 @@ def _run_fhe_sample(
             n_jobs=n_jobs,
             kept_token_indices=kept_token_indices,
             bootstrap_plan=bootstrap_plan,
+            measure_depth=measure_depth,
         )
     elif phase == "model":
         from fhe_thesis.encryption.protocol import encrypt_inference
@@ -248,6 +251,7 @@ def _run_fhe_sample(
             max_seq_len=max_seq_len,
             n_jobs=n_jobs,
             bootstrap_plan=bootstrap_plan,
+            measure_depth=measure_depth,
         )
     else:
         from fhe_thesis.encryption.protocol import run_phase
@@ -461,6 +465,7 @@ def main():
             hybrid=args.hybrid,
             kept_token_indices=kept_indices,
             bootstrap_plan=bootstrap_plan,
+            measure_depth=args.measure_depth,
         )
         wall = time.time() - t_start
 
@@ -500,6 +505,33 @@ def main():
             k: float(np.mean([t.get(k, 0) for t in all_timings]))
             for k in op_keys
         }
+
+    # Depth measurement summary (--measure-depth) — empirically calibrates
+    # the conservative LAYER_DEPTH constants in depth.py.
+    if args.measure_depth and all_timings:
+        level_keys = sorted(
+            (k for k in all_timings[0] if k.startswith("level.") or k.endswith(".level_after")),
+            key=lambda k: (0, 0) if k == "level.initial" else (1, int(k.split(".")[0][1:])),
+        )
+        depth_log: Dict[str, float] = {}
+        prev = None
+        per_layer_consumed = []
+        print("\n=== Depth measurement (per-layer ciphertext level) ===")
+        for k in level_keys:
+            lvl = float(np.mean([t.get(k, 0) for t in all_timings]))
+            depth_log[k] = lvl
+            if prev is not None and k != "level.initial":
+                consumed = lvl - prev
+                per_layer_consumed.append(consumed)
+                print(f"  {k:>22s} = {lvl:5.2f}   (Δ from previous = {consumed:+.2f})")
+            else:
+                print(f"  {k:>22s} = {lvl:5.2f}")
+            prev = lvl
+        results["depth_log_mean_levels"] = depth_log
+        if per_layer_consumed:
+            results["mean_levels_consumed_per_layer"] = float(np.mean(per_layer_consumed))
+            print(f"  mean Δ/layer = {np.mean(per_layer_consumed):+.2f}  "
+                  f"(min={min(per_layer_consumed):+.2f}, max={max(per_layer_consumed):+.2f})")
 
     print(f"\n=== Results ===")
     print(f"  FHE accuracy:      {fhe_acc*100:.2f}%  (plaintext: {plain_acc*100:.2f}%)")
