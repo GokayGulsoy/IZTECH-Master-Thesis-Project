@@ -177,7 +177,19 @@ class HEonGPUBackend(CKKSBackend):
 
     def mul(self, a: Ciphertext, b: Ciphertext) -> Ciphertext:
         out = self._clone(a)
-        self._ops.multiply_inplace(out, b)
+        da = self._ops.depth(out)
+        db = self._ops.depth(b)
+        if da < db:
+            for _ in range(db - da):
+                self._ops.mod_drop_inplace_ct(out)
+            rhs = b
+        elif db < da:
+            rhs = self._clone(b)
+            for _ in range(da - db):
+                self._ops.mod_drop_inplace_ct(rhs)
+        else:
+            rhs = b
+        self._ops.multiply_inplace(out, rhs)
         self._ops.relinearize_inplace(out, self._rk)
         self._ops.rescale_inplace(out)
         return out
