@@ -23,12 +23,18 @@ def main():
     )
     be.configure_bootstrapping()
     print(f"N={be._N}  num_slots={be._num_slots}  scale=2^50")
+    print(f"  bootstrapping_ready: {be._ops.bootstrapping_ready()}")
+    print(f"  scale_boot_ = {be._ops.bootstrapping_scale():.6e}  (log2={np.log2(be._ops.bootstrapping_scale()):.2f})")
+    print(f"  CtoS_level_ = {be._ops.coeff_to_slot_level()}")
+    print(f"  StoC_level_ = {be._ops.slot_to_coeff_level()}")
 
     # Test 1: all-ones coefficient vector
     print("\n--- Test 1: c = (1, 1, 1, ..., 1)  (all-ones) ---")
     c = np.ones(be._N)
     ct = be.encrypt_coeff(c.tolist())
+    print(f"  ct depth={ct.depth()}  scale=2^{np.log2(ct.scale()):.2f}  encoding_type={ct.encoding_type()}")
     cts = be.coeff_to_slot(ct)
+    print(f"  out[0] depth={cts[0].depth()}  scale=2^{np.log2(cts[0].scale()):.2f}  encoding={cts[0].encoding_type()}")
     s0 = np.asarray(be.decrypt(cts[0]))[: be._num_slots]
     s1 = np.asarray(be.decrypt(cts[1]))[: be._num_slots]
     print(f"  out[0] sample: min={s0.min():.4e} max={s0.max():.4e} mean={s0.mean():.4e}")

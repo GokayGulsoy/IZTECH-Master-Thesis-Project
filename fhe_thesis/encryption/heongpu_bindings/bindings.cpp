@@ -258,6 +258,15 @@ struct Operator {
         *out = ops.slot_to_coeff(*ct0.ct, *ct1.ct, *g.gk);
         return Ciphertext{out};
     }
+
+    // ── NEXUS Phase 3 introspection ───────────────────────────────
+    // Python-side helpers need scale_boot_ and CtoS_level_ to align
+    // arbitrary ciphertexts with the precomputed CtoS plaintext
+    // matrices before calling coeff_to_slot.
+    double bootstrapping_scale()  const { return ops.bootstrapping_scale(); }
+    int    coeff_to_slot_level() const { return ops.coeff_to_slot_level(); }
+    int    slot_to_coeff_level() const { return ops.slot_to_coeff_level(); }
+    bool   bootstrapping_ready() const { return ops.bootstrapping_ready(); }
 };
 
 // -----------------------------------------------------------------------------
@@ -285,7 +294,15 @@ PYBIND11_MODULE(_heongpu, m) {
     py::class_<RelinKey>(m, "RelinKey");
     py::class_<GaloisKey>(m, "GaloisKey");
     py::class_<Plaintext>(m, "Plaintext");
-    py::class_<Ciphertext>(m, "Ciphertext");
+    py::class_<Ciphertext>(m, "Ciphertext")
+        .def("depth",            [](const Ciphertext& c) { return c.ct->depth(); },
+             "Multiplicative depth (number of rescales applied).")
+        .def("scale",            [](const Ciphertext& c) { return c.ct->scale(); },
+             "Current scale factor (in linear units, not log2).")
+        .def("encoding_type",    [](const Ciphertext& c) {
+                 return static_cast<int>(c.ct->encoding_type());
+             }, "0 = SLOT, 1 = COEFFICIENT.")
+        .def("rescale_required", [](const Ciphertext& c) { return c.ct->rescale_required(); });
 
     py::class_<KeyGenerator>(m, "KeyGenerator")
         .def(py::init<CKKSContext&>())
@@ -352,5 +369,13 @@ PYBIND11_MODULE(_heongpu, m) {
              "NEXUS Phase 3: returns 2 cts; slots of [0]/[1] hold polynomial coefficients [0..N/2) / [N/2..N).")
         .def("slot_to_coeff",            &Operator::slot_to_coeff,
              py::arg("ct0"), py::arg("ct1"), py::arg("galois_key"),
-             "NEXUS Phase 3: inverse of coeff_to_slot.");
+             "NEXUS Phase 3: inverse of coeff_to_slot.")
+        .def("bootstrapping_scale",  &Operator::bootstrapping_scale,
+             "Internal scale (`scale_boot_`) used by the CtoS/StoC matrices.")
+        .def("coeff_to_slot_level",  &Operator::coeff_to_slot_level,
+             "Chain level at which CtoS plaintext matrices live.")
+        .def("slot_to_coeff_level",  &Operator::slot_to_coeff_level,
+             "Chain level at which StoC plaintext matrices live.")
+        .def("bootstrapping_ready",  &Operator::bootstrapping_ready,
+             "True iff generate_bootstrapping_params has been called.");
 }
