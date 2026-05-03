@@ -510,6 +510,12 @@ class HEonGPUBackend(CKKSBackend):
         Returns the 2-ct list from CtoS. Use ``out[0]`` if ``m·n ≤ N/2``.
         """
         ct_y = self.coeff_matvec(ct_x_coeff, weight, in_dim=in_dim, rescale=False)
+        # CtoS plaintext matrices live at depth 0 (top of chain). Our
+        # multiply-without-rescale leaves ct at depth 0 with a doubled
+        # scale; clear the rescale_required_ flag so the rotations
+        # inside CtoS don't reject it. CtoS internally rescales twice,
+        # which absorbs the extra scale factor cleanly.
+        self._ops.clear_rescale_required(ct_y)
         return self.coeff_to_slot(ct_y)
 
     def slot_to_coeff(self, ct0: Ciphertext, ct1: Ciphertext) -> Ciphertext:

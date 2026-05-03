@@ -267,6 +267,17 @@ struct Operator {
     int    coeff_to_slot_level() const { return ops.coeff_to_slot_level(); }
     int    slot_to_coeff_level() const { return ops.slot_to_coeff_level(); }
     bool   bootstrapping_ready() const { return ops.bootstrapping_ready(); }
+
+    // NEXUS-style escape hatch: after a `multiply_plain_inplace` we
+    // sometimes want to call `coeff_to_slot` directly without first
+    // rescaling (so the cipher stays at depth 0 where CtoS plaintext
+    // matrices live). Rotation refuses cipher with rescale_required_,
+    // so this clears the flag — the caller is responsible for ensuring
+    // the next op handles the larger scale (CtoS internally manages
+    // scales via its own rescale chain).
+    void clear_rescale_required(Ciphertext& c) {
+        c.ct->rescale_required_ = false;
+    }
 };
 
 // -----------------------------------------------------------------------------
@@ -377,5 +388,9 @@ PYBIND11_MODULE(_heongpu, m) {
         .def("slot_to_coeff_level",  &Operator::slot_to_coeff_level,
              "Chain level at which StoC plaintext matrices live.")
         .def("bootstrapping_ready",  &Operator::bootstrapping_ready,
-             "True iff generate_bootstrapping_params has been called.");
+             "True iff generate_bootstrapping_params has been called.")
+        .def("clear_rescale_required", &Operator::clear_rescale_required,
+             "NEXUS escape hatch: clear rescale_required_ on a ciphertext "
+             "(use only when feeding into ops that handle scale alignment "
+             "internally, e.g. coeff_to_slot).");
 }
