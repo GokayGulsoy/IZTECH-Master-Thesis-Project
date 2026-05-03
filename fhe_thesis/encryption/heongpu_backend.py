@@ -549,57 +549,105 @@ class HEonGPUBackend(CKKSBackend):
         log_n = int(self._num_slots).bit_length() - 1
         return [self._bitrev((i + 1) * in_dim - 1, log_n) for i in range(out_dim)]
 
+    def _bsgs_decompose(
+        self, shifts: Sequence[int], baby_size: Optional[int] = None
+    ) -> Tuple[int, List[int], List[int]]:
+        """Pick BSGS baby step ``B`` and return (B, baby_set, giant_set).
+
+        ``baby_set`` = unique baby-step rotations used (in [0, B)).
+        ``giant_set`` = unique giant-step rotations used (multiples of B).
+        """
+        N = self._num_slots
+        uniq = sorted({int(s) % N for s in shifts})
+        if baby_size is None:
+            import math
+            baby_size = max(1, int(math.isqrt(max(1, len(uniq)))))
+        babies = set()
+        giants = set()
+        for s in uniq:
+            b = s % baby_size
+            g = s - b
+            babies.add(b)
+            giants.add(g % N)
+        return baby_size, sorted(babies), sorted(giants)
+
     def gather_slots(
         self,
         ct: Ciphertext,
         src_indices: Sequence[int],
         *,
         dst_indices: Optional[Sequence[int]] = None,
+        baby_size: Optional[int] = None,
     ) -> Ciphertext:
         """Permute slots: ``out[dst_indices[i]] = ct[src_indices[i]]``.
 
-        If ``dst_indices`` is ``None``, defaults to ``[0, 1, ..., m-1]``
-        (i.e. compact the source slots into a contiguous prefix).
+        If ``dst_indices`` is ``None``, defaults to ``[0, 1, ..., m-1]``.
 
-        BSGS-style implementation: groups source positions by their
-        ``(dst − src) mod num_slots`` shift, builds one mask per unique
-        shift, then does ``mul_plain + rotate`` per shift. For a permutation
-        of ``m`` items this costs ``U`` rotations where ``U`` is the number
-        of *distinct* shift values (typically ``≪ m``). For the bit-reversal
-        gather pattern used by NEXUS this is ``≤ m`` rotations and often
-        much fewer.
+        Hoisted BSGS implementation. With ``U`` distinct shifts and baby
+        step ``B = ⌈√U⌉``, this needs ``|baby_set| + |giant_set| ≈ 2√U``
+        rotations and ``U`` mul_plains, instead of ``U`` rotations. This is
+        the difference between gathering 256 distinct shifts at ~32 keys
+        vs 256 keys (avoids OOM on the Galois eval keys).
 
-        Multiplicative depth: 1 (one mul_plain mask).
+        Multiplicative depth: 1.
         """
-        srcs = list(src_indices)
+        N = self._num_slots
+        srcs = [int(s) % N for s in src_indices]
         m = len(srcs)
         if dst_indices is None:
             dsts = list(range(m))
         else:
-            dsts = list(dst_indices)
+            dsts = [int(d) % N for d in dst_indices]
             if len(dsts) != m:
                 raise ValueError(
                     f"dst_indices length {len(dsts)} != src_indices length {m}"
                 )
 
-        # Group by shift (dst - src) mod num_slots.
-        shift_buckets: Dict[int, List[int]] = {}
-        for src, dst in zip(srcs, dsts):
-            shift = (dst - src) % self._num_slots
-            shift_buckets.setdefault(shift, []).append(src % self._num_slots)
+        # We want result[dst] = ct[src]. With our convention
+        # rotate(x, k)[i] = x[(i+k) mod N], we need a total shift of
+        # k = (src - dst) mod N. Decompose k = g + b, g multiple of B,
+        # b ∈ [0, B). Pre-rotate ct by each b, mask at position (dst+g),
+        # then giant-rotate by g.
+        # mask_{g,b}[(dst + g) mod N] = 1 contributes ct[(dst+g+b) mod N]
+        # = ct[src] when dst+g+b ≡ src (mod N).
+        all_k = [(srcs[i] - dsts[i]) % N for i in range(m)]
+        B, _, _ = self._bsgs_decompose(all_k, baby_size=baby_size)
 
+        # Bucket: giant g → list of (b, mask_position)
+        giant_buckets: Dict[int, Dict[int, List[int]]] = {}
+        babies_used = set()
+        for src, dst, k in zip(srcs, dsts, all_k):
+            b = k % B
+            g = (k - b) % N
+            babies_used.add(b)
+            giant_buckets.setdefault(g, {}).setdefault(b, []).append((dst + g) % N)
+
+        # Pre-rotate ct by each baby step.
+        baby_rots: Dict[int, Ciphertext] = {}
+        for b in babies_used:
+            baby_rots[b] = self.rotate(ct, b) if b else ct
+
+        # Register Galois keys: babies (positive) ∪ giants (positive)
+        needed_keys = set(babies_used) | set(giant_buckets.keys())
+        # rotate() expects signed shifts; convert (we use positive only here)
+        self.register_rotation_keys(needed_keys)
+
+        # Build masked sums per giant, then giant-rotate, accumulate.
         result: Optional[Ciphertext] = None
-        for shift, src_list in shift_buckets.items():
-            # One mask passes through all sources in this shift bucket.
-            mask = [0.0] * self._num_slots
-            for src in src_list:
-                mask[src] = 1.0
-            masked = self.mul_plain(ct, mask)
-            # rotate left by `shift` (rotate uses sign convention left=+).
-            moved = self.rotate(masked, -shift) if shift else masked
+        for g, b_to_positions in giant_buckets.items():
+            acc: Optional[Ciphertext] = None
+            for b, positions in b_to_positions.items():
+                mask = [0.0] * N
+                for p in positions:
+                    mask[p] = 1.0
+                term = self.mul_plain(baby_rots[b], mask)
+                acc = term if acc is None else self.add(acc, term)
+            assert acc is not None
+            moved = self.rotate(acc, g) if g else acc
             result = moved if result is None else self.add(result, moved)
+
         if result is None:
-            return self.mul_plain(ct, [0.0] * self._num_slots)
+            return self.mul_plain(ct, [0.0] * N)
         return result
 
     def nexus_linear(
@@ -611,27 +659,14 @@ class HEonGPUBackend(CKKSBackend):
         bias: Optional[Sequence[float]] = None,
         register_keys: bool = True,
     ) -> "Ciphertext":
-        """Full NEXUS linear pipeline: coefficient input → slot output.
-
-        Composes :meth:`coeff_matvec_to_slot` + :meth:`gather_slots` so
-        the result has ``(W·x + b)[i]`` at slot ``i`` for ``i ∈ [0, m)``.
-
-        Caller is responsible for choosing ``in_dim`` such that
-        ``in_dim · out_dim ≤ N/2`` (the half-CtoS limit); otherwise split
-        into multiple calls.
-
-        ``register_keys=True`` ensures Galois keys exist for every gather
-        rotation on first call (subsequent calls with the same shape are
-        free).
-        """
+        """Full NEXUS linear pipeline: coefficient input → slot output."""
         import numpy as np
         W = np.asarray(weight, dtype=np.float64)
         out_dim = W.shape[0]
         targets = self.nexus_target_slots(in_dim, out_dim)
-        if register_keys:
-            shift_set = {(i - targets[i]) % self._num_slots for i in range(out_dim)}
-            self.register_rotation_keys(shift_set)
         cts = self.coeff_matvec_to_slot(ct_x_coeff, W, in_dim=in_dim)
+        # gather_slots will call register_rotation_keys with the small
+        # baby+giant set (~2√U keys) instead of U keys.
         gathered = self.gather_slots(cts[0], targets)
         if bias is not None:
             b_pad = list(bias) + [0.0] * (self._num_slots - len(bias))
