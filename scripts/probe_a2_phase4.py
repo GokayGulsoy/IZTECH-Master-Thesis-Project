@@ -16,7 +16,7 @@ import time
 import numpy as np
 
 from fhe_thesis.encryption.heongpu_backend import HEonGPUBackend
-import fhe_thesis.encryption._heongpu as he
+from fhe_thesis.encryption import heongpu_bindings as he
 
 
 def bitrev(i, bits):
