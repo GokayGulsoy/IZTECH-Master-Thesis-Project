@@ -513,10 +513,16 @@ class HEonGPUBackend(CKKSBackend):
         # CtoS plaintext matrices live at depth 0 (top of chain). Our
         # multiply-without-rescale leaves ct at depth 0 with a doubled
         # scale; clear the rescale_required_ flag so the rotations
-        # inside CtoS don't reject it. CtoS internally rescales twice,
-        # which absorbs the extra scale factor cleanly.
+        # inside CtoS don't reject it.
         self._ops.clear_rescale_required(ct_y)
-        return self.coeff_to_slot(ct_y)
+        cts = self.coeff_to_slot(ct_y)
+        # CtoS internally rescales twice but the doubled input scale
+        # propagates: outputs sit at scale²= 2^(2·log2(scale)). One more
+        # rescale brings them back to the canonical scale so downstream
+        # mul_plain plaintexts (encoded at the canonical scale) align.
+        for c in cts:
+            self._ops.rescale_inplace(c)
+        return cts
 
     @staticmethod
     def _bitrev(i: int, bits: int) -> int:
