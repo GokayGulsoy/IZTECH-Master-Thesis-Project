@@ -37,9 +37,10 @@ def main():
     ct = cts[0]
     t_l1 = time.time() - t0
     print(f"\n  L1 (matvec_to_slot): {t_l1*1000:.1f}ms  depth={be._ops.depth(ct)}, encoding={ct.encoding_type()}")
+    targets = be.nexus_target_slots(n, h)
     dec = be.decrypt(ct)
-    err1 = float(np.max(np.abs(np.array(dec[:h]) - z1)))
-    print(f"    z1 err: {err1:.3e}")
+    err1 = float(np.max(np.abs(np.array([dec[targets[j]] for j in range(h)]) - z1)))
+    print(f"    z1 err (at target slots): {err1:.3e}")
 
     # ── Step 2: StoC slot → coeff at high depth ──
     target_lvl = be._ops.slot_to_coeff_level()
@@ -60,8 +61,19 @@ def main():
         for k in range(bits):
             r = (r << 1) | ((i >> k) & 1)
         return r
-    err_brev = float(np.max(np.abs(np.array([coeffs[bitrev(j)] for j in range(h)]) - z1)))
-    print(f"    z1 at coeff[bitrev(j)] err: {err_brev:.3e}")
+    # After StoC of bit-rev slot data: data lands at coeffs corresponding to
+    # the bit-rev source slots' bit-rev. Try a few read patterns.
+    err_target = float(np.max(np.abs(np.array([coeffs[targets[j]] for j in range(h)]) - z1)))
+    err_brev = float(np.max(np.abs(np.array([coeffs[bitrev(targets[j])] for j in range(h)]) - z1)))
+    err_contig = float(np.max(np.abs(np.array(coeffs[:h]) - z1)))
+    print(f"    z1 read patterns:  contig={err_contig:.2e}  bitrev_target={err_brev:.2e}  target={err_target:.2e}")
+    # Find max abs coeff
+    abs_c = np.abs(coeffs)
+    top_idx = np.argsort(abs_c)[-h:][::-1]
+    print(f"    top-h |coeff| indices (sorted by mag): {sorted(top_idx.tolist())[:8]}...")
+    # Compare to known patterns
+    print(f"    targets[:8]={targets[:8]}")
+    print(f"    bitrev(targets)[:8]={[bitrev(t) for t in targets[:8]]}")
 
     # ── Step 3: try CtoS DIRECTLY without bootstrap (test depth-flexibility) ──
     print(f"\n  Test: can CtoS work on depth={be._ops.depth(ct_coeff)} coeff input?")
