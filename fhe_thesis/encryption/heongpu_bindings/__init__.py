@@ -12,6 +12,7 @@ from ._heongpu import (  # noqa: F401
     SecretKey,
     PublicKey,
     RelinKey,
+    GaloisKey,
     Plaintext,
     Ciphertext,
     Encoder,

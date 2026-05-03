@@ -50,6 +50,7 @@ struct CKKSContext {
 struct SecretKey   { std::shared_ptr<heongpu::Secretkey<SCHEME>> sk; };
 struct PublicKey   { std::shared_ptr<heongpu::Publickey<SCHEME>> pk; };
 struct RelinKey    { std::shared_ptr<heongpu::Relinkey<SCHEME>>  rk; };
+struct GaloisKey   { std::shared_ptr<heongpu::Galoiskey<SCHEME>> gk; };
 
 struct Plaintext   { std::shared_ptr<heongpu::Plaintext<SCHEME>>  pt; };
 struct Ciphertext  { std::shared_ptr<heongpu::Ciphertext<SCHEME>> ct; };
@@ -72,6 +73,21 @@ struct KeyGenerator {
         auto rk = std::make_shared<heongpu::Relinkey<SCHEME>>(c.ctx);
         kg.generate_relin_key(*rk, *s.sk);
         return RelinKey{rk};
+    }
+
+    // Default Galois key — supports arbitrary rotations (large key set).
+    GaloisKey generate_galois_key_default(CKKSContext& c, SecretKey& s) {
+        auto gk = std::make_shared<heongpu::Galoiskey<SCHEME>>(c.ctx);
+        kg.generate_galois_key(*gk, *s.sk);
+        return GaloisKey{gk};
+    }
+
+    // Galois key restricted to a specific list of rotation offsets.
+    GaloisKey generate_galois_key_shifts(CKKSContext& c, SecretKey& s,
+                                         std::vector<int> shifts) {
+        auto gk = std::make_shared<heongpu::Galoiskey<SCHEME>>(c.ctx, shifts);
+        kg.generate_galois_key(*gk, *s.sk);
+        return GaloisKey{gk};
     }
 };
 
@@ -127,6 +143,34 @@ struct Operator {
     void mod_drop_inplace_ct(Ciphertext& a)                      { ops.mod_drop_inplace(*a.ct); }
     void mod_drop_inplace_pt(Plaintext& a)                       { ops.mod_drop_inplace(*a.pt); }
     int  depth(Ciphertext& a)                                    { return a.ct->depth(); }
+
+    // Cyclic rotation by `shift` (positive = left, negative = right within slot vector).
+    void rotate_rows_inplace(Ciphertext& a, GaloisKey& g, int shift) {
+        ops.rotate_rows_inplace(*a.ct, *g.gk, shift);
+    }
+
+    // Bootstrapping: depth-refresh a CKKS ciphertext.
+    // Caller must have already invoked generate_bootstrapping_params + generated
+    // a Galois key from `bootstrapping_key_indexs()`.
+    void generate_bootstrapping_params(double scale,
+                                       int CtoS_piece, int StoC_piece,
+                                       int taylor_number, bool less_key_mode) {
+        heongpu::BootstrappingConfig cfg(CtoS_piece, StoC_piece,
+                                         taylor_number, less_key_mode);
+        ops.generate_bootstrapping_params(
+            scale, cfg,
+            heongpu::arithmetic_bootstrapping_type::REGULAR_BOOTSTRAPPING);
+    }
+
+    std::vector<int> bootstrapping_key_indexs() {
+        return ops.bootstrapping_key_indexs();
+    }
+
+    Ciphertext regular_bootstrapping(Ciphertext& a, GaloisKey& g, RelinKey& rk) {
+        auto out = std::make_shared<heongpu::Ciphertext<SCHEME>>();
+        *out = ops.regular_bootstrapping(*a.ct, *g.gk, *rk.rk);
+        return Ciphertext{out};
+    }
 };
 
 // -----------------------------------------------------------------------------
@@ -152,6 +196,7 @@ PYBIND11_MODULE(_heongpu, m) {
     py::class_<SecretKey>(m, "SecretKey");
     py::class_<PublicKey>(m, "PublicKey");
     py::class_<RelinKey>(m, "RelinKey");
+    py::class_<GaloisKey>(m, "GaloisKey");
     py::class_<Plaintext>(m, "Plaintext");
     py::class_<Ciphertext>(m, "Ciphertext");
 
@@ -159,7 +204,11 @@ PYBIND11_MODULE(_heongpu, m) {
         .def(py::init<CKKSContext&>())
         .def("generate_secret_key", &KeyGenerator::generate_secret_key)
         .def("generate_public_key", &KeyGenerator::generate_public_key)
-        .def("generate_relin_key",  &KeyGenerator::generate_relin_key);
+        .def("generate_relin_key",  &KeyGenerator::generate_relin_key)
+        .def("generate_galois_key", &KeyGenerator::generate_galois_key_default,
+             py::arg("ctx"), py::arg("secret_key"))
+        .def("generate_galois_key", &KeyGenerator::generate_galois_key_shifts,
+             py::arg("ctx"), py::arg("secret_key"), py::arg("shifts"));
 
     py::class_<Encoder>(m, "Encoder")
         .def(py::init<CKKSContext&>())
@@ -185,5 +234,17 @@ PYBIND11_MODULE(_heongpu, m) {
         .def("rescale_inplace",        &Operator::rescale_inplace)
         .def("mod_drop_inplace_ct",    &Operator::mod_drop_inplace_ct)
         .def("mod_drop_inplace_pt",    &Operator::mod_drop_inplace_pt)
-        .def("depth",                  &Operator::depth);
+        .def("depth",                  &Operator::depth)
+        .def("rotate_rows_inplace",    &Operator::rotate_rows_inplace,
+             py::arg("ct"), py::arg("galois_key"), py::arg("shift"))
+        .def("generate_bootstrapping_params",
+             &Operator::generate_bootstrapping_params,
+             py::arg("scale"),
+             py::arg("CtoS_piece") = 3,
+             py::arg("StoC_piece") = 3,
+             py::arg("taylor_number") = 11,
+             py::arg("less_key_mode") = true)
+        .def("bootstrapping_key_indexs", &Operator::bootstrapping_key_indexs)
+        .def("regular_bootstrapping",    &Operator::regular_bootstrapping,
+             py::arg("ct"), py::arg("galois_key"), py::arg("relin_key"));
 }
