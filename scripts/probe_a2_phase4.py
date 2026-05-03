@@ -161,6 +161,12 @@ def main():
         print("  ABORT: StoC broken")
         return
 
+    # Check noise at OTHER coefficient positions
+    bitrev_set = set(bitrev(j, log_n_half) for j in range(h))
+    other_coeffs = np.array([coeffs[k] for k in range(be._N) if k not in bitrev_set])
+    print(f"    OTHER coeffs (should be 0): max|c|={np.max(np.abs(other_coeffs)):.3e}, mean|c|={np.mean(np.abs(other_coeffs)):.3e}")
+    print(f"    Sum of |other coeffs|: {np.sum(np.abs(other_coeffs)):.3e}")
+
     # Now check StoC output depth matches ctx_B's expected ctos_level
     actual = be._ops.depth(ct)
     expected = ctx_B.ctos_level()
