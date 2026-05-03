@@ -50,6 +50,8 @@ def _parse_args():
     p.add_argument("--no-bootstrap", action="store_true")
     p.add_argument("--no-fhe", action="store_true",
                    help="Run plaintext LPAN model (skips encryption, for comparison)")
+    p.add_argument("--backend", default="openfhe", choices=["openfhe", "heongpu"],
+                   help="CKKS backend (heongpu requires the H100 wrapper)")
     return p.parse_args()
 
 
@@ -122,15 +124,29 @@ def main():
         return
 
     # Init FHE backend
-    print("\nInitialising OpenFHE backend...")
-    from fhe_thesis.encryption.openfhe_backend import OpenFHEBackend
     t0 = time.time()
-    backend = OpenFHEBackend(
-        multiplicative_depth=args.mult_depth,
-        ring_dim=args.ring_dim,
-        enable_bootstrap=not args.no_bootstrap,
-        num_threads=args.n_jobs if args.n_jobs > 0 else os.cpu_count(),
-    )
+    if args.backend == "heongpu":
+        print("\nInitialising HEonGPU backend (H100, sec_none=True)...")
+        from fhe_thesis.encryption.heongpu_backend import HEonGPUBackend
+        # 2^15 ring with the default 60+18*40 chain — fits on H100 with room
+        # to spare and matches the polynomial-depth budget of token-packed
+        # ops (deg-5 GELU/LN + deg-5 softmax with our tiny BERT coefficients).
+        backend = HEonGPUBackend(
+            poly_modulus_degree=1 << 15,
+            sec_none=False,
+        )
+        if not args.no_bootstrap:
+            print("  Configuring bootstrapping (this rebuilds Galois keys)...")
+            backend.configure_bootstrapping()
+    else:
+        print("\nInitialising OpenFHE backend...")
+        from fhe_thesis.encryption.openfhe_backend import OpenFHEBackend
+        backend = OpenFHEBackend(
+            multiplicative_depth=args.mult_depth,
+            ring_dim=args.ring_dim,
+            enable_bootstrap=not args.no_bootstrap,
+            num_threads=args.n_jobs if args.n_jobs > 0 else os.cpu_count(),
+        )
     print(f"  Key generation: {time.time()-t0:.1f}s")
 
     # Load weights + coefficients

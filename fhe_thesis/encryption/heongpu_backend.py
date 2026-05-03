@@ -357,10 +357,14 @@ class HEonGPUBackend(CKKSBackend):
         self._ops.generate_bootstrapping_params(
             self._scale, CtoS_piece, StoC_piece, taylor_number, less_key_mode
         )
-        # Replace galois key with one that covers bootstrap shifts.
-        boot_shifts = self._ops.bootstrapping_key_indexs()
+        # Merge boot shifts with the existing ±2^k power-of-two set so
+        # matmul / rotate paths keep working after configure_bootstrapping.
+        boot_shifts = list(self._ops.bootstrapping_key_indexs())
+        max_log = (self._num_slots).bit_length() - 1
+        pow2 = [1 << k for k in range(max_log)]
+        all_shifts = sorted(set(boot_shifts + pow2 + [-s for s in pow2]))
         kg = self._hg.KeyGenerator(self._ctx)
-        self._gk = kg.generate_galois_key(self._ctx, self._sk, boot_shifts)
+        self._gk = kg.generate_galois_key(self._ctx, self._sk, all_shifts)
 
     def bootstrap(self, ct: Ciphertext) -> Ciphertext:
         return self._ops.regular_bootstrapping(ct, self._gk, self._rk)
