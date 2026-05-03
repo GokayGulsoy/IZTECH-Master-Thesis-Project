@@ -126,13 +126,16 @@ def main():
     # Init FHE backend
     t0 = time.time()
     if args.backend == "heongpu":
-        print("\nInitialising HEonGPU backend (H100, sec_none=True)...")
+        print("\nInitialising HEonGPU backend (H100)...")
         from fhe_thesis.encryption.heongpu_backend import HEonGPUBackend
-        # 2^15 ring with the default 60+18*40 chain — fits on H100 with room
-        # to spare and matches the polynomial-depth budget of token-packed
-        # ops (deg-5 GELU/LN + deg-5 softmax with our tiny BERT coefficients).
+        # Match the OpenFHE chain depth (`--mult-depth`, default 25) so the
+        # token-packed pipeline runs without mid-layer bootstrapping. With
+        # N=2^16 and a (60, 40*depth, 60) chain we comfortably hold the
+        # entire BERT-tiny inference on a single GPU.
         backend = HEonGPUBackend(
-            poly_modulus_degree=1 << 15,
+            poly_modulus_degree=1 << 16,
+            q_prime_bits=(60,) + (40,) * args.mult_depth + (60,),
+            p_prime_bits=(60,),
             sec_none=False,
         )
         if not args.no_bootstrap:
