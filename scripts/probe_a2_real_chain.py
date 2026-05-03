@@ -105,10 +105,12 @@ def main():
     while be._ops.depth_of_plaintext(pt_w) < be._ops.depth(out):
         be._ops.mod_drop_inplace_pt(pt_w)
     be._ops.multiply_plain_inplace(out, pt_w)
-    be._ops.clear_rescale_required(out)
-    # CtoS at depth=25 (won't be at 0!) — this is the test
-    print(f"  L2 multiply done, depth={be._ops.depth(out)}, attempting CtoS...")
+    # Don't clear rescale — let it rescale to bring scale 2^100 → 2^50
+    be._ops.rescale_inplace(out)
+    print(f"  L2 multiply+rescale done, depth={be._ops.depth(out)}, attempting CtoS...")
     try:
+        # Need to clear rescale_required so CtoS doesn't reject the doubled-input pattern
+        be._ops.clear_rescale_required(out)
         cts_l2 = be._ops.coeff_to_slot(out, be._gk)
         for c in cts_l2:
             be._ops.set_rescale_required(c)
