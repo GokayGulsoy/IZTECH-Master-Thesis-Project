@@ -57,7 +57,8 @@ def main():
 
     # Mimic typical attention QKVO: hidden dim 768 → BSGS uses ~28 baby
     # diagonals in production. We test with n_diag=64 to be conservative.
-    n_diag = 64
+    import sys
+    n_diag = int(sys.argv[1]) if len(sys.argv) > 1 else 64
     print(f"  num_slots={num_slots}  n_diag per matmul={n_diag}")
 
     # Build common: input ct + 4 weight matrices (each as a list of n_diag plaintexts)
