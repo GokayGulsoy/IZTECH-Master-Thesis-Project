@@ -228,7 +228,7 @@ class HEonGPUBackend(CKKSBackend):
                 self._ctx, [0.0] * self._num_slots, self._scale
             ),
         )
-        self._ops.add_inplace(zero, ct)
+        self._ops.add_inplace_match(zero, ct)
         return zero
 
     # ── bootstrapping (Phase 4) ───────────────────────────────────────
