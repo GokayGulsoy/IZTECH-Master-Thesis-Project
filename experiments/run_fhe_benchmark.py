@@ -97,6 +97,14 @@ def _parse_args():
     p.add_argument("--measure-depth", action="store_true",
                    help="Log ciphertext level consumption per layer (1 sample only) "
                         "to calibrate LAYER_DEPTH constants in depth.py")
+    p.add_argument("--fast-ring", action="store_true",
+                   help="Phase 3 preset: halve ring_dim to 32768 + cap mult_depth to 18. "
+                        "Local micro-benchmark predicts ~1.8x end-to-end speedup "
+                        "(mul_plain 2.0x, rotate 1.5x, ct*ct 1.13x, keygen 3.2x). "
+                        "Numerical precision unchanged (rel_err ~1e-14). "
+                        "SECURITY: at N=32768 this gives ~100-bit security (vs 128 at N=65536); "
+                        "OK for benchmarking but document caveat for production deployment. "
+                        "Bootstrap budget reduced to [2,2] automatically.")
     return p.parse_args()
 
 
@@ -299,8 +307,6 @@ def main():
         "n_samples": len(samples),
         "max_seq_len": args.max_seq_len,
         "n_jobs": args.n_jobs,
-        "mult_depth": args.mult_depth,
-        "ring_dim": args.ring_dim,
         "plaintext_accuracy": plain_acc,
         "fhe_samples": [],
     }
@@ -311,15 +317,32 @@ def main():
         return
 
     # ── Build OpenFHE backend ─────────────────────────────────────────
+    # Phase 3 fast preset overrides ring_dim/mult_depth and bootstrap budget.
+    ring_dim = args.ring_dim
+    mult_depth = args.mult_depth
+    bootstrap_budget = None  # let backend pick the default [3,3]
+    if args.fast_ring:
+        ring_dim = 1 << 15
+        if args.mult_depth > 18:
+            mult_depth = 18
+        bootstrap_budget = [2, 2]
+        print(f"  [fast-ring] N={ring_dim}  depth={mult_depth}  BTS=[2,2]  (~100-bit security)")
+    results["mult_depth"] = mult_depth
+    results["ring_dim"] = ring_dim
+    results["fast_ring"] = bool(args.fast_ring)
+
     print("Initialising OpenFHE backend (this takes ~1–3 min for key generation)...")
     t0 = time.time()
     from fhe_thesis.encryption.openfhe_backend import OpenFHEBackend
-    backend = OpenFHEBackend(
-        multiplicative_depth=args.mult_depth,
-        ring_dim=args.ring_dim,
+    backend_kwargs = dict(
+        multiplicative_depth=mult_depth,
+        ring_dim=ring_dim,
         enable_bootstrap=not args.no_bootstrap,
         num_threads=args.n_jobs if args.n_jobs > 0 else os.cpu_count(),
     )
+    if bootstrap_budget is not None:
+        backend_kwargs["bootstrap_level_budget"] = bootstrap_budget
+    backend = OpenFHEBackend(**backend_kwargs)
     keygen_time = time.time() - t0
     print(f"  Key generation: {keygen_time:.1f}s")
     results["keygen_time_s"] = keygen_time
