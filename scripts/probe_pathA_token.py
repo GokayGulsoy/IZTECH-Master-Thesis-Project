@@ -53,10 +53,15 @@ def main():
     # Step 1: extract + bit-rev permute via gather_slots
     src1 = [t*block + j for j in range(hidden)]
     dst1 = [bitrev(j) for j in range(hidden)]
-    t0 = time.time()
-    ct_perm = be.gather_slots(ct_mp, src1, dst_indices=dst1)
-    t_perm1 = time.time() - t0
-    print(f"  permute_in:  {t_perm1*1000:.1f}ms  depth_after={be._ops.depth(ct_perm)}")
+    # Warmup: registers Galois keys for the bit-rev permute shifts
+    _ = be.gather_slots(ct_mp, src1, dst_indices=dst1)
+    times = []
+    for _ in range(3):
+        t0 = time.time()
+        ct_perm = be.gather_slots(ct_mp, src1, dst_indices=dst1)
+        times.append(time.time() - t0)
+    t_perm1 = float(np.median(times))
+    print(f"  permute_in (steady):  {t_perm1*1000:.1f}ms  depth_after={be._ops.depth(ct_perm)}")
 
     # Quick sanity: decrypt and confirm slot[bit_rev(j)] = X[t][j]
     dec = be.decrypt(ct_perm)
