@@ -78,6 +78,9 @@ class HEonGPUBackend(CKKSBackend):
         self._N = poly_modulus_degree
         self._num_slots = poly_modulus_degree // 2
         self._scale = float(2 ** (scale_bits if scale_bits is not None else q_bits[1]))
+        # Maximum depth a ciphertext can reach before bootstrap (or rescale
+        # below the chain). Each rescale drops one Q prime.
+        self._max_depth = len(q_bits) - 1
 
         self._ctx = hg.CKKSContext(self._N, q_bits, p_bits, sec_none=sec_none)
         kg = hg.KeyGenerator(self._ctx)
@@ -425,7 +428,16 @@ class HEonGPUBackend(CKKSBackend):
         self._gk = kg.generate_galois_key(self._ctx, self._sk, all_shifts)
 
     def bootstrap(self, ct: Ciphertext) -> Ciphertext:
-        return self._ops.regular_bootstrapping(ct, self._gk, self._rk)
+        """Refresh a CKKS ciphertext to a low-depth state.
+
+        HEonGPU's `regular_bootstrapping` requires the input to be at the
+        very bottom of the modulus chain. We mod-drop as needed so the
+        caller doesn't have to keep track of depth themselves.
+        """
+        out = self._clone(ct)
+        while self._ops.depth(out) < self._max_depth:
+            self._ops.mod_drop_inplace_ct(out)
+        return self._ops.regular_bootstrapping(out, self._gk, self._rk)
 
     # ── introspection ─────────────────────────────────────────────────
     @property
