@@ -144,6 +144,28 @@ struct Operator {
     void mod_drop_inplace_pt(Plaintext& a)                       { ops.mod_drop_inplace(*a.pt); }
     int  depth(Ciphertext& a)                                    { return a.ct->depth(); }
 
+    // Sum of two ciphertexts that may be at different chain levels.
+    // Drops the deeper-chain (higher coeff_modulus_count) operand down
+    // to the shallower one, then performs add_inplace on the lhs.
+    void add_inplace_match(Ciphertext& a, Ciphertext& b) {
+        int da = a.ct->depth();
+        int db = b.ct->depth();
+        if (da == db) {
+            ops.add_inplace(*a.ct, *b.ct);
+            return;
+        }
+        // depth() grows as the chain shrinks; equalise to the larger value.
+        if (da < db) {
+            while (a.ct->depth() < db) ops.mod_drop_inplace(*a.ct);
+        } else {
+            // Need to drop b without aliasing — shallow-copy via shared_ptr is fine
+            // since add_inplace consumes b read-only on the GPU side.
+            heongpu::Ciphertext<SCHEME> b_copy = *b.ct;
+            while (b_copy.depth() < da) ops.mod_drop_inplace(b_copy);
+            ops.add_inplace(*a.ct, b_copy);
+        }
+    }
+
     // Cyclic rotation by `shift` (positive = left, negative = right within slot vector).
     void rotate_rows_inplace(Ciphertext& a, GaloisKey& g, int shift) {
         ops.rotate_rows_inplace(*a.ct, *g.gk, shift);
@@ -235,6 +257,7 @@ PYBIND11_MODULE(_heongpu, m) {
         .def("mod_drop_inplace_ct",    &Operator::mod_drop_inplace_ct)
         .def("mod_drop_inplace_pt",    &Operator::mod_drop_inplace_pt)
         .def("depth",                  &Operator::depth)
+        .def("add_inplace_match",      &Operator::add_inplace_match)
         .def("rotate_rows_inplace",    &Operator::rotate_rows_inplace,
              py::arg("ct"), py::arg("galois_key"), py::arg("shift"))
         .def("generate_bootstrapping_params",
