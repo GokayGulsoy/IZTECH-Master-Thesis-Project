@@ -179,10 +179,17 @@ def main():
     while be._ops.depth_of_plaintext(pt_w2) < be._ops.depth(out):
         be._ops.mod_drop_inplace_pt(pt_w2)
     be._ops.multiply_plain_inplace(out, pt_w2)
-    be._ops.clear_rescale_required(out)
-    print(f"  L2 mul done, depth={be._ops.depth(out)}, attempting CtoS(ctx_B)...")
+    # Try variant A: rescale BEFORE CtoS (consumes 1 level, but aligns scale)
+    be._ops.rescale_inplace(out)
+    print(f"  L2 mul+rescale done, depth={be._ops.depth(out)}, attempting CtoS(ctx_B)...")
+    # Need to update ctx_B to expect this depth
+    ctx_B2 = he.EncodingTransformContext()
+    be._ops.generate_encoding_transform_context(
+        ctx_B2, scale_boot, 3, 3, be._ops.depth(out), -1, True
+    )
+    print(f"  ctx_B2: ctos={ctx_B2.ctos_level()}  stoc={ctx_B2.stoc_level()}")
     try:
-        cts_b = be._ops.coeff_to_slot_ctx(out, be._gk, ctx_B)
+        cts_b = be._ops.coeff_to_slot_ctx(out, be._gk, ctx_B2)
         for c in cts_b:
             be._ops.set_rescale_required(c)
             be._ops.rescale_inplace(c)
