@@ -235,6 +235,14 @@ class HEonGPUBackend(CKKSBackend):
         coeffs = list(power_coeffs)
         if not coeffs:
             return self.mul_plain(ct, [0.0] * self._num_slots)
+        # diagnostic
+        try:
+            d = self._ops.depth(ct)
+            import os as _os
+            if _os.environ.get("HEONGPU_DEBUG_POLYVAL"):
+                print(f"[polyval] input depth={d}, deg={len(coeffs)-1}", flush=True)
+        except Exception:
+            pass
         if len(coeffs) == 1:
             return self.add_plain(
                 self.mul_plain(ct, [0.0] * self._num_slots),
