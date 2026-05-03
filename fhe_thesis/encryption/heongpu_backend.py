@@ -250,17 +250,81 @@ class HEonGPUBackend(CKKSBackend):
         weight: Sequence[Sequence[float]],
         bias: Optional[Sequence[float]] = None,
     ) -> Ciphertext:
-        raise NotImplementedError(
-            "HEonGPUBackend.matmul_plain (token-packed) not implemented; use "
-            "fhe_thesis.encryption.ops_matrix.enc_linear_matrix on a "
-            "MatrixPackedTensor instead."
-        )
+        """Halevi-Shoup diagonal matmul with cached diagonals.
 
-    def dot(self, a: Ciphertext, b: Ciphertext) -> Ciphertext:  # pragma: no cover
-        raise NotImplementedError("HEonGPUBackend.dot not implemented yet.")
+        Mirrors :meth:`OpenFHEBackend.matmul_plain` so the existing
+        token-packed ops work unchanged on the GPU backend.
+        """
+        out_dim = len(weight)
+        if out_dim == 0:
+            raise ValueError("weight is empty")
+        in_dim = len(weight[0])
 
-    def sum_slots(self, ct: Ciphertext) -> Ciphertext:  # pragma: no cover
-        raise NotImplementedError("HEonGPUBackend.sum_slots not implemented yet.")
+        target = max(out_dim, in_dim)
+        n = 1
+        while n < target:
+            n <<= 1
+        if n > self._num_slots:
+            raise ValueError(
+                f"matmul dim n={n} exceeds num_slots={self._num_slots}"
+            )
+
+        w_arr = np.asarray(weight, dtype=np.float64)
+        w_hash = hashlib.sha1(w_arr.tobytes()).hexdigest()
+        with self._diag_cache_lock:
+            cached = self._diag_cache.get(w_hash)
+        if cached is None:
+            diagonals: List[Optional[List[float]]] = []
+            for i in range(n):
+                diag = [0.0] * self._num_slots
+                any_nz = False
+                for k in range(out_dim):
+                    col = (k + i) % n
+                    if col < in_dim:
+                        v = float(w_arr[k, col])
+                        diag[k] = v
+                        if v != 0.0:
+                            any_nz = True
+                diagonals.append(diag if any_nz else None)
+            with self._diag_cache_lock:
+                self._diag_cache[w_hash] = (diagonals, n)
+        else:
+            diagonals, n = cached
+
+        # Cyclic-replicate input across n.
+        x = ct
+        cur = in_dim
+        while cur < n:
+            x = self.add(x, self.rotate(x, -cur))
+            cur <<= 1
+
+        result: Optional[Ciphertext] = None
+        for i, diag in enumerate(diagonals):
+            if diag is None:
+                continue
+            rot_x = x if i == 0 else self.rotate(x, i)
+            term = self.mul_plain(rot_x, diag)
+            result = term if result is None else self.add(result, term)
+        if result is None:
+            result = self.mul_plain(ct, [0.0] * self._num_slots)
+        if bias is not None:
+            b = list(bias) + [0.0] * (self._num_slots - len(bias))
+            result = self.add_plain(result, b)
+        return result
+
+    def dot(self, a: Ciphertext, b: Ciphertext) -> Ciphertext:
+        """Inner product ⟨a, b⟩ broadcast across slots."""
+        return self.sum_slots(self.mul(a, b))
+
+    def sum_slots(self, ct: Ciphertext) -> Ciphertext:
+        """Sum every slot, broadcast across all slots (log-N rotate+add)."""
+        out = self._clone(ct)
+        step = 1
+        while step < self._num_slots:
+            shifted = self.rotate(out, step)
+            out = self.add(out, shifted)
+            step <<= 1
+        return out
 
     # ── ciphertext utilities ──────────────────────────────────────────
     def _clone(self, ct: Ciphertext) -> Ciphertext:
