@@ -109,7 +109,7 @@ struct Decryptor {
 
     Plaintext decrypt(CKKSContext& c, Ciphertext& ct) {
         auto pt = std::make_shared<heongpu::Plaintext<SCHEME>>(c.ctx);
-        dec.decrypt(*pt.pt, *ct.ct);
+        dec.decrypt(*pt, *ct.ct);
         return Plaintext{pt};
     }
 };
