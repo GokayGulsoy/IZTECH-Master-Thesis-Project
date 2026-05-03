@@ -155,7 +155,13 @@ class HEonGPUBackend(CKKSBackend):
 
     def mul_plain(self, a: Ciphertext, plain: Sequence[float]) -> Ciphertext:
         out = self._clone(a)
-        self._ops.multiply_plain_inplace(out, self._encode(plain))
+        pt = self._encode(plain)
+        # Plaintext must live at the same modulus level as the ciphertext;
+        # encoded plaintexts start at level 0 so drop until depths match.
+        target_depth = self._ops.depth(out)
+        while self._ops.depth_of_plaintext(pt) < target_depth:
+            self._ops.mod_drop_inplace_pt(pt)
+        self._ops.multiply_plain_inplace(out, pt)
         # NOTE: scale doubled. The matrix-packed kernel accumulates several
         # mul_plain results before a single rescale at the call site. For
         # the cleanest semantics we rescale here, matching OpenFHE's

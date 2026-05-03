@@ -143,6 +143,7 @@ struct Operator {
     void mod_drop_inplace_ct(Ciphertext& a)                      { ops.mod_drop_inplace(*a.ct); }
     void mod_drop_inplace_pt(Plaintext& a)                       { ops.mod_drop_inplace(*a.pt); }
     int  depth(Ciphertext& a)                                    { return a.ct->depth(); }
+    int  depth_pt(Plaintext& a)                                  { return a.pt->depth(); }
 
     // Sum of two ciphertexts that may be at different chain levels.
     // Drops the deeper-chain (higher coeff_modulus_count) operand down
@@ -257,6 +258,7 @@ PYBIND11_MODULE(_heongpu, m) {
         .def("mod_drop_inplace_ct",    &Operator::mod_drop_inplace_ct)
         .def("mod_drop_inplace_pt",    &Operator::mod_drop_inplace_pt)
         .def("depth",                  &Operator::depth)
+        .def("depth_of_plaintext",     &Operator::depth_pt)
         .def("add_inplace_match",      &Operator::add_inplace_match)
         .def("rotate_rows_inplace",    &Operator::rotate_rows_inplace,
              py::arg("ct"), py::arg("galois_key"), py::arg("shift"))
