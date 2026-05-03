@@ -153,7 +153,7 @@ def main():
     t0 = time.time()
     ct = be._ops.slot_to_coeff_ctx(ct, zero_ct, be._gk, ctx_A)
     t_stoc = time.time() - t0
-    print(f"  StoC(ctx_A):  {t_stoc*1000:.1f}ms  depth={be._ops.depth(ct)}, encoding={ct.encoding_type()}")
+    print(f"  StoC(ctx_A):  {t_stoc*1000:.1f}ms  depth={be._ops.depth(ct)}, scale=2^{np.log2(ct.scale()):.2f}, encoding={ct.encoding_type()}")
     coeffs = be.decrypt_coeff(ct)
     err_a1 = float(np.max(np.abs(np.array([coeffs[bitrev(j, log_n_half)] for j in range(h)]) - a1)))
     print(f"    a1 at coeff[bitrev(j)] err: {err_a1:.3e}")
