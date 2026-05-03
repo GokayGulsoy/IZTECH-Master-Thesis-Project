@@ -20,4 +20,5 @@ from ._heongpu import (  # noqa: F401
     Decryptor,
     Operator,
     EncodingTransformContext,
+    CudaStream,
 )

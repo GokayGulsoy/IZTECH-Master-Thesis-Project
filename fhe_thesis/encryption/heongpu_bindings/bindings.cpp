@@ -10,6 +10,8 @@
 #include <pybind11/stl.h>
 #include <pybind11/complex.h>
 
+#include <cuda_runtime.h>
+
 #include <heongpu/heongpu.hpp>
 
 #include <memory>
@@ -69,6 +71,36 @@ struct EncodingTransformContext {
     int  stoc_piece()   const { return ctx->StoC_piece_; }
     bool generated()    const { return ctx->generated_; }
     std::vector<int> key_indexs() const { return ctx->key_indexs_; }
+};
+
+// NEXUS Phase 5: CUDA stream wrapper for parallel op submission.
+// Owning RAII handle. Create N of these from Python, submit
+// independent ops on different streams, then sync when done.
+struct CudaStream {
+    cudaStream_t s = nullptr;
+    bool owns = false;
+
+    CudaStream() {
+        cudaError_t err = cudaStreamCreate(&s);
+        if (err != cudaSuccess) {
+            throw std::runtime_error(std::string("cudaStreamCreate failed: ") +
+                                     cudaGetErrorString(err));
+        }
+        owns = true;
+    }
+    ~CudaStream() {
+        if (owns && s) cudaStreamDestroy(s);
+    }
+    void synchronize() {
+        cudaError_t err = cudaStreamSynchronize(s);
+        if (err != cudaSuccess) {
+            throw std::runtime_error(std::string("cudaStreamSynchronize failed: ") +
+                                     cudaGetErrorString(err));
+        }
+    }
+    // No copy.
+    CudaStream(const CudaStream&) = delete;
+    CudaStream& operator=(const CudaStream&) = delete;
 };
 
 struct KeyGenerator {
@@ -213,6 +245,54 @@ struct Operator {
     // Cyclic rotation by `shift` (positive = left, negative = right within slot vector).
     void rotate_rows_inplace(Ciphertext& a, GaloisKey& g, int shift) {
         ops.rotate_rows_inplace(*a.ct, *g.gk, shift);
+    }
+
+    // ── NEXUS Phase 5: stream-aware variants for parallel op submission ──
+    // Identical semantics to the default-stream versions; the cudaStream_t
+    // is taken from the supplied CudaStream wrapper. Caller is responsible
+    // for synchronizing streams before reading results.
+    void multiply_plain_inplace_s(Ciphertext& a, Plaintext& p, CudaStream& st) {
+        heongpu::ExecutionOptions opts;
+        opts.set_stream(st.s);
+        ops.multiply_plain_inplace(*a.ct, *p.pt, opts);
+    }
+    void add_inplace_s(Ciphertext& a, Ciphertext& b, CudaStream& st) {
+        heongpu::ExecutionOptions opts;
+        opts.set_stream(st.s);
+        ops.add_inplace(*a.ct, *b.ct, opts);
+    }
+    void rotate_rows_inplace_s(Ciphertext& a, GaloisKey& g, int shift,
+                               CudaStream& st) {
+        heongpu::ExecutionOptions opts;
+        opts.set_stream(st.s);
+        ops.rotate_rows_inplace(*a.ct, *g.gk, shift, opts);
+    }
+    void rescale_inplace_s(Ciphertext& a, CudaStream& st) {
+        heongpu::ExecutionOptions opts;
+        opts.set_stream(st.s);
+        ops.rescale_inplace(*a.ct, opts);
+    }
+    void mod_drop_inplace_ct_s(Ciphertext& a, CudaStream& st) {
+        heongpu::ExecutionOptions opts;
+        opts.set_stream(st.s);
+        ops.mod_drop_inplace(*a.ct, opts);
+    }
+    void mod_drop_inplace_pt_s(Plaintext& p, CudaStream& st) {
+        heongpu::ExecutionOptions opts;
+        opts.set_stream(st.s);
+        ops.mod_drop_inplace(*p.pt, opts);
+    }
+    void relinearize_inplace_s(Ciphertext& a, RelinKey& rk, CudaStream& st) {
+        heongpu::ExecutionOptions opts;
+        opts.set_stream(st.s);
+        ops.relinearize_inplace(*a.ct, *rk.rk, opts);
+    }
+    Ciphertext clone_ct_s(Ciphertext& a, CudaStream& /*st*/) {
+        // copy-assign goes through the default stream internally; here we
+        // expose the same as clone_ct but offer the API for symmetry.
+        auto out = std::make_shared<heongpu::Ciphertext<SCHEME>>();
+        *out = *a.ct;
+        return Ciphertext{out};
     }
 
     // Bootstrapping: depth-refresh a CKKS ciphertext.
@@ -370,6 +450,12 @@ PYBIND11_MODULE(_heongpu, m) {
         .def("stoc_piece", &EncodingTransformContext::stoc_piece)
         .def("generated", &EncodingTransformContext::generated)
         .def("key_indexs", &EncodingTransformContext::key_indexs);
+    py::class_<CudaStream>(m, "CudaStream",
+            "RAII handle on a cudaStream_t. Pass to *_s op variants to "
+            "submit work on a non-default stream for parallel execution.")
+        .def(py::init<>())
+        .def("synchronize", &CudaStream::synchronize,
+             "Block until all work submitted on this stream completes.");
     py::class_<Ciphertext>(m, "Ciphertext")
         .def("depth",            [](const Ciphertext& c) { return c.ct->depth(); },
              "Multiplicative depth (number of rescales applied).")
@@ -428,6 +514,30 @@ PYBIND11_MODULE(_heongpu, m) {
         .def("add_inplace_match",      &Operator::add_inplace_match)
         .def("rotate_rows_inplace",    &Operator::rotate_rows_inplace,
              py::arg("ct"), py::arg("galois_key"), py::arg("shift"))
+        // ── NEXUS Phase 5: stream-aware variants ──
+        .def("multiply_plain_inplace_s", &Operator::multiply_plain_inplace_s,
+             py::arg("ct"), py::arg("plain"), py::arg("stream"),
+             py::call_guard<py::gil_scoped_release>())
+        .def("add_inplace_s",            &Operator::add_inplace_s,
+             py::arg("a"), py::arg("b"), py::arg("stream"),
+             py::call_guard<py::gil_scoped_release>())
+        .def("rotate_rows_inplace_s",    &Operator::rotate_rows_inplace_s,
+             py::arg("ct"), py::arg("galois_key"), py::arg("shift"), py::arg("stream"),
+             py::call_guard<py::gil_scoped_release>())
+        .def("rescale_inplace_s",        &Operator::rescale_inplace_s,
+             py::arg("ct"), py::arg("stream"),
+             py::call_guard<py::gil_scoped_release>())
+        .def("mod_drop_inplace_ct_s",    &Operator::mod_drop_inplace_ct_s,
+             py::arg("ct"), py::arg("stream"),
+             py::call_guard<py::gil_scoped_release>())
+        .def("mod_drop_inplace_pt_s",    &Operator::mod_drop_inplace_pt_s,
+             py::arg("plain"), py::arg("stream"),
+             py::call_guard<py::gil_scoped_release>())
+        .def("relinearize_inplace_s",    &Operator::relinearize_inplace_s,
+             py::arg("ct"), py::arg("relin_key"), py::arg("stream"),
+             py::call_guard<py::gil_scoped_release>())
+        .def("clone_ct_s",               &Operator::clone_ct_s,
+             py::arg("ct"), py::arg("stream"))
         .def("generate_bootstrapping_params",
              &Operator::generate_bootstrapping_params,
              py::arg("scale"),
