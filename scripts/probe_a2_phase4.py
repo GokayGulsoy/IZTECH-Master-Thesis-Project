@@ -137,6 +137,16 @@ def main():
         print("  ABORT: L1 broken")
         return
 
+    # MASK: zero out slots [h..N/2) so polyval doesn't square garbage
+    # that would leak into non-bitrev coefficients post-StoC and contaminate L2.
+    print(f"  applying slot mask [1]*{h} + [0]*{be._num_slots-h}...")
+    mask = [1.0] * h + [0.0] * (be._num_slots - h)
+    ct = be.mul_plain(ct, mask)
+    print(f"  post-mask: depth={be._ops.depth(ct)} scale=2^{np.log2(ct.scale()):.2f}")
+    dec = be.decrypt(ct)
+    err_mask = float(np.max(np.abs(np.array(dec[:h]) - z1)))
+    print(f"    z1 still ok? err={err_mask:.3e}")
+
     # polyval (slot, layout-agnostic)
     t0 = time.time()
     ct = be.polyval(ct, poly_coeffs)
