@@ -91,8 +91,9 @@ def test_bootstrap() -> bool:
     msg = [0.2] * ctx.slot_count
     ct = encryptor.encrypt(ctx, enc.encode(ctx, msg, scale))
 
-    # Drain the modulus chain down to a single level (matches example).
-    for _ in range(29):
+    # Drain the modulus chain down to the last level (matches example).
+    # Q has 31 primes -> 30 drops to reach max depth.
+    for _ in range(30):
         ops.mod_drop_inplace_ct(ct)
     print(f"  depth before bootstrap: {ops.depth(ct)}")
 
