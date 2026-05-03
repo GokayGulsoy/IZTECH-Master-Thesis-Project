@@ -367,6 +367,102 @@ class HEonGPUBackend(CKKSBackend):
             result = self.add_plain(result, b)
         return result
 
+    # ── NEXUS-style coefficient packing ──────────────────────────────
+    def encrypt_coeff(self, coeffs: Sequence[float]) -> Ciphertext:
+        """Encrypt a vector as the *coefficients* of the plaintext polynomial.
+
+        ``coeffs`` is padded with zeros to length N. Pair with
+        :meth:`coeff_matvec` for NEXUS-style coefficient-packed matmul.
+        """
+        v = list(coeffs)
+        if len(v) > self._N:
+            raise ValueError(
+                f"coeffs length {len(v)} exceeds poly degree N={self._N}"
+            )
+        if len(v) < self._N:
+            v.extend([0.0] * (self._N - len(v)))
+        pt = self._encoder.encode_coeff(self._ctx, v, self._scale)
+        return self._encryptor.encrypt(self._ctx, pt)
+
+    def decrypt_coeff(self, ct: Ciphertext) -> List[float]:
+        """Decrypt and return the polynomial coefficients (length N)."""
+        pt = self._decryptor.decrypt(self._ctx, ct)
+        return self._encoder.decode_coeff(pt)
+
+    def _encode_coeff_pad(self, coeffs: Sequence[float]):
+        v = list(coeffs)
+        if len(v) > self._N:
+            raise ValueError(
+                f"coeffs length {len(v)} exceeds poly degree N={self._N}"
+            )
+        if len(v) < self._N:
+            v.extend([0.0] * (self._N - len(v)))
+        return self._encoder.encode_coeff(self._ctx, v, self._scale)
+
+    def coeff_matvec(
+        self,
+        ct_x_coeff: Ciphertext,
+        weight,
+        *,
+        in_dim: int,
+    ) -> Ciphertext:
+        """NEXUS-style coefficient-packed matrix–vector product.
+
+        Computes ``y = W · x`` for ``W ∈ R^{m × n}``, ``x ∈ R^n`` with a
+        **single** ciphertext × plaintext multiplication. The trick:
+
+        - ``ct_x_coeff`` is from :meth:`encrypt_coeff` with coefficients
+          ``[x_0, x_1, …, x_{n-1}, 0, 0, …]`` (n = ``in_dim``).
+        - The plaintext polynomial encodes W with row i reversed at
+          coefficient indices ``[i·n, i·n + n − 1]``::
+
+              pt_W[i·n + (n − 1 − j)] = W[i, j]
+
+        - Then ``coef[i·n + n − 1]`` of ``ct_x · pt_W (mod X^N + 1)``
+          equals ``Σ_j x_j · W[i, j] = ⟨W_i, x⟩``.
+
+        Constraint: ``m · n ≤ N``. Otherwise split W and call multiple
+        times (caller's responsibility for Phase 2; Phase 3 wraps this).
+        """
+        import numpy as np
+        W = np.asarray(weight, dtype=np.float64)
+        if W.ndim != 2:
+            raise ValueError(f"weight must be 2-D, got {W.shape}")
+        m, n = W.shape
+        if n != in_dim:
+            raise ValueError(f"W in_dim={n} != in_dim arg {in_dim}")
+        if m * n > self._N:
+            raise ValueError(
+                f"m·n = {m * n} exceeds poly degree N={self._N}; "
+                "split W and run multiple multiplications"
+            )
+
+        # Build the W-poly: row i reversed at offset i·n.
+        w_poly = [0.0] * self._N
+        for i in range(m):
+            base = i * n
+            for j in range(n):
+                w_poly[base + (n - 1 - j)] = float(W[i, j])
+        pt_w = self._encode_coeff_pad(w_poly)
+
+        out = self._clone(ct_x_coeff)
+        target_depth = self._ops.depth(out)
+        while self._ops.depth_of_plaintext(pt_w) < target_depth:
+            self._ops.mod_drop_inplace_pt(pt_w)
+        self._ops.multiply_plain_inplace(out, pt_w)
+        self._ops.rescale_inplace(out)
+        return out
+
+    def decrypt_coeff_extract(
+        self, ct: Ciphertext, in_dim: int, out_dim: int
+    ) -> List[float]:
+        """Decrypt + extract m output values from a :meth:`coeff_matvec` result.
+
+        Reads coefficients ``[n−1, 2n−1, …, m·n − 1]``.
+        """
+        coeffs = self.decrypt_coeff(ct)
+        return [coeffs[(i + 1) * in_dim - 1] for i in range(out_dim)]
+
     def dot(self, a: Ciphertext, b: Ciphertext) -> Ciphertext:
         """Inner product ⟨a, b⟩ broadcast across slots."""
         return self.sum_slots(self.mul(a, b))
