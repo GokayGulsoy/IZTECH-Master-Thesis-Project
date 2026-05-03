@@ -55,6 +55,22 @@ struct GaloisKey   { std::shared_ptr<heongpu::Galoiskey<SCHEME>> gk; };
 struct Plaintext   { std::shared_ptr<heongpu::Plaintext<SCHEME>>  pt; };
 struct Ciphertext  { std::shared_ptr<heongpu::Ciphertext<SCHEME>> ct; };
 
+// NEXUS Phase 4: standalone CtoS/StoC at arbitrary chain levels.
+// HEonGPU exposes precomputed encoding-transform contexts that hold
+// V/V_inv plaintext matrices encoded for a chosen pair of levels.
+// We can build several of these (one per level we want to chain at)
+// and use the matching context inside coeff_to_slot / slot_to_coeff.
+struct EncodingTransformContext {
+    std::shared_ptr<heongpu::CKKSEncodingTransformContext> ctx{
+        std::make_shared<heongpu::CKKSEncodingTransformContext>()};
+    int  ctos_level()   const { return ctx->CtoS_level_; }
+    int  stoc_level()   const { return ctx->StoC_level_; }
+    int  ctos_piece()   const { return ctx->CtoS_piece_; }
+    int  stoc_piece()   const { return ctx->StoC_piece_; }
+    bool generated()    const { return ctx->generated_; }
+    std::vector<int> key_indexs() const { return ctx->key_indexs_; }
+};
+
 struct KeyGenerator {
     heongpu::HEKeyGenerator<SCHEME> kg;
     explicit KeyGenerator(CKKSContext& c) : kg(c.ctx) {}
@@ -259,6 +275,42 @@ struct Operator {
         return Ciphertext{out};
     }
 
+    // ── NEXUS Phase 4: arbitrary-level CtoS/StoC ─────────────────
+    // Precompute V/V_inv plaintext matrices for a chosen (CtoS_start,
+    // StoC_start) pair, stored in a standalone transform context.
+    // Lets us chain matvec → CtoS → polyval → StoC → matvec at
+    // depths > 0 (the bootstrap matrices live at depth 0 only).
+    void generate_encoding_transform_context(
+            EncodingTransformContext& tc, double scale,
+            int ctos_piece, int stoc_piece,
+            int ctos_start_level, int stoc_start_level,
+            bool less_key_mode) {
+        heongpu::CKKSEncodingTransformConfig cfg(
+            ctos_piece, stoc_piece,
+            ctos_start_level, stoc_start_level, less_key_mode);
+        ops.generate_encoding_transform_context(*tc.ctx, scale, cfg);
+    }
+
+    std::vector<Ciphertext> coeff_to_slot_ctx(Ciphertext& ct, GaloisKey& g,
+                                              EncodingTransformContext& tc) {
+        auto pair = ops.coeff_to_slot(*ct.ct, *g.gk, *tc.ctx);
+        std::vector<Ciphertext> out;
+        out.reserve(pair.size());
+        for (auto& c : pair) {
+            auto p = std::make_shared<heongpu::Ciphertext<SCHEME>>();
+            *p = std::move(c);
+            out.push_back(Ciphertext{p});
+        }
+        return out;
+    }
+
+    Ciphertext slot_to_coeff_ctx(Ciphertext& ct0, Ciphertext& ct1, GaloisKey& g,
+                                 EncodingTransformContext& tc) {
+        auto out = std::make_shared<heongpu::Ciphertext<SCHEME>>();
+        *out = ops.slot_to_coeff(*ct0.ct, *ct1.ct, *g.gk, *tc.ctx);
+        return Ciphertext{out};
+    }
+
     // ── NEXUS Phase 3 introspection ───────────────────────────────
     // Python-side helpers need scale_boot_ and CtoS_level_ to align
     // arbitrary ciphertexts with the precomputed CtoS plaintext
@@ -308,6 +360,14 @@ PYBIND11_MODULE(_heongpu, m) {
     py::class_<RelinKey>(m, "RelinKey");
     py::class_<GaloisKey>(m, "GaloisKey");
     py::class_<Plaintext>(m, "Plaintext");
+    py::class_<EncodingTransformContext>(m, "EncodingTransformContext")
+        .def(py::init<>())
+        .def("ctos_level", &EncodingTransformContext::ctos_level)
+        .def("stoc_level", &EncodingTransformContext::stoc_level)
+        .def("ctos_piece", &EncodingTransformContext::ctos_piece)
+        .def("stoc_piece", &EncodingTransformContext::stoc_piece)
+        .def("generated", &EncodingTransformContext::generated)
+        .def("key_indexs", &EncodingTransformContext::key_indexs);
     py::class_<Ciphertext>(m, "Ciphertext")
         .def("depth",            [](const Ciphertext& c) { return c.ct->depth(); },
              "Multiplicative depth (number of rescales applied).")
@@ -384,6 +444,21 @@ PYBIND11_MODULE(_heongpu, m) {
         .def("slot_to_coeff",            &Operator::slot_to_coeff,
              py::arg("ct0"), py::arg("ct1"), py::arg("galois_key"),
              "NEXUS Phase 3: inverse of coeff_to_slot.")
+        .def("generate_encoding_transform_context",
+             &Operator::generate_encoding_transform_context,
+             py::arg("ctx"), py::arg("scale"),
+             py::arg("ctos_piece") = 3, py::arg("stoc_piece") = 3,
+             py::arg("ctos_start_level") = -1, py::arg("stoc_start_level") = -1,
+             py::arg("less_key_mode") = true,
+             "NEXUS Phase 4: precompute V/V_inv plaintext matrices for "
+             "CtoS/StoC at arbitrary (ctos_start, stoc_start) chain levels.")
+        .def("coeff_to_slot_ctx",        &Operator::coeff_to_slot_ctx,
+             py::arg("ct"), py::arg("galois_key"), py::arg("transform_ctx"),
+             "Phase 4: ctx-aware CtoS — input depth must equal ctx.ctos_level().")
+        .def("slot_to_coeff_ctx",        &Operator::slot_to_coeff_ctx,
+             py::arg("ct0"), py::arg("ct1"), py::arg("galois_key"),
+             py::arg("transform_ctx"),
+             "Phase 4: ctx-aware StoC — input depth must equal ctx.stoc_level().")
         .def("bootstrapping_scale",  &Operator::bootstrapping_scale,
              "Internal scale (`scale_boot_`) used by the CtoS/StoC matrices.")
         .def("coeff_to_slot_level",  &Operator::coeff_to_slot_level,
