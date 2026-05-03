@@ -111,6 +111,27 @@ struct Encoder {
         enc.decode(out, *pt.pt);
         return out;
     }
+
+    // ── NEXUS-style coefficient encoding (Phase 3) ────────────────
+    // Encodes the input vector as the *coefficients* of the plaintext
+    // polynomial (rather than as its slot vector). Used for coefficient-
+    // packed matmul: pt_x · pt_W (mod X^N + 1) yields the convolution
+    // of x with W in the coefficient domain.
+    Plaintext encode_coeff(CKKSContext& c,
+                           const std::vector<double>& v, double scale) {
+        auto pt = std::make_shared<heongpu::Plaintext<SCHEME>>(c.ctx);
+        std::vector<double> v_copy = v;
+        enc.encode(*pt, v_copy, scale,
+                   heongpu::ExecutionOptions(),
+                   heongpu::encoding::COEFFICIENT);
+        return Plaintext{pt};
+    }
+    std::vector<double> decode_coeff(Plaintext& pt) {
+        // The decoder routes on plain.encoding_, which encode_coeff sets.
+        std::vector<double> out;
+        enc.decode(out, *pt.pt);
+        return out;
+    }
 };
 
 struct Encryptor {
@@ -246,7 +267,13 @@ PYBIND11_MODULE(_heongpu, m) {
         .def(py::init<CKKSContext&>())
         .def("encode", &Encoder::encode,
              py::arg("ctx"), py::arg("values"), py::arg("scale"))
-        .def("decode", &Encoder::decode);
+        .def("decode", &Encoder::decode)
+        .def("encode_coeff", &Encoder::encode_coeff,
+             py::arg("ctx"), py::arg("values"), py::arg("scale"),
+             "NEXUS-style coefficient packing: encode values as polynomial "
+             "coefficients (not slots).")
+        .def("decode_coeff", &Encoder::decode_coeff,
+             "Decode a coefficient-encoded plaintext.");
 
     py::class_<Encryptor>(m, "Encryptor")
         .def(py::init<CKKSContext&, PublicKey&>())
