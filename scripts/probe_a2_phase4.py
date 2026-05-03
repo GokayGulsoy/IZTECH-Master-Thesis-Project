@@ -60,17 +60,17 @@ def main():
 
     ctx_A = he.EncodingTransformContext()
     # ctos at depth 0 (post-mul, no rescale)
-    # stoc at depth 7 (post-polyval z²: CtoS adds ~5, polyval adds 2)
+    # stoc at depth 8 (post: CtoS=+5, mask=+1, polyval=+2)
     be._ops.generate_encoding_transform_context(
-        ctx_A, scale_boot, 3, 3, 0, 7, True
+        ctx_A, scale_boot, 3, 3, 0, 8, True
     )
     print(f"  ctx_A: ctos={ctx_A.ctos_level()}  stoc={ctx_A.stoc_level()}  "
           f"piece=({ctx_A.ctos_piece()},{ctx_A.stoc_piece()})")
     print(f"  ctx_A keys (first 8): {ctx_A.key_indexs()[:8]}  total={len(ctx_A.key_indexs())}")
 
     # ctx_B: CtoS for L2, after StoC of ctx_A. Empirical depth post-StoC TBD.
-    # If ctx_A stoc=7 and StoC consumes 4 levels, post-StoC ≈ depth 11.
-    ctos_b_candidate = 11
+    # If ctx_A stoc=8 and StoC consumes 4 levels, post-StoC ≈ depth 12.
+    ctos_b_candidate = 12
     print(f"  trying ctx_B ctos_start = {ctos_b_candidate}")
     ctx_B = he.EncodingTransformContext()
     be._ops.generate_encoding_transform_context(
