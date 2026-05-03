@@ -359,7 +359,9 @@ PYBIND11_MODULE(_heongpu, m) {
     py::class_<PublicKey>(m, "PublicKey");
     py::class_<RelinKey>(m, "RelinKey");
     py::class_<GaloisKey>(m, "GaloisKey");
-    py::class_<Plaintext>(m, "Plaintext");
+    py::class_<Plaintext>(m, "Plaintext")
+        .def("depth", [](const Plaintext& p) { return p.pt->depth(); })
+        .def("scale", [](const Plaintext& p) { return p.pt->scale(); });
     py::class_<EncodingTransformContext>(m, "EncodingTransformContext")
         .def(py::init<>())
         .def("ctos_level", &EncodingTransformContext::ctos_level)

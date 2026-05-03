@@ -115,15 +115,18 @@ def main():
 
     t0 = time.time()
     out = be._ops.clone_ct(ct)
+    print(f"    L1 pre-mul: ct depth={be._ops.depth(out)} scale=2^{np.log2(out.scale()):.2f}, pt depth={pt_w1.depth()} scale=2^{np.log2(pt_w1.scale()):.2f}")
     while be._ops.depth_of_plaintext(pt_w1) < be._ops.depth(out):
         be._ops.mod_drop_inplace_pt(pt_w1)
     be._ops.multiply_plain_inplace(out, pt_w1)
+    print(f"    L1 post-mul: depth={be._ops.depth(out)} scale=2^{np.log2(out.scale()):.2f}")
     be._ops.clear_rescale_required(out)
     cts_a = be._ops.coeff_to_slot_ctx(out, be._gk, ctx_A)
-    # rescale to align scale post-CtoS
-    for c in cts_a:
+    for i, c in enumerate(cts_a):
+        print(f"    L1 post-CtoS[{i}]: depth={be._ops.depth(c)} scale=2^{np.log2(c.scale()):.2f}")
         be._ops.set_rescale_required(c)
         be._ops.rescale_inplace(c)
+        print(f"    L1 post-rescale[{i}]: depth={be._ops.depth(c)} scale=2^{np.log2(c.scale()):.2f}")
     ct = cts_a[0]
     t_l1 = time.time() - t0
     print(f"  L1 mul+CtoS:  {t_l1*1000:.1f}ms  depth={be._ops.depth(ct)}")
@@ -176,23 +179,20 @@ def main():
     pt_w2 = be._encode_coeff_pad(w_poly2)
     t0 = time.time()
     out = be._ops.clone_ct(ct)
+    print(f"    pre-mul: ct depth={be._ops.depth(out)} scale=2^{np.log2(out.scale()):.2f}, pt depth={pt_w2.depth()} scale=2^{np.log2(pt_w2.scale()):.2f}")
     while be._ops.depth_of_plaintext(pt_w2) < be._ops.depth(out):
         be._ops.mod_drop_inplace_pt(pt_w2)
     be._ops.multiply_plain_inplace(out, pt_w2)
-    # Try variant A: rescale BEFORE CtoS (consumes 1 level, but aligns scale)
-    be._ops.rescale_inplace(out)
-    print(f"  L2 mul+rescale done, depth={be._ops.depth(out)}, attempting CtoS(ctx_B)...")
-    # Need to update ctx_B to expect this depth
-    ctx_B2 = he.EncodingTransformContext()
-    be._ops.generate_encoding_transform_context(
-        ctx_B2, scale_boot, 3, 3, be._ops.depth(out), -1, True
-    )
-    print(f"  ctx_B2: ctos={ctx_B2.ctos_level()}  stoc={ctx_B2.stoc_level()}")
+    print(f"    post-mul: depth={be._ops.depth(out)} scale=2^{np.log2(out.scale()):.2f}")
+    be._ops.clear_rescale_required(out)
+    print(f"  L2 mul done, depth={be._ops.depth(out)}, attempting CtoS(ctx_B)...")
     try:
-        cts_b = be._ops.coeff_to_slot_ctx(out, be._gk, ctx_B2)
-        for c in cts_b:
+        cts_b = be._ops.coeff_to_slot_ctx(out, be._gk, ctx_B)
+        for i, c in enumerate(cts_b):
+            print(f"    post-CtoS[{i}]: depth={be._ops.depth(c)} scale=2^{np.log2(c.scale()):.2f}")
             be._ops.set_rescale_required(c)
             be._ops.rescale_inplace(c)
+            print(f"    post-rescale[{i}]: depth={be._ops.depth(c)} scale=2^{np.log2(c.scale()):.2f}")
         ct2 = cts_b[0]
         t_l2 = time.time() - t0
         print(f"  L2 CtoS:      {t_l2*1000:.1f}ms  depth={be._ops.depth(ct2)}")
