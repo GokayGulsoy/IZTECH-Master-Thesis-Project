@@ -69,13 +69,17 @@ def main():
         # 2. Convert slot → coeff (need 2 inputs: real + imag halves)
         # For real input, use ct_t for both? Actually slot_to_coeff is the inverse
         # of coeff_to_slot which produced 2 outputs. Let me try with same ct twice.
-        # First drop to StoC level.
+        # First drop both cts to StoC depth.
         target_lvl = be._ops.slot_to_coeff_level()
         target_depth = 30 - target_lvl
         zero_ct = be.encrypt([0.0] * be._num_slots)
+        # Bring each independently to target_depth
         while be._ops.depth(ct_t) < target_depth:
             be._ops.mod_drop_inplace_ct(ct_t)
+        while be._ops.depth(zero_ct) < target_depth:
             be._ops.mod_drop_inplace_ct(zero_ct)
+        print(f"    pre-StoC depths: ct_t={be._ops.depth(ct_t)}, zero={be._ops.depth(zero_ct)}, "
+              f"scales: ct_t={be._ops.scale(ct_t):.2e}, zero={be._ops.scale(zero_ct):.2e}")
         ct_t_coeff = be._ops.slot_to_coeff(ct_t, zero_ct, be._gk)
         print(f"    after StoC: depth={be._ops.depth(ct_t_coeff)}, scale={be._ops.scale(ct_t_coeff):.2e}")
 
