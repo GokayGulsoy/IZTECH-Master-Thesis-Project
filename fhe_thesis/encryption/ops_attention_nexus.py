@@ -537,30 +537,35 @@ def per_col_sum_then_broadcast(
     Input  : slot[j*L + i] = X[i, j]  for j ∈ [0, hidden_dim)
     Output : slot[j*L + i] = scale · Σ_j X[i, j]  for the same range.
 
+    ``hidden_dim`` is padded internally to the next power of 2; pad columns
+    must already be zero (true after ``pack_colmajor`` or after a previous
+    masked op). The caller's ``scale`` should reflect the *real* hidden_dim
+    (e.g. ``1/768`` for BERT-base, not ``1/1024``).
+
     Algorithm (analogue of :func:`per_block_sum_then_broadcast` but
     with stride ``L`` instead of stride 1):
 
       1. Bare doubling sum over stride-L offsets ``L, 2L, 4L, ...``.
-         After ``log2(hidden_dim)`` iterations the first L slots
+         After ``log2(hidden_padded)`` iterations the first L slots
          hold the per-row sum; other slots are cyclic-shift garbage.
       2. Single mul_plain by the "first-L-slots" mask scaled by ``scale``.
       3. Bare doubling broadcast with right-rotations by
-         ``L, 2L, 4L, ...`` for ``log2(hidden_dim)`` iterations.
+         ``L, 2L, 4L, ...`` for ``log2(hidden_padded)`` iterations.
 
-    Total depth: 1 level. Constraint: ``hidden_dim · L ≤ num_slots``
-    AND ``hidden_dim`` must be a power of 2 (or padded to one).
+    Total depth: 1 level. Constraint: ``hidden_padded · L ≤ num_slots``.
     """
-    if hidden_dim & (hidden_dim - 1):
-        raise ValueError(f"hidden_dim must be power of 2; got {hidden_dim}")
-    if hidden_dim * L > num_slots:
+    h_pad = 1
+    while h_pad < hidden_dim:
+        h_pad <<= 1
+    if h_pad * L > num_slots:
         raise ValueError(
-            f"hidden_dim*L={hidden_dim * L} exceeds num_slots={num_slots}"
+            f"hidden_padded*L={h_pad * L} exceeds num_slots={num_slots}"
         )
 
     # 1. Bare doubling sum.
     out = ct
     step = L
-    while step < hidden_dim * L:
+    while step < h_pad * L:
         out = backend.add(out, backend.rotate(out, step))
         step <<= 1
 
@@ -572,7 +577,7 @@ def per_col_sum_then_broadcast(
 
     # 3. Bare doubling broadcast with right-rotations.
     step = L
-    while step < hidden_dim * L:
+    while step < h_pad * L:
         out = backend.add(out, backend.rotate(out, -step))
         step <<= 1
     return out
@@ -607,9 +612,11 @@ def layernorm_colmajor(
     inv_h = 1.0 / h
     n_slots = backend.capabilities.n_slots
 
-    # h must be power of 2 for the doubling sum to be exact.
-    if h & (h - 1):
-        raise ValueError(f"hidden_dim must be power of 2; got {h}")
+    # Internal padding to next power of 2 (per_col_sum_then_broadcast handles
+    # this transparently). Pad slots are assumed zero on input.
+    h_pad = 1
+    while h_pad < h:
+        h_pad <<= 1
 
     a, b = invsqrt_interval
     sscale = 2.0 / (b - a)
@@ -637,6 +644,16 @@ def layernorm_colmajor(
         backend, x_ct, L=L, hidden_dim=h, num_slots=n_slots, scale=inv_h,
     )
     centred = backend.sub(x_ct, mean_bc)
+    # When h is not a power of 2, mean_bc spans the padded region too, so
+    # centred has -μ in pad slots. Mask them off before squaring so the
+    # variance sum is correct. (No-op when h == h_pad.)
+    if h_pad != h:
+        active_mask = [0.0] * n_slots
+        for j in range(h):
+            base = j * L
+            for i in range(L):
+                active_mask[base + i] = 1.0
+        centred = backend.mul_plain(centred, active_mask)
     sq = backend.mul(centred, centred)
     var_bc = per_col_sum_then_broadcast(
         backend, sq, L=L, hidden_dim=h, num_slots=n_slots, scale=inv_h,

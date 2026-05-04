@@ -16,9 +16,8 @@ def log(m): print(f"[{time.strftime('%H:%M:%S')}] {m}", flush=True)
 
 
 def main():
-    # BERT-base: hidden=768 must be padded to next pow2 = 1024 for the
-    # per_col_sum_then_broadcast doubling sum to be exact.
-    L, hidden = 32, 1024
+    # BERT-base: hidden=768 (non-pow2 ⇒ internally padded to 1024).
+    L, hidden = 32, 768
     log(f"Config L={L} hidden={hidden}")
 
     log("Init backend...")
