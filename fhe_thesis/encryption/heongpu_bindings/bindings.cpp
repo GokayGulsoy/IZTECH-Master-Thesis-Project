@@ -629,6 +629,162 @@ struct Operator {
 
         return Ciphertext{result};
     }
+
+    // ────────────────────────────────────────────────────────────────
+    // Phase 7b-BSGS: baby-step giant-step matrix-packed Halevi-Shoup.
+    //
+    // For n diagonals factored as n = b1 * b2 with index i = g*b1 + j:
+    //
+    //   y = Σ_g per_block_rot(g*b1) ( Σ_j per_block_rot(-g*b1)(diag_{g*b1+j})
+    //                                  ⊙ per_block_rot(j)(x) )
+    //
+    // Galois keys: 2*(b1-1) baby + 2*(b2-1) giant (vs n*2 in linear HS).
+    // ────────────────────────────────────────────────────────────────
+
+    // 1) Pre-rotate ct_x by each baby shift (per_block_rotate_left).
+    //    baby_shifts[0] must equal 0 (identity, returned as a copy at
+    //    depth d). The remaining babies land at depth d+1.
+    std::vector<Ciphertext> pre_rotate_babies(
+        Ciphertext& ct_x,
+        GaloisKey&  gk,
+        int block,
+        const std::vector<int>&       baby_shifts,
+        const std::vector<Plaintext>& low_pts,
+        const std::vector<Plaintext>& high_pts)
+    {
+        const size_t b1 = baby_shifts.size();
+        if (b1 == 0 || baby_shifts[0] != 0) {
+            throw std::invalid_argument(
+                "pre_rotate_babies: baby_shifts must start with 0");
+        }
+        if (low_pts.size() != b1 || high_pts.size() != b1) {
+            throw std::invalid_argument(
+                "pre_rotate_babies: low_pts/high_pts size != baby_shifts");
+        }
+
+        std::vector<Ciphertext> out;
+        out.reserve(b1);
+        // Identity baby (j=0): copy at depth d.
+        {
+            auto p = std::make_shared<heongpu::Ciphertext<SCHEME>>(*ct_x.ct);
+            out.emplace_back(Ciphertext{p});
+        }
+        for (size_t j = 1; j < b1; ++j) {
+            heongpu::Ciphertext<SCHEME> rl = *ct_x.ct;
+            ops.rotate_rows_inplace(rl, *gk.gk, baby_shifts[j]);
+            ops.multiply_plain_inplace(rl, *low_pts[j].pt);
+
+            heongpu::Ciphertext<SCHEME> rr = *ct_x.ct;
+            ops.rotate_rows_inplace(rr, *gk.gk, baby_shifts[j] - block);
+            ops.multiply_plain_inplace(rr, *high_pts[j].pt);
+
+            ops.add_inplace(rl, rr);
+            ops.rescale_inplace(rl);   // → depth d+1
+            auto p = std::make_shared<heongpu::Ciphertext<SCHEME>>(std::move(rl));
+            out.emplace_back(Ciphertext{p});
+        }
+        return out;
+    }
+
+    // 2) Per giant: inner product over b1 babies, then giant per-block rotate.
+    //
+    //    babies[0]      at depth d   (identity)
+    //    babies[1..b1-1] at depth d+1 (post-baby-rescale)
+    //
+    //    For each giant g in giant_shifts:
+    //      diag0_pts[g] is the j=0 diag (per-block rolled by -g*b1) at depth d.
+    //      diagj_pts[g*(b1-1) + (j-1)] is the j>=1 diag at depth d+1.
+    //
+    //      acc_j0 = babies[0] ⊙ diag0_pts[g]                  (depth d)
+    //      rescale(acc_j0)                                     (depth d+1)
+    //      if b1 > 1:
+    //        acc_j  = babies[1] ⊙ diagj_pts[…0]                (lazy: scale²)
+    //        for j in 2..b1-1: acc_j += babies[j] ⊙ diagj_pts[…j-1]
+    //        rescale(acc_j)                                    (depth d+2)
+    //        acc_j0 = add_match(acc_j0, acc_j)                 (depth d+2)
+    //      else acc_j0 stays at depth d+1.
+    //
+    //      if giant_shifts[g] != 0: per_block_rotate by g*b1
+    //        using giant_low_pts[g] / giant_high_pts[g] at acc's depth.
+    //        rescale → depth +1 again.
+    //
+    //      Sum into chunk result via add_inplace_match.
+    //
+    // Returns chunk result at the deepest depth produced (d+2 or d+3).
+    Ciphertext bsgs_giant_chunk(
+        const std::vector<Ciphertext>& babies,
+        GaloisKey& gk,
+        int block,
+        const std::vector<int>&       giant_shifts,   // chunk subset
+        const std::vector<Plaintext>& diag0_pts,      // size = giant_shifts.size()
+        const std::vector<Plaintext>& diagj_pts,      // size = giant_shifts.size() * (b1-1)
+        const std::vector<Plaintext>& giant_low_pts,  // size = giant_shifts.size() (idx unused if g==0)
+        const std::vector<Plaintext>& giant_high_pts)
+    {
+        const size_t b1 = babies.size();
+        const size_t G  = giant_shifts.size();
+        if (G == 0) throw std::invalid_argument("bsgs_giant_chunk: empty");
+        if (diag0_pts.size() != G) throw std::invalid_argument("diag0 size");
+        if (diagj_pts.size() != G * (b1 - 1)) throw std::invalid_argument("diagj size");
+        if (giant_low_pts.size() != G || giant_high_pts.size() != G)
+            throw std::invalid_argument("giant masks size");
+
+        std::shared_ptr<heongpu::Ciphertext<SCHEME>> result;
+
+        for (size_t g = 0; g < G; ++g) {
+            // j=0 path (depth d).
+            heongpu::Ciphertext<SCHEME> acc_j0 = *babies[0].ct;
+            ops.multiply_plain_inplace(acc_j0, *diag0_pts[g].pt);
+            ops.rescale_inplace(acc_j0);                       // → d+1
+
+            if (b1 > 1) {
+                // Lazy-rescale inner product over j>=1.
+                heongpu::Ciphertext<SCHEME> acc_j = *babies[1].ct;
+                ops.multiply_plain_inplace(acc_j, *diagj_pts[g * (b1 - 1) + 0].pt);
+                for (size_t j = 2; j < b1; ++j) {
+                    heongpu::Ciphertext<SCHEME> term = *babies[j].ct;
+                    ops.multiply_plain_inplace(term, *diagj_pts[g * (b1 - 1) + (j - 1)].pt);
+                    ops.add_inplace(acc_j, term);
+                }
+                ops.rescale_inplace(acc_j);                    // → d+2
+
+                // Combine: acc_j0 at d+1, acc_j at d+2.
+                while (acc_j0.depth() < acc_j.depth()) ops.mod_drop_inplace(acc_j0);
+                ops.add_inplace(acc_j0, acc_j);                // at d+2
+            }
+
+            // Giant per-block rotate.
+            const int gs = giant_shifts[g];
+            if (gs != 0) {
+                heongpu::Ciphertext<SCHEME> rl = acc_j0;
+                ops.rotate_rows_inplace(rl, *gk.gk, gs);
+                ops.multiply_plain_inplace(rl, *giant_low_pts[g].pt);
+                heongpu::Ciphertext<SCHEME> rr = acc_j0;
+                ops.rotate_rows_inplace(rr, *gk.gk, gs - block);
+                ops.multiply_plain_inplace(rr, *giant_high_pts[g].pt);
+                ops.add_inplace(rl, rr);
+                ops.rescale_inplace(rl);                       // → d+3
+                acc_j0 = std::move(rl);
+            }
+
+            if (!result) {
+                result = std::make_shared<heongpu::Ciphertext<SCHEME>>(std::move(acc_j0));
+            } else {
+                int dr = result->depth();
+                int dx = acc_j0.depth();
+                if (dr == dx) ops.add_inplace(*result, acc_j0);
+                else if (dr < dx) {
+                    while (result->depth() < dx) ops.mod_drop_inplace(*result);
+                    ops.add_inplace(*result, acc_j0);
+                } else {
+                    while (acc_j0.depth() < dr) ops.mod_drop_inplace(acc_j0);
+                    ops.add_inplace(*result, acc_j0);
+                }
+            }
+        }
+
+        return Ciphertext{result};
+    }
 };
 
 PYBIND11_MODULE(_heongpu, m) {
@@ -828,5 +984,21 @@ PYBIND11_MODULE(_heongpu, m) {
              "diagonal_pts at ct_x.depth()+1 and the (low,high) per_block_rotate "
              "masks at ct_x.depth(). For shifts[k]==0 the (low,high) masks are "
              "ignored; the diagonal multiplies ct_x directly. Result depth = "
-             "ct_x.depth() + 2.");
+             "ct_x.depth() + 2.")
+        .def("pre_rotate_babies", &Operator::pre_rotate_babies,
+             py::arg("ct_x"), py::arg("galois_key"), py::arg("block"),
+             py::arg("baby_shifts"), py::arg("low_pts"), py::arg("high_pts"),
+             py::call_guard<py::gil_scoped_release>(),
+             "Phase 7b-BSGS: pre-rotate ct_x by each baby shift "
+             "(per_block_rotate_left). baby_shifts[0] must be 0; the "
+             "identity baby is returned at ct_x.depth(); the rest at depth+1.")
+        .def("bsgs_giant_chunk", &Operator::bsgs_giant_chunk,
+             py::arg("babies"), py::arg("galois_key"), py::arg("block"),
+             py::arg("giant_shifts"),
+             py::arg("diag0_pts"), py::arg("diagj_pts"),
+             py::arg("giant_low_pts"), py::arg("giant_high_pts"),
+             py::call_guard<py::gil_scoped_release>(),
+             "Phase 7b-BSGS: per-chunk BSGS giant accumulation. Inner "
+             "product over b1 babies with lazy rescale, then giant "
+             "per_block_rotate, summed across the chunk.");
 }

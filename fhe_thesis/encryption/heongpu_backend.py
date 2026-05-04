@@ -410,10 +410,52 @@ class HEonGPUBackend(CKKSBackend):
     # ------------------------------------------------------------------
     # Phase 7b: batched Halevi-Shoup matmul (matrix-packed)
     # ------------------------------------------------------------------
-    # Plaintexts are encoded in chunks of HS_CHUNK shifts so the on-GPU
-    # plaintext footprint stays bounded. At N=2^16 with a 30-prime chain
-    # each plaintext is ~16 MB; chunk=64 ⇒ ~3 GB peak transient.
+    # HS_CHUNK bounds the linear-path plaintext footprint per call.
+    # BSGS_THRESHOLD: above this many shifts we switch to BSGS (O(√n) keys).
+    # BSGS_GIANT_CHUNK: how many giants to encode per inner C++ call.
     HS_CHUNK = 64
+    BSGS_THRESHOLD = 64
+    BSGS_GIANT_CHUNK = 8
+
+    @staticmethod
+    def _factor_bsgs(n: int) -> "tuple[int, int]":
+        """Pick (b1, b2) with b1 * b2 == n and b1 ≈ √n.
+
+        Prefers b1 a power of two when ``n`` is, so that subsequent layers
+        can reuse the Galois key set.
+        """
+        # Find the divisor of n closest to sqrt(n).
+        from math import isqrt
+        s = isqrt(n)
+        # Search downward then upward for a divisor.
+        for d in range(s, 0, -1):
+            if n % d == 0:
+                return d, n // d
+        return 1, n
+
+    @staticmethod
+    def _per_block_roll(diag: Sequence[float], shift: int,
+                        block: int, num_slots: int) -> List[float]:
+        """Cyclic right-roll of ``diag`` by ``shift`` within each block."""
+        import numpy as _np
+        arr = _np.asarray(diag, dtype=float).reshape(-1, block)
+        return _np.roll(arr, shift, axis=1).reshape(num_slots).tolist()
+
+    @staticmethod
+    def _block_masks_static(block: int, shift: int, num_slots: int) \
+            -> "tuple[List[float], List[float]]":
+        if not 0 < shift < block:
+            raise ValueError(f"bad shift={shift} block={block}")
+        B = num_slots // block
+        low = [0.0] * num_slots
+        high = [0.0] * num_slots
+        for b in range(B):
+            base = b * block
+            for j in range(block - shift):
+                low[base + j] = 1.0
+            for j in range(block - shift, block):
+                high[base + j] = 1.0
+        return low, high
 
     def halevi_shoup_matmul(
         self,
@@ -428,18 +470,14 @@ class HEonGPUBackend(CKKSBackend):
     ) -> Ciphertext:
         """Run the matrix-packed Halevi-Shoup matvec entirely in C++.
 
-        ``shifts[k]`` is the per-block left rotation for diagonal ``k``.
-        ``diagonals[k]`` is the length-``num_slots`` plaintext diagonal
-        (None entries are skipped). For non-zero shifts, the caller
-        provides ``low_masks[k]`` and ``high_masks[k]`` (the per-block
-        rotate masks). Result depth = ct_x.depth() + 2 (one rescale for
-        the rotate-mask, one for the diagonal).
+        For ``len(shifts) > BSGS_THRESHOLD`` the wrapper switches to
+        baby-step/giant-step (Galois keys: O(√n) instead of O(n)).
         """
         if not (len(shifts) == len(diagonals) == len(low_masks) == len(high_masks)):
             raise ValueError("shifts/diagonals/low_masks/high_masks size mismatch")
 
-        active_idx = [k for k, d in enumerate(diagonals) if d is not None]
-        if not active_idx:
+        # All-None fast path.
+        if all(d is None for d in diagonals):
             zero_pt = self._encode([0.0] * self._num_slots)
             out = self._ops.clone_ct(ct_x)
             self._ops.multiply_plain_inplace(out, zero_pt)
@@ -451,6 +489,33 @@ class HEonGPUBackend(CKKSBackend):
                 self._ops.add_plain_inplace(out, bias_pt)
             return out
 
+        n = len(shifts)
+        # Verify shifts match an identity layout (i.e. shifts[k] == k).
+        # The BSGS layout assumes consecutive shifts. The linear path
+        # works for arbitrary shifts.
+        consecutive = all(int(shifts[k]) == k for k in range(n))
+
+        if n > self.BSGS_THRESHOLD and consecutive:
+            return self._halevi_shoup_matmul_bsgs(
+                ct_x, block=block, n=n, diagonals=diagonals, bias_vec=bias_vec,
+            )
+        return self._halevi_shoup_matmul_linear(
+            ct_x, block=block, shifts=shifts, diagonals=diagonals,
+            low_masks=low_masks, high_masks=high_masks, bias_vec=bias_vec,
+        )
+
+    def _halevi_shoup_matmul_linear(
+        self,
+        ct_x: Ciphertext,
+        *,
+        block: int,
+        shifts: Sequence[int],
+        diagonals: Sequence[Optional[Sequence[float]]],
+        low_masks: Sequence[Optional[Sequence[float]]],
+        high_masks: Sequence[Optional[Sequence[float]]],
+        bias_vec: Optional[Sequence[float]] = None,
+    ) -> Ciphertext:
+        active_idx = [k for k, d in enumerate(diagonals) if d is not None]
         # Galois keys for every required shift.
         needed = set()
         for k in active_idx:
@@ -475,7 +540,6 @@ class HEonGPUBackend(CKKSBackend):
                 s = int(shifts[k])
                 chunk_shifts.append(s)
                 pt_d = self._encode(list(diagonals[k]))
-                # diag depth: x_depth (for s==0) or x_depth+1 (for s!=0).
                 target_diag_depth = x_depth if s == 0 else x_depth + 1
                 while self._ops.depth_of_plaintext(pt_d) < target_diag_depth:
                     self._ops.mod_drop_inplace_pt(pt_d)
@@ -515,6 +579,137 @@ class HEonGPUBackend(CKKSBackend):
                 result = chunk_result
             else:
                 self._ops.add_inplace_match(result, chunk_result)
+
+        return result
+
+    def _halevi_shoup_matmul_bsgs(
+        self,
+        ct_x: Ciphertext,
+        *,
+        block: int,
+        n: int,
+        diagonals: Sequence[Optional[Sequence[float]]],
+        bias_vec: Optional[Sequence[float]] = None,
+    ) -> Ciphertext:
+        """BSGS path: O(√n) Galois keys, O(√n) baby rotations.
+
+        Uses ``n`` consecutive shifts ``[0, 1, …, n-1]`` factored as
+        ``b1 * b2``; pre-rotates ``ct_x`` by every baby shift once,
+        then per-giant accumulates an inner product over ``b1``
+        babies (with lazy rescale) and applies the giant per-block
+        rotation.
+
+        Result depth = ``ct_x.depth() + 3`` (vs +2 for the linear path).
+        """
+        b1, b2 = self._factor_bsgs(n)
+        x_depth = self._ops.depth(ct_x)
+        num_slots = self._num_slots
+        zero_pad = [0.0] * num_slots
+
+        # ── 1. Galois keys: babies (j and j-block) + giants (g·b1 and g·b1-block) ──
+        needed = set()
+        for j in range(1, b1):
+            needed.add(j % num_slots)
+            needed.add((j - block) % num_slots)
+        for g in range(1, b2):
+            s = g * b1
+            needed.add(s % num_slots)
+            needed.add((s - block) % num_slots)
+        if needed:
+            self.register_rotation_keys(sorted(needed))
+
+        # ── 2. Pre-rotate babies (one C++ call) ──
+        baby_shifts = list(range(b1))
+        baby_low_pts = [self._encode(zero_pad)]   # idx 0 unused
+        baby_high_pts = [self._encode(zero_pad)]
+        for j in range(1, b1):
+            lo, hi = self._block_masks_static(block, j, num_slots)
+            lo_pt = self._encode(lo)
+            hi_pt = self._encode(hi)
+            while self._ops.depth_of_plaintext(lo_pt) < x_depth:
+                self._ops.mod_drop_inplace_pt(lo_pt)
+            while self._ops.depth_of_plaintext(hi_pt) < x_depth:
+                self._ops.mod_drop_inplace_pt(hi_pt)
+            baby_low_pts.append(lo_pt)
+            baby_high_pts.append(hi_pt)
+
+        babies = self._ops.pre_rotate_babies(
+            ct_x, self._gk, int(block),
+            baby_shifts, baby_low_pts, baby_high_pts,
+        )
+        # Babies live at depth d (idx 0) and d+1 (idx>=1) — see C++ kernel.
+        del baby_low_pts, baby_high_pts
+
+        # ── 3. Per-giant chunk dispatch ──
+        result: Optional[Ciphertext] = None
+        for g_start in range(0, b2, self.BSGS_GIANT_CHUNK):
+            g_end = min(g_start + self.BSGS_GIANT_CHUNK, b2)
+            G = g_end - g_start
+
+            chunk_giant_shifts: List[int] = []
+            diag0_pts = []
+            diagj_pts = []
+            glo_pts = []
+            ghi_pts = []
+            for g in range(g_start, g_end):
+                gs = g * b1
+                chunk_giant_shifts.append(gs)
+
+                # j=0 diag: rolled right by g·b1 within block, at depth d.
+                d0 = diagonals[g * b1] if (g * b1) < n else None
+                if d0 is None:
+                    d0 = zero_pad
+                pt_d0 = self._encode(self._per_block_roll(d0, gs, block, num_slots))
+                while self._ops.depth_of_plaintext(pt_d0) < x_depth:
+                    self._ops.mod_drop_inplace_pt(pt_d0)
+                diag0_pts.append(pt_d0)
+
+                # j>=1 diags: rolled right by g·b1 within block, at depth d+1.
+                for j in range(1, b1):
+                    idx = g * b1 + j
+                    dj = diagonals[idx] if idx < n else None
+                    if dj is None:
+                        dj = zero_pad
+                    pt_dj = self._encode(self._per_block_roll(dj, gs, block, num_slots))
+                    while self._ops.depth_of_plaintext(pt_dj) < x_depth + 1:
+                        self._ops.mod_drop_inplace_pt(pt_dj)
+                    diagj_pts.append(pt_dj)
+
+                # Giant masks for per_block_rotate(g·b1) at depth d+2.
+                # The acc fed to the giant rotate is at depth d+2 (or d+1 if b1==1).
+                acc_depth = x_depth + 2 if b1 > 1 else x_depth + 1
+                if gs == 0:
+                    glo_pts.append(self._encode(zero_pad))
+                    ghi_pts.append(self._encode(zero_pad))
+                else:
+                    lo, hi = self._block_masks_static(block, gs, num_slots)
+                    lo_pt = self._encode(lo)
+                    hi_pt = self._encode(hi)
+                    while self._ops.depth_of_plaintext(lo_pt) < acc_depth:
+                        self._ops.mod_drop_inplace_pt(lo_pt)
+                    while self._ops.depth_of_plaintext(hi_pt) < acc_depth:
+                        self._ops.mod_drop_inplace_pt(hi_pt)
+                    glo_pts.append(lo_pt)
+                    ghi_pts.append(hi_pt)
+
+            chunk_result = self._ops.bsgs_giant_chunk(
+                babies, self._gk, int(block),
+                chunk_giant_shifts, diag0_pts, diagj_pts, glo_pts, ghi_pts,
+            )
+            del diag0_pts, diagj_pts, glo_pts, ghi_pts
+
+            if result is None:
+                result = chunk_result
+            else:
+                self._ops.add_inplace_match(result, chunk_result)
+
+        # ── 4. Bias ──
+        if bias_vec is not None:
+            r_depth = self._ops.depth(result)
+            bias_pt = self._encode(list(bias_vec))
+            while self._ops.depth_of_plaintext(bias_pt) < r_depth:
+                self._ops.mod_drop_inplace_pt(bias_pt)
+            self._ops.add_plain_inplace(result, bias_pt)
 
         return result
 
