@@ -518,11 +518,113 @@ struct Operator {
         }
         return Ciphertext{result};
     }
-};
 
-// -----------------------------------------------------------------------------
-// Module
-// -----------------------------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // Phase 7b: batched matrix-packed Halevi-Shoup matmul.
+    //
+    // Computes one block-cyclic Halevi-Shoup matmul:
+    //
+    //   result = Σ_k  perBlockRotate(ct_x, shifts[k]) ⊙ diag_pts[k]
+    //
+    // where perBlockRotate(ct, s) = mask_low ⊙ rotate(ct, s) +
+    //                                mask_high ⊙ rotate(ct, s - block).
+    //
+    // For shifts[k]==0 the rotate-then-mask step is skipped; the
+    // diagonal multiplies the input ct directly. The caller arranges
+    // for a same-depth output via add_inplace_match (the i==0 term lands
+    // 1 level shallower than the rotated terms; add_inplace_match
+    // mod-drops the deeper operand on the fly).
+    //
+    // Pre-conditions:
+    //   * ct_x already replicated within each block (caller does this).
+    //   * GaloisKey contains keys for all unique non-zero `shifts[k]`
+    //     AND for all `shifts[k] - block` values.
+    //   * diag_pts[k] is encoded at depth = ct_x.depth() + 1
+    //     (i.e. matching the post-mask, post-rescale depth of the
+    //     rotated terms).
+    //   * low_pts[k]/high_pts[k] are the per_block_rotate masks for
+    //     shifts[k] (encoded at ct_x.depth()), or empty Plaintexts
+    //     when shifts[k]==0 (slot is unused).
+    //   * If with_bias is true, bias_pt is at depth ct_x.depth() + 2
+    //     (i.e. final result depth).
+    //
+    // Result: Ciphertext at depth ct_x.depth() + 2.
+    Ciphertext halevi_shoup_matvec_block(
+        Ciphertext& ct_x,
+        GaloisKey&  gk,
+        int block,
+        const std::vector<int>&       shifts,
+        const std::vector<Plaintext>& diag_pts,
+        const std::vector<Plaintext>& low_pts,
+        const std::vector<Plaintext>& high_pts,
+        bool                          with_bias,
+        Plaintext&                    bias_pt)
+    {
+        const size_t K = shifts.size();
+        if (diag_pts.size() != K || low_pts.size() != K || high_pts.size() != K) {
+            throw std::invalid_argument(
+                "halevi_shoup_matvec_block: shifts/diag_pts/low_pts/high_pts "
+                "size mismatch");
+        }
+        if (K == 0) {
+            throw std::invalid_argument(
+                "halevi_shoup_matvec_block: shifts must be non-empty");
+        }
+
+        std::shared_ptr<heongpu::Ciphertext<SCHEME>> result;
+
+        for (size_t k = 0; k < K; ++k) {
+            const int s = shifts[k];
+
+            heongpu::Ciphertext<SCHEME> rot_x;
+            if (s == 0) {
+                // Identity branch: copy of ct_x at original depth.
+                rot_x = *ct_x.ct;
+            } else {
+                // per_block_rotate_left(s): mask_low ⊙ rot(s) + mask_high ⊙ rot(s - block).
+                heongpu::Ciphertext<SCHEME> rot_left  = *ct_x.ct;
+                ops.rotate_rows_inplace(rot_left, *gk.gk, s);
+                ops.multiply_plain_inplace(rot_left, *low_pts[k].pt);
+
+                heongpu::Ciphertext<SCHEME> rot_right = *ct_x.ct;
+                ops.rotate_rows_inplace(rot_right, *gk.gk, s - block);
+                ops.multiply_plain_inplace(rot_right, *high_pts[k].pt);
+
+                ops.add_inplace(rot_left, rot_right);
+                ops.rescale_inplace(rot_left);    // mask consumed 1 level
+                rot_x = std::move(rot_left);
+            }
+
+            // Multiply by diagonal (at rot_x's depth).
+            ops.multiply_plain_inplace(rot_x, *diag_pts[k].pt);
+            ops.rescale_inplace(rot_x);            // diag consumed 1 level
+
+            if (!result) {
+                result = std::make_shared<heongpu::Ciphertext<SCHEME>>(std::move(rot_x));
+            } else {
+                // Inline add_inplace_match: i==0 term lands at depth+1
+                // and i!=0 terms at depth+2; drop the shallower one.
+                int dr = result->depth();
+                int dx = rot_x.depth();
+                if (dr == dx) {
+                    ops.add_inplace(*result, rot_x);
+                } else if (dr < dx) {
+                    while (result->depth() < dx) ops.mod_drop_inplace(*result);
+                    ops.add_inplace(*result, rot_x);
+                } else {
+                    while (rot_x.depth() < dr) ops.mod_drop_inplace(rot_x);
+                    ops.add_inplace(*result, rot_x);
+                }
+            }
+        }
+
+        if (with_bias) {
+            ops.add_plain_inplace(*result, *bias_pt.pt);
+        }
+
+        return Ciphertext{result};
+    }
+};
 
 PYBIND11_MODULE(_heongpu, m) {
     m.doc() = "HEonGPU CKKS pybind11 bindings (Phase 1 smoke surface)";
@@ -703,5 +805,22 @@ PYBIND11_MODULE(_heongpu, m) {
              "Σ baby_rot ⊙ mask, single rescale per giant, optional "
              "giant-rotate, sums giants. Eliminates Python wrapper "
              "overhead (encoding masks must be pre-built and at "
-             "ct.depth()). Result depth = ct.depth() + 1.");
+             "ct.depth()). Result depth = ct.depth() + 1.")
+        .def("halevi_shoup_matvec_block", &Operator::halevi_shoup_matvec_block,
+             py::arg("ct_x"), py::arg("galois_key"),
+             py::arg("block"),
+             py::arg("shifts"),
+             py::arg("diag_pts"),
+             py::arg("low_pts"),
+             py::arg("high_pts"),
+             py::arg("with_bias"),
+             py::arg("bias_pt"),
+             py::call_guard<py::gil_scoped_release>(),
+             "Phase 7b: batched matrix-packed Halevi-Shoup matmul in C++. "
+             "Eliminates the Python loop over n diagonals "
+             "(per_block_rotate + mul_plain + add). Caller pre-encodes all "
+             "diagonal_pts at ct_x.depth()+1 and the (low,high) per_block_rotate "
+             "masks at ct_x.depth(). For shifts[k]==0 the (low,high) masks are "
+             "ignored; the diagonal multiplies ct_x directly. Result depth = "
+             "ct_x.depth() + 2.");
 }
