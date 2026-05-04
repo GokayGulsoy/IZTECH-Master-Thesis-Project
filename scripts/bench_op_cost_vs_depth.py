@@ -45,13 +45,14 @@ def main():
         d = be._ops.depth(ct)
         levels_left = be._max_depth - d
 
-        # rotate
+        # rotate (use rotate_rows_inplace on a clone)
         def f_rot():
-            _ = be._ops.rotate(ct, be._gk, 1)
+            ct2 = be._ops.clone_ct(ct)
+            be._ops.rotate_rows_inplace(ct2, be._gk, 1)
         t_rot = median_ms(f_rot)
 
         # mul_plain (depth-0 plaintext, encoded fresh; need pt at same depth as ct)
-        pt = be._encode_full(list(vec))
+        pt = be._encode(list(vec))
         # mod-drop the plaintext to ct's depth
         while be._ops.depth_of_plaintext(pt) < d:
             be._ops.mod_drop_inplace_pt(pt)
