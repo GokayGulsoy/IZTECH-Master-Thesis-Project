@@ -68,7 +68,7 @@ def bench(name, num_layers, hidden, num_heads, seq_len):
         bootstrap_hamming_weight=16,
         sec_none=True,
     )
-    backend.configure_bootstrapping()
+    # Skip configure_bootstrapping for synthetic e2e bench (no real depth budget needed for 2L).
     weights = make_weights(num_layers, hidden, num_heads)
     coeffs = make_coeffs(num_layers)
     x = np.random.default_rng(1).standard_normal((seq_len, hidden)) * 0.1
