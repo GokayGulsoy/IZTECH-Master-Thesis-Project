@@ -13,8 +13,8 @@ from fhe_thesis.encryption.mm_nexus import (
 
 
 def main() -> None:
-    # Small ring for fast iteration: N=2^10=1024, so logN=10 rounds.
-    N_LOG = 10
+    # Small ring for fast iteration: N=2^12=4096, so logN=12 rounds.
+    N_LOG = 12
     N = 1 << N_LOG
 
     be = HEonGPUBackend(
