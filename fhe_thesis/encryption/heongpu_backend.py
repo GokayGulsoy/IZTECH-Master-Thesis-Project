@@ -85,6 +85,7 @@ class HEonGPUBackend(CKKSBackend):
 
         self._ctx = hg.CKKSContext(self._N, q_bits, p_bits, sec_none=sec_none)
         kg = hg.KeyGenerator(self._ctx)
+        self._kg = kg
         if bootstrap_hamming_weight is not None:
             self._sk = kg.generate_secret_key_h(self._ctx, bootstrap_hamming_weight)
         else:

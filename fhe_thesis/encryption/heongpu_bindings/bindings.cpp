@@ -142,6 +142,15 @@ struct KeyGenerator {
         kg.generate_galois_key(*gk, *s.sk);
         return GaloisKey{gk};
     }
+
+    // Phase 8b: Galois key for arbitrary raw galois elements (Z*_{2N}).
+    // Required for NEXUS decompress: elements (N + 2^i) / 2^i for i in [0, logN).
+    GaloisKey generate_galois_key_elts(CKKSContext& c, SecretKey& s,
+                                       std::vector<uint32_t> galois_elts) {
+        auto gk = std::make_shared<heongpu::Galoiskey<SCHEME>>(c.ctx, galois_elts);
+        kg.generate_galois_key(*gk, *s.sk);
+        return GaloisKey{gk};
+    }
 };
 
 struct Encoder {
@@ -253,6 +262,15 @@ struct Operator {
     // scale are preserved (no mod-drop, no rescale).
     void multiply_power_of_x_inplace(Ciphertext& a, int k) {
         ops.multiply_power_of_x_inplace(*a.ct, k);
+    }
+
+    // Phase 8b: NEXUS-port primitive — apply Galois automorphism by raw
+    // element ψ_t : a(x) ↦ a(x^t) for t ∈ Z*_{2N}. Required for the
+    // decompress_ciphertext orchestration where t = (N + 2^i)/2^i.
+    Ciphertext apply_galois_elt(Ciphertext& a, GaloisKey& g, int galois_elt) {
+        auto out = std::make_shared<heongpu::Ciphertext<SCHEME>>(*a.ct);
+        ops.apply_galois(*a.ct, *out, *g.gk, galois_elt);
+        return Ciphertext{out};
     }
 
     // Sum of two ciphertexts that may be at different chain levels.
@@ -1080,7 +1098,11 @@ PYBIND11_MODULE(_heongpu, m) {
         .def("generate_galois_key", &KeyGenerator::generate_galois_key_default,
              py::arg("ctx"), py::arg("secret_key"))
         .def("generate_galois_key", &KeyGenerator::generate_galois_key_shifts,
-             py::arg("ctx"), py::arg("secret_key"), py::arg("shifts"));
+             py::arg("ctx"), py::arg("secret_key"), py::arg("shifts"))
+        .def("generate_galois_key_elts", &KeyGenerator::generate_galois_key_elts,
+             py::arg("ctx"), py::arg("secret_key"), py::arg("galois_elts"),
+             "Phase 8b: GaloisKey for raw galois elements (Z*_{2N}). "
+             "Required for NEXUS decompress orchestration.");
 
     py::class_<Encoder>(m, "Encoder")
         .def(py::init<CKKSContext&>())
@@ -1123,6 +1145,10 @@ PYBIND11_MODULE(_heongpu, m) {
              "Phase 8a: NEXUS port — in-place ct *= x^k mod (x^N+1). "
              "Preserves depth & scale. Implemented via INTT + negacyclic "
              "shift kernel + NTT-back inside HEonGPU.")
+        .def("apply_galois_elt", &Operator::apply_galois_elt,
+             py::arg("ct"), py::arg("galois_key"), py::arg("galois_elt"),
+             "Phase 8b: NEXUS port — apply Galois automorphism a(x) ↦ a(x^t) "
+             "for raw element t ∈ Z*_{2N}. galois_key must contain key for t.")
         // ── NEXUS Phase 5: stream-aware variants ──
         .def("multiply_plain_inplace_s", &Operator::multiply_plain_inplace_s,
              py::arg("ct"), py::arg("plain"), py::arg("stream"),
