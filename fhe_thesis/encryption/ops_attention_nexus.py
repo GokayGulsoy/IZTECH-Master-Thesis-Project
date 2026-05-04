@@ -101,83 +101,45 @@ def qk_scores_nexus(
     L: int,
     head_dim: int,
     scale: float,
+    num_heads_per_ct: int = 1,
 ) -> Ciphertext:
     """NEXUS-style diagonal Q@K^T in column-major layout.
 
+    With ``num_heads_per_ct > 1``: Q and K each pack multiple heads side by
+    side at slot ranges ``[h·head_dim·L, (h+1)·head_dim·L)`` for h ∈
+    [0, num_heads_per_ct). The output similarly packs S for each head
+    (in row-aligned diagonal layout) at the same slot ranges.
+
     Returns a single ct in **row-aligned diagonal layout**:
-        slot[d * L + i] = scale · S[i, (i+d) mod L]   for d ∈ [0, L)
-
-    (Conveniently, this is the same column-major shape as Q/K but where
-    "j" is now the diagonal index d. So softmax / next stage can treat
-    it as a column-major matrix of shape [L, L].)
-
-    Algorithm:
-      For d in 0..L-1:
-        1. K_rot = rotate(K_ct, d)
-           — Within each column [j*L, (j+1)*L), this cyclically rotates
-             the L token rows. Result: K_rot[i + j*L] = K[(i+d) mod L, j].
-             ✓ But: rotation by d slots wraps across column boundaries;
-             specifically, the last d slots of column j-1 spill into the
-             first d slots of column j. We must mask within each column.
-        2. K_rot_masked = K_rot * within_col_mask(d)
-           — Zero out the spill so each column independently shows
-             K[(i+d)%L, j] for i ∈ [d, L), and 0 for i ∈ [0, d).
-           Actually a cleaner approach: replicate K cyclically inside
-           each column using a complementary mask + rotation.
-        3. prod = Q_ct * K_rot
-        4. Sum across head_dim columns (log2(head_dim) bare-doublings):
-             for s in {L, 2L, 4L, ..., (head_dim/2)*L}:
-                 prod += rotate(prod, s)
-           After the loop, the first L slots hold Σ_j Q[i,j]*K[(i+d)%L,j]
-           for i ∈ [0, L). Other column slots hold cyclic-shift garbage.
-        5. mask to zero garbage outside first L slots, scale by 1/√d_h
-        6. global rotate by -d*L → place at slots [d*L, (d+1)*L)
-        7. accumulate into S
-
-    Cost per d:
-        1 rotation (K) + 1 mask mul_plain (cyclic correction)
-        + 1 ct-mul (Q*K_rot)
-        + log2(head_dim) bare-rotations (sum across cols)
-        + 1 mask mul_plain + 1 global rotation (placement)
-      = ~13 ops/d at head_dim=64
-    Total: L * 13 ≈ 1700 ops for L=128 — vs ~16000 in our previous diag.
-    ~10× faster on attention.
+        slot[h*H + d * L + i] = scale · S_h[i, (i+d) mod L]
+        where H = head_dim·L, for d ∈ [0, L), h ∈ [0, num_heads_per_ct).
     """
     n_slots = backend.capabilities.n_slots
-    if L * head_dim > n_slots:
-        raise ValueError(f"L*head_dim={L*head_dim} > num_slots={n_slots}")
+    H = head_dim * L
+    total = num_heads_per_ct * H
+    if total > n_slots:
+        raise ValueError(
+            f"num_heads_per_ct·L·head_dim={total} > num_slots={n_slots}"
+        )
 
     S: Optional[Ciphertext] = None
-
-    # Pre-build the "first L slots only" mask (no need to scale here; we
-    # fold scale into the placement mask).
-    first_L_mask = [0.0] * n_slots
-    for i in range(L):
-        first_L_mask[i] = 1.0
+    n_cols = num_heads_per_ct * head_dim  # total columns across all heads
 
     for d in range(L):
-        # Step 1+2: cyclic-shift K within each column by d.
-        # Decomposition: K_shift_left = rotate(K, d); top d slots of col j
-        # are now K[d..L, j], bottom L-d slots have K[0..d, j-1] spill.
-        # K_shift_right = rotate(K, d - L); the spill is in the opposite
-        # spots. Mask + add to get correct cyclic shift per column.
+        # Step 1+2: cyclic-shift K within each column by d (across ALL columns).
         if d == 0:
             K_rot = K_ct
         else:
-            # within-col cyclic = mask(top L-d) of rotate(K, d)
-            #                   + mask(bottom d)  of rotate(K, d - L)
-            # Per-column. Since columns are L-aligned, we can build the
-            # top-mask as: 1.0 in slots [j*L, j*L + L - d), 0 elsewhere.
             top_mask = [0.0] * n_slots
             bot_mask = [0.0] * n_slots
-            for j in range(head_dim):
+            for j in range(n_cols):
                 base = j * L
                 for i in range(L - d):
                     top_mask[base + i] = 1.0
                 for i in range(L - d, L):
                     bot_mask[base + i] = 1.0
-            K_left  = backend.rotate(K_ct, d)        # shift up
-            K_right = backend.rotate(K_ct, d - L)    # shift down by L-d
+            K_left  = backend.rotate(K_ct, d)
+            K_right = backend.rotate(K_ct, d - L)
             K_rot = backend.add(
                 backend.mul_plain(K_left, top_mask),
                 backend.mul_plain(K_right, bot_mask),
@@ -186,21 +148,21 @@ def qk_scores_nexus(
         # Step 3: Q * K_rot
         prod = backend.mul(Q_ct, K_rot)
 
-        # Step 4: sum across head_dim columns via L-stride bare-doublings.
+        # Step 4: per-head sum across head_dim columns (stop at H = head_dim·L
+        # so each head's reduction stays inside its own region).
         sum_ct = prod
         step = L
-        while step < L * head_dim:
+        while step < H:
             sum_ct = backend.add(sum_ct, backend.rotate(sum_ct, step))
             step <<= 1
-        # After the loop, first L slots have Σ_j Q[i,j]*K[(i+d)%L,j].
-        # Other slots have cyclic-shift garbage.
 
-        # Step 5+6: scale + place at slots [d*L, (d+1)*L).
-        # Build a mask: 1.0 in slots [0, L), 0 elsewhere, scaled by `scale`.
-        # Then global rotate by -d*L (right-shift by d*L) to place.
+        # Step 5+6: place mask scaled by `scale`, replicated per head.
+        # 1.0 in slots [h*H, h*H + L) for h ∈ [0, num_heads_per_ct).
         place_mask = [0.0] * n_slots
-        for i in range(L):
-            place_mask[i] = float(scale)
+        for h in range(num_heads_per_ct):
+            base = h * H
+            for i in range(L):
+                place_mask[base + i] = float(scale)
         masked = backend.mul_plain(sum_ct, place_mask)
         if d > 0:
             masked = backend.rotate(masked, -d * L)
@@ -224,67 +186,53 @@ def attn_apply_nexus(
     *,
     L: int,
     head_dim: int,
+    num_heads_per_ct: int = 1,
 ) -> Ciphertext:
     """NEXUS-style diagonal A @ V in column-major layout.
 
-    Inputs:
-      A_ct: in diagonal-row layout (output of qk_scores_nexus).
-            slot[d*L + i] = A[i, (i+d) mod L]
-      V_ct: column-major.  slot[j*L + i] = V[i, j]
-
-    Output:
-      Out_ct: column-major.  slot[j*L + i] = Out[i, j]
-              where  Out[i, j] = Σ_k A[i, k] * V[k, j]
-                              = Σ_d A[i, (i+d) mod L] * V[(i+d) mod L, j]
-
-    Algorithm per d ∈ [0, L):
-      1. Extract row d of A: rotate(A, d*L) + mask first L slots
-         → slot i (for i ∈ [0, L)) holds A[i, (i+d) mod L].
-      2. Broadcast across head_dim columns via L-stride bare-doublings.
-      3. V_shift_d: within-column cyclic shift of V by d (same trick
-         as in qk_scores_nexus).
-      4. prod = a_row_bcast * V_shift_d
-      5. accumulate.
-
-    Cost per d: ~14 ops. Total: L * 14 ≈ 1800 ops/head at L=128.
-    Same complexity as qk_scores_nexus.
+    Multi-head: A and V each pack ``num_heads_per_ct`` heads in adjacent
+    slot regions of width ``head_dim·L``; output is similarly packed.
     """
     n_slots = backend.capabilities.n_slots
-    if L * head_dim > n_slots:
-        raise ValueError(f"L*head_dim={L*head_dim} > num_slots={n_slots}")
+    H = head_dim * L
+    total = num_heads_per_ct * H
+    if total > n_slots:
+        raise ValueError(
+            f"num_heads_per_ct·L·head_dim={total} > num_slots={n_slots}"
+        )
 
     Out: Optional[Ciphertext] = None
+    n_cols = num_heads_per_ct * head_dim
 
-    # Pre-build the "first L slots" mask (used to isolate row d after
-    # the global rotate).
+    # Per-head "first L" mask: 1.0 in slots [h*H, h*H + L) for each head.
     first_L_mask = [0.0] * n_slots
-    for i in range(L):
-        first_L_mask[i] = 1.0
+    for h in range(num_heads_per_ct):
+        base = h * H
+        for i in range(L):
+            first_L_mask[base + i] = 1.0
 
     for d in range(L):
-        # Step 1: bring row d of A to slots [0, L).
+        # Step 1: bring row d of each head's A to slots [h*H, h*H + L).
         if d == 0:
             a_row = A_ct
         else:
             a_row = backend.rotate(A_ct, d * L)
         a_row = backend.mul_plain(a_row, first_L_mask)
 
-        # Step 2: broadcast row d across all head_dim columns.
+        # Step 2: broadcast row d across head_dim cols PER HEAD (stop at H).
         bcast = a_row
         step = L
-        while step < L * head_dim:
+        while step < H:
             bcast = backend.add(bcast, backend.rotate(bcast, -step))
             step <<= 1
-        # bcast now has the row-d values replicated in every L-stride
-        # column block: slot[j*L + i] = A[i, (i+d) mod L] for all j.
 
-        # Step 3: within-column cyclic shift of V by d (same as QK^T).
+        # Step 3: within-column cyclic shift of V by d (across all cols).
         if d == 0:
             V_shift = V_ct
         else:
             top_mask = [0.0] * n_slots
             bot_mask = [0.0] * n_slots
-            for j in range(head_dim):
+            for j in range(n_cols):
                 base = j * L
                 for i in range(L - d):
                     top_mask[base + i] = 1.0
