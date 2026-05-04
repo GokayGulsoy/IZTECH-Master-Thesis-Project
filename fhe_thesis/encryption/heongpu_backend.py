@@ -475,8 +475,7 @@ class HEonGPUBackend(CKKSBackend):
                 s = int(shifts[k])
                 chunk_shifts.append(s)
                 pt_d = self._encode(list(diagonals[k]))
-                while self._ops.depth_of_plaintext(pt_d) < x_depth + 1:
-                    self._ops.mod_drop_inplace_pt(pt_d)
+                # diag stays at depth 0; C++ kernel mod-drops to ct's depth.
                 diag_pts.append(pt_d)
                 if s == 0:
                     lo_pt = self._encode(zero_pad)

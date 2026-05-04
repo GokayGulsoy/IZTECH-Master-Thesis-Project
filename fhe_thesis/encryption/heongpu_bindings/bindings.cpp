@@ -579,10 +579,8 @@ struct Operator {
 
             heongpu::Ciphertext<SCHEME> rot_x;
             if (s == 0) {
-                // Identity branch: clone ct_x and mod-drop one level so
-                // the subsequent mul_plain by diag@(d+1) matches.
+                // Identity branch: clone ct_x at original depth d.
                 rot_x = *ct_x.ct;
-                ops.mod_drop_inplace(rot_x);
             } else {
                 // per_block_rotate_left(s): mask_low ⊙ rot(s) + mask_high ⊙ rot(s - block).
                 heongpu::Ciphertext<SCHEME> rot_left  = *ct_x.ct;
@@ -594,18 +592,34 @@ struct Operator {
                 ops.multiply_plain_inplace(rot_right, *high_pts[k].pt);
 
                 ops.add_inplace(rot_left, rot_right);
-                ops.rescale_inplace(rot_left);    // mask consumed 1 level
+                ops.rescale_inplace(rot_left);    // mask consumed 1 level → depth d+1
                 rot_x = std::move(rot_left);
             }
 
-            // Multiply by diagonal (now both branches at depth d+1).
-            ops.multiply_plain_inplace(rot_x, *diag_pts[k].pt);
-            ops.rescale_inplace(rot_x);            // → depth d+2
+            // Drop a copy of the diagonal plaintext to rot_x's current
+            // depth (diag was encoded at depth 0).
+            heongpu::Plaintext<SCHEME> diag_copy = *diag_pts[k].pt;
+            while (diag_copy.depth() < rot_x.depth()) {
+                ops.mod_drop_inplace(diag_copy);
+            }
+            ops.multiply_plain_inplace(rot_x, diag_copy);
+            ops.rescale_inplace(rot_x);
 
             if (!result) {
                 result = std::make_shared<heongpu::Ciphertext<SCHEME>>(std::move(rot_x));
             } else {
-                ops.add_inplace(*result, rot_x);
+                // i==0 lands at depth d+1; i!=0 at depth d+2.
+                int dr = result->depth();
+                int dx = rot_x.depth();
+                if (dr == dx) {
+                    ops.add_inplace(*result, rot_x);
+                } else if (dr < dx) {
+                    while (result->depth() < dx) ops.mod_drop_inplace(*result);
+                    ops.add_inplace(*result, rot_x);
+                } else {
+                    while (rot_x.depth() < dr) ops.mod_drop_inplace(rot_x);
+                    ops.add_inplace(*result, rot_x);
+                }
             }
         }
 
