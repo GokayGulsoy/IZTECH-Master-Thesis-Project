@@ -407,6 +407,123 @@ class HEonGPUBackend(CKKSBackend):
             v.extend([0.0] * (self._N - len(v)))
         return self._encoder.encode_coeff(self._ctx, v, self._scale)
 
+    # ------------------------------------------------------------------
+    # Phase 7b: batched Halevi-Shoup matmul (matrix-packed)
+    # ------------------------------------------------------------------
+    def halevi_shoup_matmul(
+        self,
+        ct_x: Ciphertext,
+        *,
+        block: int,
+        shifts: Sequence[int],
+        diagonals: Sequence[Optional[Sequence[float]]],
+        low_masks: Sequence[Optional[Sequence[float]]],
+        high_masks: Sequence[Optional[Sequence[float]]],
+        bias_vec: Optional[Sequence[float]] = None,
+    ) -> Ciphertext:
+        """Run the matrix-packed Halevi-Shoup matvec entirely in C++.
+
+        ``shifts[k]`` is the per-block left rotation for diagonal ``k``.
+        ``diagonals[k]`` is the length-``num_slots`` plaintext diagonal
+        (None entries are skipped). For non-zero shifts, the caller
+        provides ``low_masks[k]`` and ``high_masks[k]`` (the per-block
+        rotate masks). Result depth = ct_x.depth() + 2 (one rescale for
+        the rotate-mask, one for the diagonal).
+        """
+        if not (len(shifts) == len(diagonals) == len(low_masks) == len(high_masks)):
+            raise ValueError("shifts/diagonals/low_masks/high_masks size mismatch")
+
+        # Drop None diagonals (and corresponding shift/mask entries).
+        active_shifts: List[int] = []
+        active_diags: List[Sequence[float]] = []
+        active_low: List[Sequence[float]] = []
+        active_high: List[Sequence[float]] = []
+        for s, d, lo, hi in zip(shifts, diagonals, low_masks, high_masks):
+            if d is None:
+                continue
+            active_shifts.append(int(s))
+            active_diags.append(d)
+            active_low.append(lo if lo is not None else [0.0] * self._num_slots)
+            active_high.append(hi if hi is not None else [0.0] * self._num_slots)
+
+        if not active_shifts:
+            # All diagonals zero — result is bias (or zero).
+            zero_pt = self._encode([0.0] * self._num_slots)
+            out = self._ops.clone_ct(ct_x)
+            self._ops.multiply_plain_inplace(out, zero_pt)
+            self._ops.rescale_inplace(out)
+            if bias_vec is not None:
+                bias_pt = self._encode(list(bias_vec))
+                while self._ops.depth_of_plaintext(bias_pt) < self._ops.depth(out):
+                    self._ops.mod_drop_inplace_pt(bias_pt)
+                self._ops.add_plain_inplace(out, bias_pt)
+            return out
+
+        # Encode all plaintexts at the right depths.
+        x_depth = self._ops.depth(ct_x)
+        # Diagonals: at depth x_depth + 1 (multiplied AFTER one rescale
+        # on the rotate-mask; for shift==0 there is no rescale, but the
+        # add_inplace_match in C++ handles the level mismatch).
+        # We over-provision: encode diagonals at x_depth (level 0
+        # relative to ct_x) and let HEonGPU mod-drop them as needed
+        # inside multiply_plain_inplace? — actually multiply_plain_inplace
+        # requires same level, so we must mod-drop explicitly.
+        diag_pts = []
+        for d in active_diags:
+            pt = self._encode(list(d))
+            # For shift!=0 path, target depth is x_depth+1 (after mask rescale).
+            # For shift==0 path, target depth is x_depth.
+            # We pre-drop to x_depth+1; the C++ kernel uses add_inplace_match
+            # to handle the i==0 case (which lands 1 level shallower).
+            target = x_depth + 1
+            # Don't drop below current depth.
+            while self._ops.depth_of_plaintext(pt) < target:
+                self._ops.mod_drop_inplace_pt(pt)
+            diag_pts.append(pt)
+
+        low_pts = []
+        high_pts = []
+        for s, lo, hi in zip(active_shifts, active_low, active_high):
+            if s == 0:
+                # Unused — but the C++ kernel still indexes; pass zero pts.
+                lo_pt = self._encode([0.0] * self._num_slots)
+                hi_pt = self._encode([0.0] * self._num_slots)
+            else:
+                lo_pt = self._encode(list(lo))
+                hi_pt = self._encode(list(hi))
+            while self._ops.depth_of_plaintext(lo_pt) < x_depth:
+                self._ops.mod_drop_inplace_pt(lo_pt)
+            while self._ops.depth_of_plaintext(hi_pt) < x_depth:
+                self._ops.mod_drop_inplace_pt(hi_pt)
+            low_pts.append(lo_pt)
+            high_pts.append(hi_pt)
+
+        # Bias plaintext at result depth (x_depth + 2).
+        if bias_vec is not None:
+            bias_pt = self._encode(list(bias_vec))
+            target = x_depth + 2
+            while self._ops.depth_of_plaintext(bias_pt) < target:
+                self._ops.mod_drop_inplace_pt(bias_pt)
+            with_bias = True
+        else:
+            bias_pt = self._encode([0.0] * self._num_slots)
+            with_bias = False
+
+        # Ensure required Galois keys exist.
+        needed = set()
+        for s in active_shifts:
+            if s != 0:
+                needed.add(s % self._num_slots)
+                needed.add((s - block) % self._num_slots)
+        if needed:
+            self.register_rotation_keys(sorted(needed))
+
+        return self._ops.halevi_shoup_matvec_block(
+            ct_x, self._gk, int(block),
+            active_shifts, diag_pts, low_pts, high_pts,
+            with_bias, bias_pt,
+        )
+
     def coeff_matvec(
         self,
         ct_x_coeff: Ciphertext,

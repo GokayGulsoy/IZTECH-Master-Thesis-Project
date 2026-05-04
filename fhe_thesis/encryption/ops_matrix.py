@@ -254,6 +254,8 @@ def enc_linear_matrix(
                 bias_vec[base + j] = float(v)
 
     out_cts: List[Ciphertext] = []
+    fast = hasattr(backend, "halevi_shoup_matmul")
+
     for ct in mpt.cts:
         # Step 1: replicate input within each block so the cyclic
         # diagonal-rotation accesses are well-defined.
@@ -261,7 +263,28 @@ def enc_linear_matrix(
             backend, ct, in_dim=in_dim, block=block, num_slots=num_slots
         )
 
-        # Step 2: Halevi-Shoup multiply-accumulate.
+        if fast:
+            # Fast path: one C++ call for the entire diagonal sweep.
+            shifts = list(range(n))
+            low_masks: List[Optional[List[float]]] = [None] * n
+            high_masks: List[Optional[List[float]]] = [None] * n
+            for i in range(1, n):
+                lo, hi = _block_masks(block, i, num_slots)
+                low_masks[i] = lo
+                high_masks[i] = hi
+            result_ct = backend.halevi_shoup_matmul(
+                x,
+                block=block,
+                shifts=shifts,
+                diagonals=diagonals,
+                low_masks=low_masks,
+                high_masks=high_masks,
+                bias_vec=bias_vec,
+            )
+            out_cts.append(result_ct)
+            continue
+
+        # Slow path (fallback): Python loop over diagonals.
         result: Optional[Ciphertext] = None
         for i, diag in enumerate(diagonals):
             if diag is None:

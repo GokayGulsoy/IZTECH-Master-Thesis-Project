@@ -212,6 +212,7 @@ struct Operator {
     void sub_inplace(Ciphertext& a, Ciphertext& b)               { ops.sub_inplace(*a.ct, *b.ct); }
     void multiply_inplace(Ciphertext& a, Ciphertext& b)          { ops.multiply_inplace(*a.ct, *b.ct); }
     void multiply_plain_inplace(Ciphertext& a, Plaintext& p)     { ops.multiply_plain_inplace(*a.ct, *p.pt); }
+    void add_plain_inplace(Ciphertext& a, Plaintext& p)          { ops.add_plain_inplace(*a.ct, *p.pt); }
     void relinearize_inplace(Ciphertext& a, RelinKey& rk)        { ops.relinearize_inplace(*a.ct, *rk.rk); }
     void rescale_inplace(Ciphertext& a)                          { ops.rescale_inplace(*a.ct); }
     void mod_drop_inplace_ct(Ciphertext& a)                      { ops.mod_drop_inplace(*a.ct); }
@@ -712,6 +713,7 @@ PYBIND11_MODULE(_heongpu, m) {
         .def("sub_inplace",            &Operator::sub_inplace)
         .def("multiply_inplace",       &Operator::multiply_inplace)
         .def("multiply_plain_inplace", &Operator::multiply_plain_inplace)
+        .def("add_plain_inplace",      &Operator::add_plain_inplace)
         .def("relinearize_inplace",    &Operator::relinearize_inplace)
         .def("rescale_inplace",        &Operator::rescale_inplace)
         .def("mod_drop_inplace_ct",    &Operator::mod_drop_inplace_ct)
