@@ -579,8 +579,10 @@ struct Operator {
 
             heongpu::Ciphertext<SCHEME> rot_x;
             if (s == 0) {
-                // Identity branch: copy of ct_x at original depth.
+                // Identity branch: clone ct_x and mod-drop one level so
+                // the subsequent mul_plain by diag@(d+1) matches.
                 rot_x = *ct_x.ct;
+                ops.mod_drop_inplace(rot_x);
             } else {
                 // per_block_rotate_left(s): mask_low ⊙ rot(s) + mask_high ⊙ rot(s - block).
                 heongpu::Ciphertext<SCHEME> rot_left  = *ct_x.ct;
@@ -596,26 +598,14 @@ struct Operator {
                 rot_x = std::move(rot_left);
             }
 
-            // Multiply by diagonal (at rot_x's depth).
+            // Multiply by diagonal (now both branches at depth d+1).
             ops.multiply_plain_inplace(rot_x, *diag_pts[k].pt);
-            ops.rescale_inplace(rot_x);            // diag consumed 1 level
+            ops.rescale_inplace(rot_x);            // → depth d+2
 
             if (!result) {
                 result = std::make_shared<heongpu::Ciphertext<SCHEME>>(std::move(rot_x));
             } else {
-                // Inline add_inplace_match: i==0 term lands at depth+1
-                // and i!=0 terms at depth+2; drop the shallower one.
-                int dr = result->depth();
-                int dx = rot_x.depth();
-                if (dr == dx) {
-                    ops.add_inplace(*result, rot_x);
-                } else if (dr < dx) {
-                    while (result->depth() < dx) ops.mod_drop_inplace(*result);
-                    ops.add_inplace(*result, rot_x);
-                } else {
-                    while (rot_x.depth() < dr) ops.mod_drop_inplace(rot_x);
-                    ops.add_inplace(*result, rot_x);
-                }
+                ops.add_inplace(*result, rot_x);
             }
         }
 
