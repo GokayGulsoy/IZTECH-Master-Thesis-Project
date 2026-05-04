@@ -319,22 +319,38 @@ def prepare_colmajor_keys(
 ) -> int:
     """Pre-register every rotation step needed by the col-major kernels.
 
-    Generates Galois keys for shifts ``±d * L`` for ``d ∈ [1, max_dim)``.
-    These cover:
-      - ``linear_colmajor`` (uses +d*L for d ∈ [0, in_dim_padded))
-      - ``per_col_sum_then_broadcast`` (uses ±L, ±2L, ... ±max_dim/2 · L)
-      - replication doubling in ``linear_colmajor``
-      - ``attn_apply_nexus`` row-extraction rotations
+    With BSGS in ``linear_colmajor`` we only need ``bs + gs ≈ 2·sqrt(max_dim)``
+    distinct shifts (positive and negative) instead of ``max_dim`` of them.
+    Also covers ``per_col_sum_then_broadcast`` which uses ±L, ±2L, ±4L, ...
+
+    For BERT-base hidden_padded=1024 → bs=gs=32 → 62 keys × ~32 MB ≈ 2 GB
+    (vs 1023 keys × 32 MB ≈ 33 GB in the naive variant — which OOMs on H100).
 
     Returns the number of *new* shifts registered.
     """
     if not hasattr(backend, "register_rotation_keys"):
         return 0
-    shifts = []
-    for d in range(1, max_dim):
-        shifts.append(d * L)
-        shifts.append(-d * L)
-    return backend.register_rotation_keys(shifts)
+    n = 1
+    while n < max_dim:
+        n <<= 1
+    log2_n = n.bit_length() - 1
+    bs = 1 << (log2_n // 2)
+    gs = n // bs
+    shifts = set()
+    # BSGS baby/giant for linear_colmajor
+    for i in range(1, bs):
+        shifts.add(i * L)
+        shifts.add(-i * L)
+    for j in range(1, gs):
+        shifts.add(j * bs * L)
+        shifts.add(-j * bs * L)
+    # per_col_sum_then_broadcast uses ±L, ±2L, ±4L, ..., ±n/2 · L
+    s = L
+    while s < n * L:
+        shifts.add(s)
+        shifts.add(-s)
+        s <<= 1
+    return backend.register_rotation_keys(sorted(shifts))
 
 
 # ---------------------------------------------------------------------------
@@ -351,6 +367,7 @@ def linear_colmajor(
     in_dim: int,
     out_dim: int,
     bias: Optional[np.ndarray] = None,
+    bsgs: bool = True,
 ) -> Ciphertext:
     """Halevi-Shoup linear projection in column-major slot layout.
 
@@ -358,18 +375,21 @@ def linear_colmajor(
     Output ct slot[j*L + i] = Y[i, j] = Σ_k W[j, k] · X[i, k]
             for j ∈ [0, out_dim) (slots beyond out_dim*L are zero).
 
-    Algorithm:
-      For d ∈ [0, in_dim):
-        x_rot   = rotate(x_ct, d * L)   # cyclically shifts whole columns
-        diag_d  = plaintext: slot[j*L + i] = W[j, (j+d) mod in_dim]
-                  for j ∈ [0, out_dim), i ∈ [0, L); 0 elsewhere
-        y      += mul_plain(x_rot, diag_d)
-      add bias if given (bias[j] replicated across slots [j*L, j*L+L))
+    With ``bsgs=True`` (default): uses baby-step / giant-step factorisation
+    n = bs · gs (with bs = gs = sqrt(n)) so only ``bs + gs − 2`` rotations
+    and ``bs + gs`` rotation keys are required (vs ``n`` of each in the
+    naive HS formulation). For BERT-base hidden=768 → n_padded=1024 →
+    bs = gs = 32, so 62 rotations / 62 keys instead of 1023 / 1023.
 
-    Cost: in_dim mul_plain + in_dim rotations + in_dim adds.
+    BSGS identity (cyclic):
+        Σ_{d=0}^{n-1} rot(x, d·L) ⊙ diag_d
+      = Σ_j rot( Σ_i rot(x, i·L) ⊙ rot(diag_{i+j·bs}, -j·bs·L), j·bs·L )
+
+    Cost: n mul_plain + (bs+gs−2) rotations + n adds.
     Depth: +1 (single mul_plain rescale).
 
-    Constraint: in_dim * L ≤ num_slots AND out_dim * L ≤ num_slots.
+    Constraint: in_dim_padded · L ≤ num_slots, max_cols = num_slots/L
+    must be a power of 2.
     """
     n_slots = backend.capabilities.n_slots
     if W.shape != (out_dim, in_dim):
@@ -417,29 +437,69 @@ def linear_colmajor(
         cur <<= 1
 
     n = in_dim_padded  # number of diagonals
-    Y: Optional[Ciphertext] = None
-    for d in range(n):
-        if d == 0:
-            x_rot = x_replicated
-        else:
-            x_rot = backend.rotate(x_replicated, d * L)
-        diag = [0.0] * n_slots
-        any_nz = False
+
+    def _build_diag(d: int) -> List[float]:
+        """Plaintext for diagonal d: slot[j*L + i] = W[j, (j+d) mod in_dim]
+        for j ∈ [0, out_dim), 0 elsewhere (and 0 if (j+d) is in padded region)."""
+        v = [0.0] * n_slots
         for j in range(out_dim):
             col_src = (j + d) % n
             if col_src >= in_dim:
-                continue  # padded column, weight is implicitly zero
+                continue
             w = float(W[j, col_src])
             if w == 0.0:
                 continue
-            any_nz = True
             base = j * L
             for i in range(L):
-                diag[base + i] = w
-        if not any_nz:
-            continue
-        term = backend.mul_plain(x_rot, diag)
-        Y = term if Y is None else backend.add(Y, term)
+                v[base + i] = w
+        return v
+
+    def _rot_left_plain(v: List[float], k: int) -> List[float]:
+        """Return v'[m] = v[(m + k) mod n_slots] (left rotation by k slots)."""
+        k %= n_slots
+        if k == 0:
+            return v
+        return v[k:] + v[:k]
+
+    Y: Optional[Ciphertext] = None
+
+    if not bsgs or n <= 4:
+        # Naive HS path (kept for tiny test cases / sanity checks).
+        for d in range(n):
+            x_rot = x_replicated if d == 0 else backend.rotate(x_replicated, d * L)
+            diag = _build_diag(d)
+            if not any(diag):
+                continue
+            term = backend.mul_plain(x_rot, diag)
+            Y = term if Y is None else backend.add(Y, term)
+    else:
+        # BSGS: pick bs = gs = sqrt(n) (n is a power of 2 ⇒ bs = 2^(log2(n)//2)).
+        log2_n = n.bit_length() - 1
+        bs = 1 << (log2_n // 2)
+        gs = n // bs
+        # Pre-compute baby rotations of x: rot(x, i*L) for i ∈ [0, bs).
+        x_baby: List[Ciphertext] = [x_replicated]
+        for i in range(1, bs):
+            x_baby.append(backend.rotate(x_replicated, i * L))
+        # Outer giant loop.
+        for j in range(gs):
+            inner: Optional[Ciphertext] = None
+            shift = -j * bs * L  # right-shift the diag plaintext by j*bs*L
+            for i in range(bs):
+                d = i + j * bs
+                diag = _build_diag(d)
+                if not any(diag):
+                    continue
+                # rot(diag, -j*bs*L) at the plaintext level = left-rotate by shift.
+                # Left rotation by negative k = right rotation by |k|.
+                diag_shifted = _rot_left_plain(diag, shift)
+                term = backend.mul_plain(x_baby[i], diag_shifted)
+                inner = term if inner is None else backend.add(inner, term)
+            if inner is None:
+                continue
+            if j != 0:
+                inner = backend.rotate(inner, j * bs * L)
+            Y = inner if Y is None else backend.add(Y, inner)
 
     if Y is None:
         Y = backend.mul_plain(x_ct, [0.0] * n_slots)
