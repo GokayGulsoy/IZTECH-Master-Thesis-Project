@@ -954,9 +954,18 @@ def enc_qk_scores_diagonal(
     if head_dim > block_attn:
         raise ValueError(f"head_dim {head_dim} > block_attn {block_attn}")
 
+    # Replicate K to 2L tokens so rotate(K, d*block_attn) yields the
+    # correct cyclic shift K[(i+d) mod L]. Cost: 1 rotate + 1 add.
+    if 2 * L * block_attn > num_slots:
+        raise ValueError(
+            f"2*L*block_attn={2*L*block_attn} > num_slots={num_slots}; "
+            f"diagonal attention does not fit"
+        )
+    K_cyc = backend.add(K_at, backend.rotate(K_at, -L * block_attn))
+
     S: Optional[Ciphertext] = None
     for d in range(L):
-        K_rot = backend.rotate(K_at, d * block_attn) if d > 0 else K_at
+        K_rot = backend.rotate(K_cyc, d * block_attn) if d > 0 else K_cyc
         prod = backend.mul(Q_at, K_rot)
         diag_bc = per_block_sum_then_broadcast(
             backend, prod, hidden_dim=head_dim, block=block_attn,
@@ -1004,6 +1013,13 @@ def enc_attention_apply_diagonal(
     if head_dim > block_attn:
         raise ValueError(f"head_dim {head_dim} > block_attn {block_attn}")
 
+    # Same cyclic-shift trick as in qk_scores: replicate V to 2L copies.
+    if 2 * L * block_attn > num_slots:
+        raise ValueError(
+            f"2*L*block_attn={2*L*block_attn} > num_slots={num_slots}"
+        )
+    V_cyc = backend.add(V_at, backend.rotate(V_at, -L * block_attn))
+
     Out: Optional[Ciphertext] = None
     for d in range(L):
         # 1. Pick the d-column of A_diag: keep only slot i*block_attn + d.
@@ -1014,29 +1030,20 @@ def enc_attention_apply_diagonal(
                 mask[slot] = 1.0
         a_d = backend.mul_plain(A_diag, mask)
 
-        # 2. Broadcast each isolated value across slots [i*block_attn,
-        #    i*block_attn + head_dim) using bare doubling rotations.
-        #    The value sits at slot i*block_attn + d (d may be > 0).
-        #    First, shift it to slot i*block_attn (per-block left rotate
-        #    by d) — but per_block rotates cost 1 level. Cheaper: do
-        #    NOT realign; instead broadcast across the full block with
-        #    bare rotates of powers of 2, then mask back to head_dim.
-        #    Because slot s in [i*block_attn, (i+1)*block_attn) only
-        #    has one nonzero at offset d, after log2(block_attn)
-        #    bare-rotates the value populates the whole block.
+        # 2. Bring isolated value to slot 0 of each block via a single
+        #    GLOBAL left-rotate by d. Then bare-doubling broadcast
+        #    across head_dim slots only (no inter-block leak since the
+        #    final shift is head_dim/2 ≤ block_attn/2).
+        if d > 0:
+            a_d = backend.rotate(a_d, d)
         bcast = a_d
         step = 1
-        while step < block_attn:
-            bcast = backend.add(bcast, backend.rotate(bcast, step))
+        while step < head_dim:
+            bcast = backend.add(bcast, backend.rotate(bcast, -step))
             step <<= 1
-        # bcast now has the d-column value broadcast across the full
-        # block_attn slots of every token block (and zero elsewhere).
-        # We do NOT need to mask to head_dim — V_at already has zeros
-        # in slots [head_dim..block_attn) so the multiplication zeros
-        # those products.
 
-        # 3. Rotate V_at by d token-blocks (V[(i+d) mod L] aligns with i).
-        V_rot = backend.rotate(V_at, d * block_attn) if d > 0 else V_at
+        # 3. Rotate V cyclically by d token-blocks.
+        V_rot = backend.rotate(V_cyc, d * block_attn) if d > 0 else V_cyc
 
         # 4. Accumulate.
         prod = backend.mul(bcast, V_rot)
