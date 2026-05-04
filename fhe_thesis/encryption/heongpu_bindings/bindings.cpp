@@ -578,11 +578,13 @@ struct Operator {
             const int s = shifts[k];
 
             heongpu::Ciphertext<SCHEME> rot_x;
+            int rot_x_depth_target;
             if (s == 0) {
-                // Identity branch: clone ct_x at original depth d.
+                // Identity branch: rot_x stays at ct_x.depth().
                 rot_x = *ct_x.ct;
+                rot_x_depth_target = ct_x.ct->depth();
             } else {
-                // per_block_rotate_left(s): mask_low ⊙ rot(s) + mask_high ⊙ rot(s - block).
+                // per_block_rotate_left(s).
                 heongpu::Ciphertext<SCHEME> rot_left  = *ct_x.ct;
                 ops.rotate_rows_inplace(rot_left, *gk.gk, s);
                 ops.multiply_plain_inplace(rot_left, *low_pts[k].pt);
@@ -592,23 +594,21 @@ struct Operator {
                 ops.multiply_plain_inplace(rot_right, *high_pts[k].pt);
 
                 ops.add_inplace(rot_left, rot_right);
-                ops.rescale_inplace(rot_left);    // mask consumed 1 level → depth d+1
+                ops.rescale_inplace(rot_left);    // → depth d+1
                 rot_x = std::move(rot_left);
+                rot_x_depth_target = ct_x.ct->depth() + 1;
             }
 
-            // Drop a copy of the diagonal plaintext to rot_x's current
-            // depth (diag was encoded at depth 0).
-            heongpu::Plaintext<SCHEME> diag_copy = *diag_pts[k].pt;
-            while (diag_copy.depth() < rot_x.depth()) {
-                ops.mod_drop_inplace(diag_copy);
-            }
-            ops.multiply_plain_inplace(rot_x, diag_copy);
+            // Multiply by diagonal: caller pre-encoded diag_pts[k] at the
+            // correct depth (depth_d for s==0 paths, depth_d+1 for s!=0).
+            // We DO NOT mod-drop inside C++ — the Python wrapper builds
+            // each plaintext at the exact depth needed.
+            ops.multiply_plain_inplace(rot_x, *diag_pts[k].pt);
             ops.rescale_inplace(rot_x);
 
             if (!result) {
                 result = std::make_shared<heongpu::Ciphertext<SCHEME>>(std::move(rot_x));
             } else {
-                // i==0 lands at depth d+1; i!=0 at depth d+2.
                 int dr = result->depth();
                 int dx = rot_x.depth();
                 if (dr == dx) {
