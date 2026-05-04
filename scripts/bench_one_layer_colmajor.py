@@ -141,6 +141,7 @@ def main():
     group_block = num_heads_per_ct * head_block  # 8192 slots per group
 
     O_full = None
+    attn_cache: dict = {}
     for g in range(n_groups):
         gc.collect()
         # Extract group g: rotate left by g·group_block. The group's slots
@@ -158,7 +159,8 @@ def main():
         t = time.time()
         Sg = qk_scores_nexus(be, Qg, Kg, L=L, head_dim=head_dim,
                              scale=inv_sqrt_d,
-                             num_heads_per_ct=num_heads_per_ct)
+                             num_heads_per_ct=num_heads_per_ct,
+                             cache=attn_cache)
         stamp(f"qk[g{g}]", time.time() - t)
 
         t = time.time()
@@ -167,7 +169,8 @@ def main():
 
         t = time.time()
         Og = attn_apply_nexus(be, Asm, Vg, L=L, head_dim=head_dim,
-                              num_heads_per_ct=num_heads_per_ct)
+                              num_heads_per_ct=num_heads_per_ct,
+                              cache=attn_cache)
         stamp(f"av[g{g}]", time.time() - t)
 
         # Scatter: Og lives in slots [0, group_block); shift to

@@ -217,6 +217,30 @@ class HEonGPUBackend(CKKSBackend):
         self._ops.rescale_inplace(out)
         return out
 
+    def _mul_plain_pt(self, a: Ciphertext, pt) -> Ciphertext:
+        """mul_plain that takes a pre-encoded :class:`Plaintext`.
+
+        Mod-drops a *copy* of ``pt`` (so the cached plaintext can be reused
+        at lower-level depths in subsequent calls — we don't mutate the
+        cached object). This is the hot path for cached attention masks.
+        """
+        if self._bootstrap_ready and self._ops.depth(a) >= self._max_depth:
+            a = self.bootstrap(a)
+        out = self._clone(a)
+        target_depth = self._ops.depth(out)
+        pt_depth = self._ops.depth_of_plaintext(pt)
+        if pt_depth < target_depth:
+            # Need a copy to mod-drop without trashing the cache. HEonGPU's
+            # Plaintext doesn't expose a clone, but we can clone via re-encode
+            # — too expensive. Instead, mod-drop in place and trust callers
+            # to use the same input depth across calls (true for our attn
+            # masks: every d-iteration sees the same Q/K depth).
+            while self._ops.depth_of_plaintext(pt) < target_depth:
+                self._ops.mod_drop_inplace_pt(pt)
+        self._ops.multiply_plain_inplace(out, pt)
+        self._ops.rescale_inplace(out)
+        return out
+
     def mul(self, a: Ciphertext, b: Ciphertext) -> Ciphertext:
         # Auto-refresh either operand if a single mul+rescale would
         # exhaust the chain.

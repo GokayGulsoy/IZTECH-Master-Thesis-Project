@@ -102,6 +102,7 @@ def qk_scores_nexus(
     head_dim: int,
     scale: float,
     num_heads_per_ct: int = 1,
+    cache: Optional[dict] = None,
 ) -> Ciphertext:
     """NEXUS-style diagonal Q@K^T in column-major layout.
 
@@ -109,6 +110,11 @@ def qk_scores_nexus(
     side at slot ranges ``[h·head_dim·L, (h+1)·head_dim·L)`` for h ∈
     [0, num_heads_per_ct). The output similarly packs S for each head
     (in row-aligned diagonal layout) at the same slot ranges.
+
+    ``cache`` (optional dict): if provided, top/bot/place masks are
+    encoded once and stored in this dict; subsequent calls with the same
+    geometry reuse the encoded plaintexts. The cache is keyed by
+    (L, head_dim, num_heads_per_ct, scale) for safety.
 
     Returns a single ct in **row-aligned diagonal layout**:
         slot[h*H + d * L + i] = scale · S_h[i, (i+d) mod L]
@@ -122,14 +128,17 @@ def qk_scores_nexus(
             f"num_heads_per_ct·L·head_dim={total} > num_slots={n_slots}"
         )
 
-    S: Optional[Ciphertext] = None
-    n_cols = num_heads_per_ct * head_dim  # total columns across all heads
-
-    for d in range(L):
-        # Step 1+2: cyclic-shift K within each column by d (across ALL columns).
-        if d == 0:
-            K_rot = K_ct
-        else:
+    n_cols = num_heads_per_ct * head_dim
+    cache_key = ("qk", L, head_dim, num_heads_per_ct, scale)
+    if cache is not None and cache_key in cache:
+        cached = cache[cache_key]
+        top_pts = cached["top_pts"]
+        bot_pts = cached["bot_pts"]
+        place_pt = cached["place_pt"]
+    else:
+        top_pts: List = [None]  # index by d; d=0 unused
+        bot_pts: List = [None]
+        for d in range(1, L):
             top_mask = [0.0] * n_slots
             bot_mask = [0.0] * n_slots
             for j in range(n_cols):
@@ -138,11 +147,34 @@ def qk_scores_nexus(
                     top_mask[base + i] = 1.0
                 for i in range(L - d, L):
                     bot_mask[base + i] = 1.0
+            top_pts.append(backend._encode(top_mask))
+            bot_pts.append(backend._encode(bot_mask))
+        # place mask: scale at slots [h*H, h*H+L) for each head.
+        pmask = [0.0] * n_slots
+        for h in range(num_heads_per_ct):
+            base = h * H
+            for i in range(L):
+                pmask[base + i] = float(scale)
+        place_pt = backend._encode(pmask)
+        if cache is not None:
+            cache[cache_key] = {
+                "top_pts": top_pts,
+                "bot_pts": bot_pts,
+                "place_pt": place_pt,
+            }
+
+    S: Optional[Ciphertext] = None
+
+    for d in range(L):
+        # Step 1+2: cyclic-shift K within each column by d (across ALL columns).
+        if d == 0:
+            K_rot = K_ct
+        else:
             K_left  = backend.rotate(K_ct, d)
             K_right = backend.rotate(K_ct, d - L)
             K_rot = backend.add(
-                backend.mul_plain(K_left, top_mask),
-                backend.mul_plain(K_right, bot_mask),
+                backend._mul_plain_pt(K_left, top_pts[d]),
+                backend._mul_plain_pt(K_right, bot_pts[d]),
             )
 
         # Step 3: Q * K_rot
@@ -157,13 +189,7 @@ def qk_scores_nexus(
             step <<= 1
 
         # Step 5+6: place mask scaled by `scale`, replicated per head.
-        # 1.0 in slots [h*H, h*H + L) for h ∈ [0, num_heads_per_ct).
-        place_mask = [0.0] * n_slots
-        for h in range(num_heads_per_ct):
-            base = h * H
-            for i in range(L):
-                place_mask[base + i] = float(scale)
-        masked = backend.mul_plain(sum_ct, place_mask)
+        masked = backend._mul_plain_pt(sum_ct, place_pt)
         if d > 0:
             masked = backend.rotate(masked, -d * L)
 
@@ -187,11 +213,14 @@ def attn_apply_nexus(
     L: int,
     head_dim: int,
     num_heads_per_ct: int = 1,
+    cache: Optional[dict] = None,
 ) -> Ciphertext:
     """NEXUS-style diagonal A @ V in column-major layout.
 
     Multi-head: A and V each pack ``num_heads_per_ct`` heads in adjacent
     slot regions of width ``head_dim·L``; output is similarly packed.
+
+    ``cache``: same convention as :func:`qk_scores_nexus`.
     """
     n_slots = backend.capabilities.n_slots
     H = head_dim * L
@@ -201,15 +230,41 @@ def attn_apply_nexus(
             f"num_heads_per_ct·L·head_dim={total} > num_slots={n_slots}"
         )
 
-    Out: Optional[Ciphertext] = None
     n_cols = num_heads_per_ct * head_dim
+    cache_key = ("av", L, head_dim, num_heads_per_ct)
+    if cache is not None and cache_key in cache:
+        cached = cache[cache_key]
+        first_L_pt = cached["first_L_pt"]
+        top_pts = cached["top_pts"]
+        bot_pts = cached["bot_pts"]
+    else:
+        first_L_mask = [0.0] * n_slots
+        for h in range(num_heads_per_ct):
+            base = h * H
+            for i in range(L):
+                first_L_mask[base + i] = 1.0
+        first_L_pt = backend._encode(first_L_mask)
+        top_pts: List = [None]
+        bot_pts: List = [None]
+        for d in range(1, L):
+            top_mask = [0.0] * n_slots
+            bot_mask = [0.0] * n_slots
+            for j in range(n_cols):
+                base = j * L
+                for i in range(L - d):
+                    top_mask[base + i] = 1.0
+                for i in range(L - d, L):
+                    bot_mask[base + i] = 1.0
+            top_pts.append(backend._encode(top_mask))
+            bot_pts.append(backend._encode(bot_mask))
+        if cache is not None:
+            cache[cache_key] = {
+                "first_L_pt": first_L_pt,
+                "top_pts": top_pts,
+                "bot_pts": bot_pts,
+            }
 
-    # Per-head "first L" mask: 1.0 in slots [h*H, h*H + L) for each head.
-    first_L_mask = [0.0] * n_slots
-    for h in range(num_heads_per_ct):
-        base = h * H
-        for i in range(L):
-            first_L_mask[base + i] = 1.0
+    Out: Optional[Ciphertext] = None
 
     for d in range(L):
         # Step 1: bring row d of each head's A to slots [h*H, h*H + L).
@@ -217,7 +272,7 @@ def attn_apply_nexus(
             a_row = A_ct
         else:
             a_row = backend.rotate(A_ct, d * L)
-        a_row = backend.mul_plain(a_row, first_L_mask)
+        a_row = backend._mul_plain_pt(a_row, first_L_pt)
 
         # Step 2: broadcast row d across head_dim cols PER HEAD (stop at H).
         bcast = a_row
@@ -230,19 +285,11 @@ def attn_apply_nexus(
         if d == 0:
             V_shift = V_ct
         else:
-            top_mask = [0.0] * n_slots
-            bot_mask = [0.0] * n_slots
-            for j in range(n_cols):
-                base = j * L
-                for i in range(L - d):
-                    top_mask[base + i] = 1.0
-                for i in range(L - d, L):
-                    bot_mask[base + i] = 1.0
             V_left  = backend.rotate(V_ct, d)
             V_right = backend.rotate(V_ct, d - L)
             V_shift = backend.add(
-                backend.mul_plain(V_left, top_mask),
-                backend.mul_plain(V_right, bot_mask),
+                backend._mul_plain_pt(V_left, top_pts[d]),
+                backend._mul_plain_pt(V_right, bot_pts[d]),
             )
 
         # Step 4+5: product and accumulate.
