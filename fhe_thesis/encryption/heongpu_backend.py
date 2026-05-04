@@ -691,28 +691,29 @@ class HEonGPUBackend(CKKSBackend):
         if cached_diags is not None:
             all_diag0_pts, all_diagj_pts = cached_diags
         else:
-            # Build the rolled-diagonal vectors in pure Python first…
-            diag0_vecs: List[List[float]] = []
-            diagj_vecs: List[List[float]] = []
+            # Encode every diagonal once up-front. Each encode is a GPU
+            # NTT (~3-4 ms at N=2^16) and dominates first-call cost; on
+            # repeat calls the diag cache yields a 50× speedup.
+            all_diag0_pts: list = []
+            all_diagj_pts: list = []
             for g in range(b2):
                 gs = g * b1
                 d0 = diagonals[gs] if gs < n else None
                 if d0 is None:
                     d0 = zero_pad
-                diag0_vecs.append(self._per_block_roll(d0, gs, block, num_slots))
+                pt_d0 = self._encode(self._per_block_roll(d0, gs, block, num_slots))
+                while self._ops.depth_of_plaintext(pt_d0) < x_depth:
+                    self._ops.mod_drop_inplace_pt(pt_d0)
+                all_diag0_pts.append(pt_d0)
                 for j in range(1, b1):
                     idx = gs + j
                     dj = diagonals[idx] if idx < n else None
                     if dj is None:
                         dj = zero_pad
-                    diagj_vecs.append(self._per_block_roll(dj, gs, block, num_slots))
-            # …then submit each batch to the C++ batched encoder. This
-            # collapses ~b2 + b2*(b1-1) Python<->C++ boundary crossings
-            # into 2 trips, each releasing the GIL.
-            all_diag0_pts = self._ops.encode_many_drop(
-                [self._pad(v) for v in diag0_vecs], self._scale, x_depth)
-            all_diagj_pts = self._ops.encode_many_drop(
-                [self._pad(v) for v in diagj_vecs], self._scale, x_depth + 1)
+                    pt_dj = self._encode(self._per_block_roll(dj, gs, block, num_slots))
+                    while self._ops.depth_of_plaintext(pt_dj) < x_depth + 1:
+                        self._ops.mod_drop_inplace_pt(pt_dj)
+                    all_diagj_pts.append(pt_dj)
             if diag_cache_key is not None:
                 self._bsgs_diag_cache[diag_cache_key] = (all_diag0_pts, all_diagj_pts)
 
