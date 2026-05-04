@@ -51,6 +51,12 @@ def main():
     d1 = be._ops.depth(h.cts[0])
     log(f"  W1 wall={dt1:.3f}s  depth={d1}  (Δ={d1-d0})")
 
+    log("W1 RECALL (same weights, second call) ...")
+    t = time.time()
+    _ = enc_linear_matrix(be, ct_x, W1, bias=b1)
+    dt1b = time.time() - t
+    log(f"  W1#2 wall={dt1b:.3f}s   (key gen + diag cache hit if any)")
+
     log("W2 (hidden=3072 → 768) ...")
     t = time.time()
     h2 = enc_linear_matrix(be, h, W2, bias=b2)
