@@ -126,8 +126,13 @@ class HEonGPUBackend(CKKSBackend):
         # Key: (weight_id, x_depth) → (diag0_pts: list, diagj_pts: list).
         # On first call we encode once and stash; subsequent calls at
         # the same x_depth reuse the GPU plaintexts — the dominant cost
-        # of a BSGS matmul.
+        # of a BSGS matmul. NOTE: each cached weight at block=4096 holds
+        # ~64 GB of plaintexts; only useful when the SAME weight is
+        # called repeatedly (e.g. inference over many batches) at the
+        # SAME input depth. Disabled by default; enable via
+        # ``backend.bsgs_diag_cache_enabled = True``.
         self._bsgs_diag_cache: Dict[Tuple[int, int], Tuple[list, list]] = {}
+        self.bsgs_diag_cache_enabled = False
         # Becomes True after configure_bootstrapping() succeeds; gates
         # auto-refresh inside mul/mul_plain.
         self._bootstrap_ready = False
@@ -668,7 +673,11 @@ class HEonGPUBackend(CKKSBackend):
         )
 
         # ── 3. Diagonal plaintext cache (per (weight_id, x_depth)) ──
-        diag_cache_key = (weight_id, x_depth) if weight_id is not None else None
+        diag_cache_key = (
+            (weight_id, x_depth)
+            if (weight_id is not None and self.bsgs_diag_cache_enabled)
+            else None
+        )
         cached_diags = (
             self._bsgs_diag_cache.get(diag_cache_key)
             if diag_cache_key is not None else None

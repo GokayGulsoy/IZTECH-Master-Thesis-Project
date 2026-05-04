@@ -45,17 +45,21 @@ def main():
     log(f"  initial depth: {d0}")
 
     log("W1 (hidden=768 → 3072) ...")
+    be.bsgs_diag_cache_enabled = True
     t = time.time()
     h = enc_linear_matrix(be, ct_x, W1, bias=b1)
     dt1 = time.time() - t
     d1 = be._ops.depth(h.cts[0])
     log(f"  W1 wall={dt1:.3f}s  depth={d1}  (Δ={d1-d0})")
 
-    log("W1 RECALL (same weights, second call) ...")
+    log("W1 RECALL (cache hit) ...")
     t = time.time()
     _ = enc_linear_matrix(be, ct_x, W1, bias=b1)
     dt1b = time.time() - t
-    log(f"  W1#2 wall={dt1b:.3f}s   (key gen + diag cache hit if any)")
+    log(f"  W1#2 wall={dt1b:.3f}s   (diag cache hit, mask cache hit)")
+    # Drop diag cache before next weight to free GPU memory.
+    be._bsgs_diag_cache.clear()
+    be.bsgs_diag_cache_enabled = False
 
     log("W2 (hidden=3072 → 768) ...")
     t = time.time()
