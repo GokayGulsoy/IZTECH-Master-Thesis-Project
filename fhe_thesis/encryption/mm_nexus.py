@@ -178,3 +178,67 @@ def matrix_mul(
             ops.add_inplace_match(acc, term)
         out_cts.append(acc)
     return out_cts
+
+
+# ---------------------------------------------------------------------------
+# Phase 8d-2: optimized linear via coeff-domain inner product
+# ---------------------------------------------------------------------------
+
+
+def _encode_weight_row_inner_product(backend, w: np.ndarray):
+    """Encode a length-N weight vector ``w`` so that ``(x · enc(w))[0] = <x, w>``.
+
+    The constant coefficient of the negacyclic polynomial product
+    ``(X · W) mod (X^N + 1)`` equals::
+
+        (x · w)[0] = x_0 w_0  +  Σ_{k=1}^{N-1} (-1) · x_k · w_{N-k}
+
+    so by setting ``W[0] = w_0`` and ``W[k] = -w_{N-k}`` for k ≥ 1, the
+    constant coefficient becomes ``Σ_j x_j w_j`` — the desired inner product.
+    """
+    N = backend._N
+    if w.shape[0] != N:
+        raise ValueError(f"weight vector length {w.shape[0]} != N={N}")
+    enc_coeffs = np.empty(N, dtype=np.float64)
+    enc_coeffs[0] = float(w[0])
+    enc_coeffs[1:] = -w[N - 1 : 0 : -1]  # k=1..N-1: -w_{N-k}
+    return backend._encoder.encode_coeff(
+        backend._ctx, enc_coeffs.tolist(), backend._scale
+    )
+
+
+def linear_compressed(
+    backend,
+    W: np.ndarray,
+    x_compressed,
+) -> List:
+    """Optimized linear ``y = W @ x`` taking the COMPRESSED input ciphertext.
+
+    Inputs
+    ------
+    W : (M, N) plaintext weight matrix.
+    x_compressed : ONE Ciphertext holding ``Σ x_j X^j`` (output of
+        :func:`enc_compress` with ``len(values) = N``).
+
+    Returns
+    -------
+    list of M ciphertexts where ``y[i]`` has the scalar ``(W @ x)[i]`` at
+    polynomial coefficient 0 (and zeros at the other coefficients up to
+    encryption noise). Equivalent slot-domain interpretation:
+    ``decoded.mean() / N == (W @ x)[i] / N``  — i.e. the ciphertext encodes
+    the *constant polynomial* whose value is ``(W @ x)[i]``, scaled by 1/N
+    in the slot domain because the constant polynomial has only its 0th
+    Fourier coefficient nonzero. Callers reading slot-mean get the value
+    directly (sum over N coeffs / N = const poly value).
+
+    Cost: M ``mul_plain`` operations (one per output row). No decompress
+    needed — this is the NEXUS linear-layer trick.
+    """
+    M, Ndim = W.shape
+    if Ndim != backend._N:
+        raise ValueError(f"W width {Ndim} must equal ring N={backend._N}")
+    out: List = []
+    for i in range(M):
+        pt_w = _encode_weight_row_inner_product(backend, W[i])
+        out.append(backend._mul_plain_pt(x_compressed, pt_w))
+    return out
