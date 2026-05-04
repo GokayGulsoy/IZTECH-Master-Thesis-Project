@@ -7,7 +7,7 @@ import numpy as np
 
 from fhe_thesis.encryption.heongpu_backend import HEonGPUBackend
 from fhe_thesis.encryption.ops_attention_nexus import (
-    pack_colmajor, unpack_colmajor, linear_colmajor,
+    pack_colmajor, unpack_colmajor, linear_colmajor, prepare_colmajor_keys,
 )
 
 
@@ -41,7 +41,22 @@ def main():
     log("Pack X col-major...")
     X_ct = pack_colmajor(be, X, L=L, head_dim=in_dim)
 
-    log("Linear col-major...")
+    # Pre-register all rotation keys we'll need: d*L for d in [1, max(in_dim_padded, hidden))
+    # in_dim_padded = next pow2 of in_dim.
+    in_dim_padded = 1
+    while in_dim_padded < in_dim:
+        in_dim_padded <<= 1
+    log(f"Pre-register rotation keys (max_dim={in_dim_padded})...")
+    t = time.time()
+    n_new = prepare_colmajor_keys(be, L=L, max_dim=in_dim_padded)
+    log(f"  +{n_new} keys in {time.time()-t:.1f}s")
+
+    log("Linear col-major (cold)...")
+    t = time.time()
+    Y_ct = linear_colmajor(be, X_ct, W, L=L, in_dim=in_dim, out_dim=out_dim, bias=b)
+    log(f"  wall = {(time.time()-t)*1000:.0f}ms  depth={be._ops.depth(Y_ct)}")
+
+    log("Linear col-major (warm)...")
     t = time.time()
     Y_ct = linear_colmajor(be, X_ct, W, L=L, in_dim=in_dim, out_dim=out_dim, bias=b)
     log(f"  wall = {(time.time()-t)*1000:.0f}ms  depth={be._ops.depth(Y_ct)}")

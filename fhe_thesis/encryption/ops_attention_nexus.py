@@ -307,6 +307,37 @@ def attn_apply_nexus(
 
 
 # ---------------------------------------------------------------------------
+# Rotation-key pre-registration (avoids bit-decomp rotations)
+# ---------------------------------------------------------------------------
+
+
+def prepare_colmajor_keys(
+    backend: CKKSBackend,
+    *,
+    L: int,
+    max_dim: int,
+) -> int:
+    """Pre-register every rotation step needed by the col-major kernels.
+
+    Generates Galois keys for shifts ``±d * L`` for ``d ∈ [1, max_dim)``.
+    These cover:
+      - ``linear_colmajor`` (uses +d*L for d ∈ [0, in_dim_padded))
+      - ``per_col_sum_then_broadcast`` (uses ±L, ±2L, ... ±max_dim/2 · L)
+      - replication doubling in ``linear_colmajor``
+      - ``attn_apply_nexus`` row-extraction rotations
+
+    Returns the number of *new* shifts registered.
+    """
+    if not hasattr(backend, "register_rotation_keys"):
+        return 0
+    shifts = []
+    for d in range(1, max_dim):
+        shifts.append(d * L)
+        shifts.append(-d * L)
+    return backend.register_rotation_keys(shifts)
+
+
+# ---------------------------------------------------------------------------
 # Column-major linear projection (Halevi-Shoup with stride L)
 # ---------------------------------------------------------------------------
 
