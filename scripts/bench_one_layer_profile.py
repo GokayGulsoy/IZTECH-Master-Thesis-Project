@@ -34,7 +34,7 @@ def main():
     log("Init backend...")
     be = HEonGPUBackend(
         poly_modulus_degree=1 << 16,
-        q_prime_bits=(60,) + (50,) * 24,
+        q_prime_bits=(60,) + (50,) * 40,
         p_prime_bits=(60, 60, 60),
         scale_bits=50,
         bootstrap_hamming_weight=16,
