@@ -107,3 +107,56 @@ def decompress(backend, ct, gk_decomp) -> List:
         temp = new_temp
 
     return temp
+
+
+# ---------------------------------------------------------------------------
+# Phase 8d: plaintext-ciphertext MatMul on decompressed inputs
+# ---------------------------------------------------------------------------
+
+
+def matrix_mul(
+    backend,
+    W: np.ndarray,
+    decompressed_x: List,
+) -> List:
+    """Compute y = W @ x homomorphically.
+
+    Inputs
+    ------
+    W : (M, N) plaintext weight matrix.
+    decompressed_x : list of N broadcast ciphertexts where ``decompressed_x[j]``
+        is the decompression of input slot j (i.e. holds the polynomial
+        ``p(x) = N * x_j`` whose slot interpretation is the constant ``N*x_j``
+        broadcast across every slot).
+
+    Returns
+    -------
+    list of M ciphertexts where ``y[i]`` broadcasts the scalar ``(W @ x)[i]``
+    across every slot. The implicit ``N`` from decompression is cancelled here
+    by pre-dividing the weights by ``N``.
+
+    Cost: M * N ``mul_plain`` operations + M * (N-1) ``add_inplace``. Suitable
+    for small/medium M, N. For large matmul use the column-block fold.
+    """
+    M, Ndim = W.shape
+    if len(decompressed_x) != Ndim:
+        raise ValueError(
+            f"Expected {Ndim} decompressed ciphertexts, got {len(decompressed_x)}"
+        )
+    inv_N = 1.0 / float(backend._N)
+    # Pre-scale weights to undo the implicit N from coefficient broadcast.
+    W_scaled = W.astype(np.float64) * inv_N
+    n_slots = backend._num_slots
+
+    out_cts: List = []
+    for i in range(M):
+        # Accumulator: start with the j=0 term so we don't need an
+        # encrypt-of-zero.
+        w0 = float(W_scaled[i, 0])
+        acc = backend.mul_plain(decompressed_x[0], [w0] * n_slots)
+        for j in range(1, Ndim):
+            wj = float(W_scaled[i, j])
+            term = backend.mul_plain(decompressed_x[j], [wj] * n_slots)
+            backend._ops.add_inplace_match(acc, term)
+        out_cts.append(acc)
+    return out_cts
