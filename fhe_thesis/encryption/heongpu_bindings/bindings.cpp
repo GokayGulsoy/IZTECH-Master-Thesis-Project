@@ -248,6 +248,13 @@ struct Operator {
     int  depth(Ciphertext& a)                                    { return a.ct->depth(); }
     int  depth_pt(Plaintext& a)                                  { return a.pt->depth(); }
 
+    // Phase 8a: NEXUS-port primitive — in-place ct ← ct · x^k mod (x^N+1).
+    // k may be in [0, 2N); negative k is normalised modulo 2N. Depth and
+    // scale are preserved (no mod-drop, no rescale).
+    void multiply_power_of_x_inplace(Ciphertext& a, int k) {
+        ops.multiply_power_of_x_inplace(*a.ct, k);
+    }
+
     // Sum of two ciphertexts that may be at different chain levels.
     // Drops the deeper-chain (higher coeff_modulus_count) operand down
     // to the shallower one, then performs add_inplace on the lhs.
@@ -1111,6 +1118,11 @@ PYBIND11_MODULE(_heongpu, m) {
         .def("add_inplace_match",      &Operator::add_inplace_match)
         .def("rotate_rows_inplace",    &Operator::rotate_rows_inplace,
              py::arg("ct"), py::arg("galois_key"), py::arg("shift"))
+        .def("multiply_power_of_x_inplace", &Operator::multiply_power_of_x_inplace,
+             py::arg("ct"), py::arg("k"),
+             "Phase 8a: NEXUS port — in-place ct *= x^k mod (x^N+1). "
+             "Preserves depth & scale. Implemented via INTT + negacyclic "
+             "shift kernel + NTT-back inside HEonGPU.")
         // ── NEXUS Phase 5: stream-aware variants ──
         .def("multiply_plain_inplace_s", &Operator::multiply_plain_inplace_s,
              py::arg("ct"), py::arg("plain"), py::arg("stream"),

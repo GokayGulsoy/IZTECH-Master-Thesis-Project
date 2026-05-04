@@ -115,9 +115,9 @@ echo "==> Add multiply_power_of_x.cu to CMakeLists if not already there"
 CML=$HEDIR/src/CMakeLists.txt
 # Check several potential cmake files for the kernel listing
 for f in $(find $HEDIR/src -name CMakeLists.txt); do
-  if grep -q "multiplication.cu" "$f" && ! grep -q "multiply_power_of_x.cu" "$f"; then
+  if grep -q "lib/kernel/multiplication.cu" "$f" && ! grep -q "multiply_power_of_x.cu" "$f"; then
     echo "  patching $f"
-    sed -i 's|multiplication\.cu|multiplication.cu\n        multiply_power_of_x.cu|' "$f"
+    sed -i 's|lib/kernel/multiplication.cu|lib/kernel/multiplication.cu\n    lib/kernel/multiply_power_of_x.cu|' "$f"
   fi
 done
 
