@@ -54,19 +54,19 @@ def main() -> None:
         if j >= len(ctlist):
             continue
         pt = be._decryptor.decrypt(be._ctx, ctlist[j])
-        # decode as slots (default), divide by N to undo the broadcast
-        # scaling.
+        # The output ciphertext encodes the constant polynomial p(x) = N*c_j
+        # in coefficient form. Its slot-domain interpretation is therefore
+        # the constant value c_j broadcast in every slot. ``decoded.mean()``
+        # already equals c_j (HEonGPU's ``decode`` here returns the raw
+        # polynomial coefficients, the only nonzero one being coeff 0 = N*c_j;
+        # mean over N coefficients = c_j).
         decoded = np.array(be._encoder.decode(pt))
-        # Each slot should approximately equal values[j].
         broadcast_val = decoded.mean()
-        # NEXUS scales by N (encoder.scale * N because coeff -> slot
-        # broadcast accumulates N copies). Apply this correction.
-        broadcast_val = broadcast_val / N
         err = abs(broadcast_val - values[j])
         max_err = max(max_err, err)
         if j < 4 or j == N - 1:
             print(f"  j={j:4d}  expect={values[j]:+.4f}  got_mean={broadcast_val:+.4f}"
-                  f"  per-slot std={decoded.std()/N:.2e}  err={err:.2e}")
+                  f"  coeff[0]={decoded[0]:+.2f}  err={err:.2e}")
 
     print(f"max err = {max_err:.3e}")
     assert max_err < 1e-2, f"Decompress error too large: {max_err}"
