@@ -354,6 +354,64 @@ def per_block_sum(
     return out
 
 
+def per_block_sum_then_broadcast(
+    backend: CKKSBackend,
+    ct: Ciphertext,
+    *,
+    hidden_dim: int,
+    block: int,
+    num_slots: int,
+    scale: float = 1.0,
+) -> Ciphertext:
+    """Phase 7c: low-depth per-block sum + broadcast (1 level vs log2(block)).
+
+    Computes ``scale × Σ_valid x[j]`` for every block, broadcast across
+    the first ``hidden_dim`` slots of each block.
+
+    Algorithm:
+      1. Bare-rotate doubling sum (no masks). After ``log2(block)``
+         iterations slot ``b·block`` of each block holds the true block
+         sum; other slots are cyclic-shift garbage.
+      2. Single mul_plain by ``scale @ slot 0 of each block, 0 elsewhere``.
+         This both folds the scale and zeroes the garbage.
+      3. Bare-rotate-right doubling broadcast (no masks). After
+         ``log2(hidden_dim)`` iterations slots ``[b·block, b·block + hidden_dim)``
+         all hold ``scale·Σ_b``; pad stays zero.
+
+    Total depth: **1 level** (the single mul_plain in step 2).
+
+    Safety constraint: ``2·hidden_dim ≤ block`` so the broadcast doesn't
+    leak into adjacent blocks. Always satisfied for BERT-base LN inputs
+    (hidden_dim=768, block=4096).
+    """
+    if 2 * hidden_dim > block:
+        raise ValueError(
+            f"per_block_sum_then_broadcast requires 2*hidden_dim ≤ block; "
+            f"got hidden_dim={hidden_dim}, block={block}"
+        )
+
+    # 1. Bare doubling sum within block.
+    out = ct
+    step = 1
+    while step < block:
+        out = backend.add(out, backend.rotate(out, step))
+        step <<= 1
+
+    # 2. Slot-zero mask scaled by ``scale``.
+    mask = [0.0] * num_slots
+    B = num_slots // block
+    for b in range(B):
+        mask[b * block] = float(scale)
+    out = backend.mul_plain(out, mask)   # ← only mul_plain in the whole op
+
+    # 3. Bare doubling broadcast (right-rotation by powers of two).
+    step = 1
+    while step < hidden_dim:
+        out = backend.add(out, backend.rotate(out, -step))
+        step <<= 1
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Slot-local LPAN polynomials — apply to all packed tokens at once
 # ---------------------------------------------------------------------------
@@ -440,25 +498,38 @@ def enc_layernorm_matrix(
     # scale/shift lands on every packed token.
     gamma_rep = x.replicated_vector(gamma.tolist())
     beta_rep = x.replicated_vector(beta.tolist())
-    # 1/h scale folded into the mask used for mean recovery.
-    mean_mask = [v * inv_h for v in bmask]
+
+    # Phase 7c: low-depth per-block sum. Folds 1/h scale into the
+    # single mul_plain inside per_block_sum_then_broadcast → 1 level
+    # vs the old 12-level masked-rotate chain.
+    use_low_depth = (2 * h <= block)
 
     out_cts: List[Ciphertext] = []
     for ct in x.cts:
-        # μ_block = sum_block(x) / h, broadcast to first h slots of block.
-        s_ct = per_block_sum(
-            backend, ct, hidden_dim=h, block=block, num_slots=num_slots
-        )
-        mean_bc = backend.mul_plain(s_ct, mean_mask)
-        centred = backend.sub(ct, mean_bc)
-        # Re-zero the pad after subtraction (mean_bc was masked but
-        # `ct` had zeros there; subtraction keeps them zero).
-        sq = backend.mul(centred, centred)
-        # Variance = sum_block(sq) / h, broadcast.
-        s_sq = per_block_sum(
-            backend, sq, hidden_dim=h, block=block, num_slots=num_slots
-        )
-        var_bc = backend.mul_plain(s_sq, mean_mask)
+        if use_low_depth:
+            mean_bc = per_block_sum_then_broadcast(
+                backend, ct, hidden_dim=h, block=block,
+                num_slots=num_slots, scale=inv_h,
+            )
+            centred = backend.sub(ct, mean_bc)
+            sq = backend.mul(centred, centred)
+            var_bc = per_block_sum_then_broadcast(
+                backend, sq, hidden_dim=h, block=block,
+                num_slots=num_slots, scale=inv_h,
+            )
+        else:
+            # Fallback: 12-level masked sum.
+            mean_mask = [v * inv_h for v in bmask]
+            s_ct = per_block_sum(
+                backend, ct, hidden_dim=h, block=block, num_slots=num_slots
+            )
+            mean_bc = backend.mul_plain(s_ct, mean_mask)
+            centred = backend.sub(ct, mean_bc)
+            sq = backend.mul(centred, centred)
+            s_sq = per_block_sum(
+                backend, sq, hidden_dim=h, block=block, num_slots=num_slots
+            )
+            var_bc = backend.mul_plain(s_sq, mean_mask)
         inv_sigma = backend.polyval(var_bc, list(absorbed_invsqrt))
         # γ/σ · (x − μ) + β
         scaled = backend.mul(centred, inv_sigma)
