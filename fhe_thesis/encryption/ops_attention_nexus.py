@@ -424,3 +424,134 @@ def linear_colmajor(
         Y = backend.add_plain(Y, bvec)
 
     return Y
+
+
+# ---------------------------------------------------------------------------
+# Column-major LayerNorm (stride-L per-token reduction)
+# ---------------------------------------------------------------------------
+
+
+def per_col_sum_then_broadcast(
+    backend: CKKSBackend,
+    ct: Ciphertext,
+    *,
+    L: int,
+    hidden_dim: int,
+    num_slots: int,
+    scale: float = 1.0,
+) -> Ciphertext:
+    """Sum across the ``hidden_dim`` columns of a column-major ct, then
+    broadcast the per-row sum back to the same column-major layout.
+
+    Input  : slot[j*L + i] = X[i, j]  for j ∈ [0, hidden_dim)
+    Output : slot[j*L + i] = scale · Σ_j X[i, j]  for the same range.
+
+    Algorithm (analogue of :func:`per_block_sum_then_broadcast` but
+    with stride ``L`` instead of stride 1):
+
+      1. Bare doubling sum over stride-L offsets ``L, 2L, 4L, ...``.
+         After ``log2(hidden_dim)`` iterations the first L slots
+         hold the per-row sum; other slots are cyclic-shift garbage.
+      2. Single mul_plain by the "first-L-slots" mask scaled by ``scale``.
+      3. Bare doubling broadcast with right-rotations by
+         ``L, 2L, 4L, ...`` for ``log2(hidden_dim)`` iterations.
+
+    Total depth: 1 level. Constraint: ``hidden_dim · L ≤ num_slots``
+    AND ``hidden_dim`` must be a power of 2 (or padded to one).
+    """
+    if hidden_dim & (hidden_dim - 1):
+        raise ValueError(f"hidden_dim must be power of 2; got {hidden_dim}")
+    if hidden_dim * L > num_slots:
+        raise ValueError(
+            f"hidden_dim*L={hidden_dim * L} exceeds num_slots={num_slots}"
+        )
+
+    # 1. Bare doubling sum.
+    out = ct
+    step = L
+    while step < hidden_dim * L:
+        out = backend.add(out, backend.rotate(out, step))
+        step <<= 1
+
+    # 2. First-L mask scaled by ``scale``.
+    mask = [0.0] * num_slots
+    for i in range(L):
+        mask[i] = float(scale)
+    out = backend.mul_plain(out, mask)
+
+    # 3. Bare doubling broadcast with right-rotations.
+    step = L
+    while step < hidden_dim * L:
+        out = backend.add(out, backend.rotate(out, -step))
+        step <<= 1
+    return out
+
+
+def layernorm_colmajor(
+    backend: CKKSBackend,
+    x_ct: Ciphertext,
+    *,
+    L: int,
+    hidden_dim: int,
+    invsqrt_power_coeffs: Sequence[float],
+    invsqrt_interval: tuple,
+    gamma: np.ndarray,
+    beta: np.ndarray,
+) -> Ciphertext:
+    """LPAN polynomial LayerNorm in the column-major slot layout.
+
+    For each row i ∈ [0, L):
+        μ_i  = (1/h) Σ_j X[i, j]
+        σ²_i = (1/h) Σ_j (X[i, j] − μ_i)²
+        Y[i, j] = γ_j · (X[i, j] − μ_i) · poly_invsqrt(σ²_i + eps) + β_j
+
+    The eps is folded into ``invsqrt_interval`` by the caller (or is
+    implicitly zero for the trained polynomial). γ/β are per-feature
+    (per-column) constants.
+
+    Depth: 1 (mean) + 1 (square) + 1 (var mul_plain) + invsqrt_poly_depth
+    + 2 (gamma·(x-μ)·invσ) ≈ matches the row-major version.
+    """
+    h = hidden_dim
+    inv_h = 1.0 / h
+    n_slots = backend.capabilities.n_slots
+
+    # h must be power of 2 for the doubling sum to be exact.
+    if h & (h - 1):
+        raise ValueError(f"hidden_dim must be power of 2; got {h}")
+
+    a, b = invsqrt_interval
+    sscale = 2.0 / (b - a)
+    sshift = -(a + b) / (b - a)
+    # Affine absorb: poly evaluated on (s·x + sh) instead of x.
+    n = len(invsqrt_power_coeffs)
+    absorbed = [0.0] * n
+    # (s·x + sh)^k  expanded via binomial.
+    from math import comb
+    for k, c in enumerate(invsqrt_power_coeffs):
+        for r in range(k + 1):
+            absorbed[r] += float(c) * (sscale ** r) * (sshift ** (k - r)) * comb(k, r)
+
+    # γ / β replicated col-major: slot[j*L + i] = γ[j] / β[j].
+    gamma_vec = [0.0] * n_slots
+    beta_vec = [0.0] * n_slots
+    for j in range(h):
+        base = j * L
+        for i in range(L):
+            gamma_vec[base + i] = float(gamma[j])
+            beta_vec[base + i] = float(beta[j])
+
+    # μ broadcast.
+    mean_bc = per_col_sum_then_broadcast(
+        backend, x_ct, L=L, hidden_dim=h, num_slots=n_slots, scale=inv_h,
+    )
+    centred = backend.sub(x_ct, mean_bc)
+    sq = backend.mul(centred, centred)
+    var_bc = per_col_sum_then_broadcast(
+        backend, sq, L=L, hidden_dim=h, num_slots=n_slots, scale=inv_h,
+    )
+    inv_sigma = backend.polyval(var_bc, absorbed)
+    scaled = backend.mul(centred, inv_sigma)
+    scaled = backend.mul_plain(scaled, gamma_vec)
+    out = backend.add_plain(scaled, beta_vec)
+    return out
