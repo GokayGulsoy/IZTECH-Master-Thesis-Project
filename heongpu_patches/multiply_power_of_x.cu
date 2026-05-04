@@ -40,36 +40,31 @@ namespace heongpu
         int prime = prime_poly % Q_size;
 
         int N2 = N << 1;
-        int k = ((k_in_2N % N2) + N2) % N2;
+        int k = ((k_in_2N % N2) + N2) % N2;   // k_eff in [0, 2N)
 
-        // Source coefficient s such that (s + k) mod 2N == j (indexing
-        // outputs in the dest coordinate). Sign flips once for each
-        // multiple of N crossed.
-        // Equivalently: shift up by k, dest = (src + k) mod 2N, with
-        // sign flip if dest crossed N.
-        // We want the input value that flowed INTO output position j:
-        //   src = (j - k) mod 2N
-        //   if src < 0: src += 2N (handled by mod)
-        //   wraps = ((j - k) - src) / N  → 0, 1, or 2
+        // Output position j receives input coefficient s with sign (-1)^wraps,
+        // where (s + k) - j is wraps * N for some wraps ∈ {0, 1, 2}.
+        // Equivalently: s = j - k + wraps*N, with s ∈ [0, N).
+        //   - s_signed >= 0      → wraps = 0
+        //   - -N <= s_signed < 0 → wraps = 1
+        //   - s_signed < -N      → wraps = 2
         int s_signed = j - k;
-        int wraps;
         int s;
+        int wraps;
         if (s_signed >= 0)
         {
             s = s_signed;
             wraps = 0;
         }
+        else if (s_signed >= -N)
+        {
+            s = s_signed + N;
+            wraps = 1;
+        }
         else
         {
-            // s_signed in [-2N+1, -1]. Add 2N once to make positive.
-            s = s_signed + N2;          // now s in [0, 2N)
-            wraps = 1;                   // crossed boundary once via wrap
-        }
-        // s now in [0, 2N). If s >= N, subtract N and add another wrap.
-        if (s >= N)
-        {
-            s -= N;
-            wraps ^= 1;
+            s = s_signed + N2;
+            wraps = 2;
         }
 
         const Data64 q_val = moduli[prime].value;
