@@ -17,7 +17,7 @@ def log(m): print(f"[{time.strftime('%H:%M:%S')}] {m}", flush=True)
 
 
 def main():
-    L, head_dim = 16, 32
+    L, head_dim = 128, 64
     log(f"Config L={L} head_dim={head_dim}")
 
     log("Init backend...")
