@@ -304,3 +304,97 @@ def attn_apply_nexus(
     if Out is None:
         Out = backend.mul_plain(V_ct, [0.0] * n_slots)
     return Out
+
+
+# ---------------------------------------------------------------------------
+# Column-major linear projection (Halevi-Shoup with stride L)
+# ---------------------------------------------------------------------------
+
+
+def linear_colmajor(
+    backend: CKKSBackend,
+    x_ct: Ciphertext,
+    W: np.ndarray,
+    *,
+    L: int,
+    in_dim: int,
+    out_dim: int,
+    bias: Optional[np.ndarray] = None,
+) -> Ciphertext:
+    """Halevi-Shoup linear projection in column-major slot layout.
+
+    Input  ct slot[j*L + i] = X[i, j]  for j ∈ [0, in_dim)
+    Output ct slot[j*L + i] = Y[i, j] = Σ_k W[j, k] · X[i, k]
+            for j ∈ [0, out_dim) (slots beyond out_dim*L are zero).
+
+    Algorithm:
+      For d ∈ [0, in_dim):
+        x_rot   = rotate(x_ct, d * L)   # cyclically shifts whole columns
+        diag_d  = plaintext: slot[j*L + i] = W[j, (j+d) mod in_dim]
+                  for j ∈ [0, out_dim), i ∈ [0, L); 0 elsewhere
+        y      += mul_plain(x_rot, diag_d)
+      add bias if given (bias[j] replicated across slots [j*L, j*L+L))
+
+    Cost: in_dim mul_plain + in_dim rotations + in_dim adds.
+    Depth: +1 (single mul_plain rescale).
+
+    Constraint: in_dim * L ≤ num_slots AND out_dim * L ≤ num_slots.
+    """
+    n_slots = backend.capabilities.n_slots
+    if W.shape != (out_dim, in_dim):
+        raise ValueError(f"W.shape {W.shape} != ({out_dim}, {in_dim})")
+    if max(in_dim, out_dim) * L > n_slots:
+        raise ValueError(
+            f"max({in_dim},{out_dim}) * L = {max(in_dim, out_dim) * L} "
+            f"> num_slots {n_slots}"
+        )
+
+    # Need cyclic shift over the in_dim*L portion of the ct. The ciphertext
+    # is num_slots wide, so a global rotate by d*L wraps at num_slots. To
+    # get the right cyclic-shift behaviour, we replicate x to fill all
+    # min(num_slots, in_dim*L*2) slots — same trick as K replication in
+    # phase 7d. Easier: add x to itself rotated by in_dim*L, doubling.
+    # As long as in_dim*L*2 ≤ num_slots we get cyclic shift across in_dim
+    # columns "for free" via global rotation.
+    needs_replicate = (in_dim * L * 2) <= n_slots and in_dim * L < n_slots
+    if needs_replicate:
+        x_replicated = backend.add(x_ct, backend.rotate(x_ct, -in_dim * L))
+    else:
+        x_replicated = x_ct  # in_dim*L == n_slots: rotation already wraps cleanly
+
+    n = in_dim  # number of diagonals
+    Y: Optional[Ciphertext] = None
+    for d in range(n):
+        if d == 0:
+            x_rot = x_replicated
+        else:
+            x_rot = backend.rotate(x_replicated, d * L)
+        diag = [0.0] * n_slots
+        for j in range(out_dim):
+            col_src = (j + d) % n
+            w = float(W[j, col_src])
+            if w == 0.0:
+                continue
+            base = j * L
+            for i in range(L):
+                diag[base + i] = w
+        # All-zero-diagonal short-circuit.
+        if not any(v != 0.0 for v in diag):
+            continue
+        term = backend.mul_plain(x_rot, diag)
+        Y = term if Y is None else backend.add(Y, term)
+
+    if Y is None:
+        Y = backend.mul_plain(x_ct, [0.0] * n_slots)
+
+    if bias is not None:
+        if bias.shape != (out_dim,):
+            raise ValueError(f"bias.shape {bias.shape} != ({out_dim},)")
+        bvec = [0.0] * n_slots
+        for j in range(out_dim):
+            base = j * L
+            for i in range(L):
+                bvec[base + i] = float(bias[j])
+        Y = backend.add_plain(Y, bvec)
+
+    return Y
