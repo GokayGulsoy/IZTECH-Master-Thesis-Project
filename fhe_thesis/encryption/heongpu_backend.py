@@ -761,6 +761,101 @@ class HEonGPUBackend(CKKSBackend):
 
         return result
 
+    # ── Phase 7d-2: batched diagonal attention (C++ kernels) ─────────
+    def diag_qk_scores(
+        self,
+        Q_at: Ciphertext,
+        K_cyc: Ciphertext,
+        *,
+        L: int,
+        block_attn: int,
+        head_dim: int,
+        scale: float,
+    ) -> Ciphertext:
+        """C++ batched diagonal Q@K^T (Phase 7d-2).
+
+        Returns S in diagonal layout: slot[i*block_attn + d] = scale * S[i, (i+d)%L].
+        Result depth = Q.depth() + 2.
+        """
+        # Galois keys: bare-doubling sum within block_attn (powers of 2,
+        # positive), rotate-right by d (negative 1..L-1), and K cyclic
+        # shifts (d * block_attn for d in 1..L-1).
+        needed = set()
+        step = 1
+        while step < block_attn:
+            needed.add(step)
+            step <<= 1
+        for d in range(1, L):
+            needed.add(-d)
+            needed.add(d * block_attn)
+        if needed:
+            self.register_rotation_keys(sorted(needed))
+
+        # Encode the slot-0-each-block scaled mask at depth Q+1 (after
+        # the Q*K rescale).
+        x_depth = self._ops.depth(Q_at)
+        scale_vec = [0.0] * self._num_slots
+        n_blocks = self._num_slots // block_attn
+        for b in range(n_blocks):
+            scale_vec[b * block_attn] = float(scale)
+        scale_pt = self._encode(scale_vec)
+        while self._ops.depth_of_plaintext(scale_pt) < x_depth + 1:
+            self._ops.mod_drop_inplace_pt(scale_pt)
+
+        return self._ops.diag_qk_scores(
+            Q_at, K_cyc, self._gk, self._rk,
+            int(L), int(block_attn), int(head_dim), int(self._num_slots),
+            scale_pt,
+        )
+
+    def diag_attn_apply(
+        self,
+        A_diag: Ciphertext,
+        V_cyc: Ciphertext,
+        *,
+        L: int,
+        block_attn: int,
+        head_dim: int,
+    ) -> Ciphertext:
+        """C++ batched diagonal A@V (Phase 7d-2).
+
+        Result depth = A_diag.depth() + 2.
+        """
+        # Galois keys: rotate-right by step in [1, head_dim/2] (negative),
+        # rotate-left by d in [1, L) for col alignment, and V cyclic
+        # shifts d*block_attn for d in [1, L).
+        needed = set()
+        step = 1
+        while step < head_dim:
+            needed.add(-step)
+            step <<= 1
+        for d in range(1, L):
+            needed.add(d)
+            needed.add(d * block_attn)
+        if needed:
+            self.register_rotation_keys(sorted(needed))
+
+        # Encode L per-d masks (slot d of each block).
+        x_depth = self._ops.depth(A_diag)
+        n_blocks = self._num_slots // block_attn
+        col_pts = []
+        for d in range(L):
+            v = [0.0] * self._num_slots
+            for b in range(n_blocks):
+                slot = b * block_attn + d
+                if slot < self._num_slots:
+                    v[slot] = 1.0
+            pt = self._encode(v)
+            while self._ops.depth_of_plaintext(pt) < x_depth:
+                self._ops.mod_drop_inplace_pt(pt)
+            col_pts.append(pt)
+
+        return self._ops.diag_attn_apply(
+            A_diag, V_cyc, self._gk, self._rk,
+            int(L), int(block_attn), int(head_dim), int(self._num_slots),
+            col_pts,
+        )
+
     def coeff_matvec(
         self,
         ct_x_coeff: Ciphertext,

@@ -963,6 +963,13 @@ def enc_qk_scores_diagonal(
         )
     K_cyc = backend.add(K_at, backend.rotate(K_at, -L * block_attn))
 
+    # Phase 7d-2: prefer C++ batched kernel if backend supports it.
+    if hasattr(backend, "diag_qk_scores"):
+        return backend.diag_qk_scores(
+            Q_at, K_cyc, L=L, block_attn=block_attn,
+            head_dim=head_dim, scale=scale,
+        )
+
     S: Optional[Ciphertext] = None
     for d in range(L):
         K_rot = backend.rotate(K_cyc, d * block_attn) if d > 0 else K_cyc
@@ -1019,6 +1026,12 @@ def enc_attention_apply_diagonal(
             f"2*L*block_attn={2*L*block_attn} > num_slots={num_slots}"
         )
     V_cyc = backend.add(V_at, backend.rotate(V_at, -L * block_attn))
+
+    # Phase 7d-2: prefer C++ batched kernel if backend supports it.
+    if hasattr(backend, "diag_attn_apply"):
+        return backend.diag_attn_apply(
+            A_diag, V_cyc, L=L, block_attn=block_attn, head_dim=head_dim,
+        )
 
     Out: Optional[Ciphertext] = None
     for d in range(L):
