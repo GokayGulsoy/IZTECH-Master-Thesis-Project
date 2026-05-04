@@ -28,8 +28,8 @@ def main():
     inter = 4 * hidden                  # 3072
 
     log(f"Config L={L} hidden={hidden} heads={num_heads} head_dim={head_dim}")
-    # Need N >= L * hidden = 98304 -> next pow2 = 131072 = 2^17.
-    N = 1 << 17
+    # n_slots = N/2; need n_slots >= L*hidden = 98304 -> N=2^18 (131072 slots).
+    N = 1 << 18
     log(f"Init backend N={N}...")
     be = HEonGPUBackend(
         poly_modulus_degree=N,
