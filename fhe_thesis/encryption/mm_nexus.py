@@ -146,17 +146,29 @@ def matrix_mul(
     inv_N = 1.0 / float(backend._N)
     # Pre-scale weights to undo the implicit N from coefficient broadcast.
     W_scaled = W.astype(np.float64) * inv_N
-    n_slots = backend._num_slots
+    Nring = backend._N
+    ops = backend._ops
+    enc = backend._encoder
+    ctx = backend._ctx
+    scale = backend._scale
+
+    def _encode_const_coeff(w: float):
+        """Encode a constant polynomial p(x) = w as a coeff-domain plaintext.
+
+        ``encode_coeff`` puts each input value into a successive polynomial
+        coefficient, so we just supply ``[w, 0, 0, ..., 0]``.
+        """
+        coeffs = [float(w)] + [0.0] * (Nring - 1)
+        return enc.encode_coeff(ctx, coeffs, scale)
 
     out_cts: List = []
     for i in range(M):
-        # Accumulator: start with the j=0 term so we don't need an
-        # encrypt-of-zero.
-        w0 = float(W_scaled[i, 0])
-        acc = backend.mul_plain(decompressed_x[0], [w0] * n_slots)
+        # j = 0 term — establishes the accumulator at the post-rescale depth.
+        pt0 = _encode_const_coeff(W_scaled[i, 0])
+        acc = backend._mul_plain_pt(decompressed_x[0], pt0)
         for j in range(1, Ndim):
-            wj = float(W_scaled[i, j])
-            term = backend.mul_plain(decompressed_x[j], [wj] * n_slots)
-            backend._ops.add_inplace_match(acc, term)
+            pt = _encode_const_coeff(W_scaled[i, j])
+            term = backend._mul_plain_pt(decompressed_x[j], pt)
+            ops.add_inplace_match(acc, term)
         out_cts.append(acc)
     return out_cts
