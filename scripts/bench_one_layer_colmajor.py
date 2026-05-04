@@ -101,7 +101,7 @@ def main():
         log(f"  {name:<22s} {dt*1000:8.1f} ms{d}")
 
     # ──────────── ATTENTION ────────────
-    log("=== ATTENTION (fused QKV across heads) ===")
+    log("=== ATTENTION (fused QKV + 4-head packing) ===")
     # 3 fused linears: Wq/Wk/Wv each maps hidden → hidden, packing all
     # 12 heads into one ct (head h occupies slots [h·head_dim·L, (h+1)·head_dim·L)).
     gc.collect()
@@ -117,45 +117,53 @@ def main():
     V_full = linear_colmajor(be, x_ct, Wv, L=L, in_dim=hidden, out_dim=hidden)
     stamp("Wv_fused", time.time() - t)
 
-    O_full = None  # accumulator at hidden col-major layout
-    for h in range(num_heads):
-        # Extract per-head Q/K/V: rotate left by h·head_dim·L so that the
-        # head's slots land at [0, head_dim·L). Beyond that the rotation
-        # contains other heads' data — but qk_scores_nexus / attn_apply_nexus
-        # operate only on the first head_dim·L slots, so it's harmless.
+    # Group heads by num_heads_per_ct = 4. Each group: extract 4 heads side-by-side
+    # via one rotation, run packed attention, scatter back.
+    num_heads_per_ct = 4
+    n_groups = num_heads_per_ct  # NOT — n_groups = num_heads // num_heads_per_ct
+    n_groups = num_heads // num_heads_per_ct
+    head_block = head_dim * L  # 2048 slots per head
+    group_block = num_heads_per_ct * head_block  # 8192 slots per group
+
+    O_full = None
+    for g in range(n_groups):
         gc.collect()
-        if h == 0:
-            Q, K, V = Q_full, K_full, V_full
+        # Extract group g: rotate left by g·group_block. The group's slots
+        # land at [0, group_block).
+        if g == 0:
+            Qg, Kg, Vg = Q_full, K_full, V_full
         else:
             t = time.time()
-            shift = h * head_dim * L
-            Q = be.rotate(Q_full, shift)
-            K = be.rotate(K_full, shift)
-            V = be.rotate(V_full, shift)
-            stamp(f"extract[h{h:02d}]", time.time() - t)
+            shift = g * group_block
+            Qg = be.rotate(Q_full, shift)
+            Kg = be.rotate(K_full, shift)
+            Vg = be.rotate(V_full, shift)
+            stamp(f"extract[g{g}]", time.time() - t)
 
         t = time.time()
-        S = qk_scores_nexus(be, Q, K, L=L, head_dim=head_dim, scale=inv_sqrt_d)
-        stamp(f"qk[h{h:02d}]", time.time() - t)
+        Sg = qk_scores_nexus(be, Qg, Kg, L=L, head_dim=head_dim,
+                             scale=inv_sqrt_d,
+                             num_heads_per_ct=num_heads_per_ct)
+        stamp(f"qk[g{g}]", time.time() - t)
 
         t = time.time()
-        # softmax poly is slot-local — apply via backend.polyval.
-        Asm = be.polyval(S, list(softmax_coeffs))
-        stamp(f"softmax[h{h:02d}]", time.time() - t)
+        Asm = be.polyval(Sg, list(softmax_coeffs))
+        stamp(f"softmax[g{g}]", time.time() - t)
 
         t = time.time()
-        O_h = attn_apply_nexus(be, Asm, V, L=L, head_dim=head_dim)
-        stamp(f"av[h{h:02d}]", time.time() - t)
+        Og = attn_apply_nexus(be, Asm, Vg, L=L, head_dim=head_dim,
+                              num_heads_per_ct=num_heads_per_ct)
+        stamp(f"av[g{g}]", time.time() - t)
 
-        # Scatter O_h (lives in slots [0, head_dim*L)) into the full hidden
-        # col-major layout at slots [h*head_dim*L, (h+1)*head_dim*L).
+        # Scatter: Og lives in slots [0, group_block); shift to
+        # [g·group_block, (g+1)·group_block).
         t = time.time()
-        if h == 0:
-            O_full = O_h
+        if g == 0:
+            O_full = Og
         else:
-            O_shifted = be.rotate(O_h, -h * head_dim * L)
-            O_full = be.add(O_full, O_shifted)
-        stamp(f"scatter[h{h:02d}]", time.time() - t)
+            Og_shifted = be.rotate(Og, -g * group_block)
+            O_full = be.add(O_full, Og_shifted)
+        stamp(f"scatter[g{g}]", time.time() - t)
 
     # ──────────── Wo + residual + LN1 ────────────
     log("=== Wo + LN1 ===")
@@ -231,10 +239,10 @@ def main():
     # group by stage
     groups = {
         "Wq/Wk/Wv (3 fused)":   times.get("Wq_fused", 0.0) + times.get("Wk_fused", 0.0) + times.get("Wv_fused", 0.0),
-        "extract (heads)":      sum(v for k, v in times.items() if k.startswith("extract[")),
-        "qk (heads)":            sum(v for k, v in times.items() if k.startswith("qk[")),
-        "softmax (heads)":       sum(v for k, v in times.items() if k.startswith("softmax[")),
-        "av (heads)":            sum(v for k, v in times.items() if k.startswith("av[")),
+        "extract (groups)":     sum(v for k, v in times.items() if k.startswith("extract[")),
+        "qk (groups)":           sum(v for k, v in times.items() if k.startswith("qk[")),
+        "softmax (groups)":      sum(v for k, v in times.items() if k.startswith("softmax[")),
+        "av (groups)":           sum(v for k, v in times.items() if k.startswith("av[")),
         "scatter":               sum(v for k, v in times.items() if k.startswith("scatter[")),
         "Wo":                    times.get("Wo", 0.0),
         "LN1":                   times.get("LN1", 0.0),
