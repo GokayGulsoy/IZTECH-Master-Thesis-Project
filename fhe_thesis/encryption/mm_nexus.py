@@ -144,8 +144,14 @@ def matrix_mul(
             f"Expected {Ndim} decompressed ciphertexts, got {len(decompressed_x)}"
         )
     inv_N = 1.0 / float(backend._N)
-    # Pre-scale weights to undo the implicit N from coefficient broadcast.
-    W_scaled = W.astype(np.float64) * inv_N
+    # NOTE: do NOT pre-scale W by 1/N. The decompressed ct holds polynomial
+    # ``p(x) = N*x_j`` (only coeff 0 nonzero). After mul_plain with constant
+    # ``w`` and summing over j, the output ct has ``coeff[0] = N * (W @ x)[i]``
+    # with all other coeffs zero. Slot-domain interpretation = mean over the N
+    # polynomial coefficients = ``(W @ x)[i]`` directly. ``inv_N`` is kept here
+    # only so callers can pre-scale weights themselves if they prefer to read
+    # ``coeff[0]`` instead of the slot mean.
+    del inv_N
     Nring = backend._N
     ops = backend._ops
     enc = backend._encoder
@@ -164,10 +170,10 @@ def matrix_mul(
     out_cts: List = []
     for i in range(M):
         # j = 0 term — establishes the accumulator at the post-rescale depth.
-        pt0 = _encode_const_coeff(W_scaled[i, 0])
+        pt0 = _encode_const_coeff(W[i, 0])
         acc = backend._mul_plain_pt(decompressed_x[0], pt0)
         for j in range(1, Ndim):
-            pt = _encode_const_coeff(W_scaled[i, j])
+            pt = _encode_const_coeff(W[i, j])
             term = backend._mul_plain_pt(decompressed_x[j], pt)
             ops.add_inplace_match(acc, term)
         out_cts.append(acc)
