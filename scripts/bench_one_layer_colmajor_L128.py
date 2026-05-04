@@ -33,8 +33,10 @@ def main():
     log(f"Init backend N={N}...")
     be = HEonGPUBackend(
         poly_modulus_degree=N,
-        q_prime_bits=(60,) + (50,) * 30,
-        p_prime_bits=(60, 60, 60, 60),
+        # Tighter chain to fit Galois keys in GPU memory at N=2^18.
+        # 1 layer needs ~12 levels (3 linears + softmax + LN + GELU each ~2).
+        q_prime_bits=(60,) + (50,) * 14,
+        p_prime_bits=(60, 60),
         scale_bits=50,
         bootstrap_hamming_weight=16,
         sec_none=True,
