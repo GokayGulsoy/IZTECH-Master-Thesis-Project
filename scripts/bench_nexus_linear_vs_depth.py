@@ -27,6 +27,9 @@ def main():
         sec_none=True,
     )
     log(f"  ready. max_depth={be._max_depth}")
+    log("configure_bootstrapping (needed for nexus_linear's CtoS) ...")
+    be.configure_bootstrapping()
+    log("  done")
 
     in_dim, out_dim = 128, 128
     rng = np.random.default_rng(0)
