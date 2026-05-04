@@ -69,9 +69,14 @@ def main():
     log(f"  +{n_new} keys in {time.time()-t:.1f}s")
 
     rng = np.random.default_rng(0)
-    Wq = rng.standard_normal((num_heads, head_dim, hidden)) * 0.05
-    Wk = rng.standard_normal((num_heads, head_dim, hidden)) * 0.05
-    Wv = rng.standard_normal((num_heads, head_dim, hidden)) * 0.05
+    # Per-head weights, then stacked to full (hidden, hidden) for fused linears.
+    Wq_h = rng.standard_normal((num_heads, head_dim, hidden)) * 0.05
+    Wk_h = rng.standard_normal((num_heads, head_dim, hidden)) * 0.05
+    Wv_h = rng.standard_normal((num_heads, head_dim, hidden)) * 0.05
+    # Stack head dim → full hidden output.
+    Wq = Wq_h.reshape(num_heads * head_dim, hidden)
+    Wk = Wk_h.reshape(num_heads * head_dim, hidden)
+    Wv = Wv_h.reshape(num_heads * head_dim, hidden)
     Wo = rng.standard_normal((hidden, hidden)) * 0.05
     # FFN: we run W1 column-blocked into 4 slabs of shape (head_dim*num_heads, hidden) = (768, 768)
     # so that each slab fits (768·L = 24576 ≤ 32768).
@@ -95,20 +100,39 @@ def main():
         d = f" depth={depth}" if depth is not None else ""
         log(f"  {name:<22s} {dt*1000:8.1f} ms{d}")
 
-    # ──────────── ATTENTION (per head) ────────────
-    log("=== ATTENTION ===")
+    # ──────────── ATTENTION ────────────
+    log("=== ATTENTION (fused QKV across heads) ===")
+    # 3 fused linears: Wq/Wk/Wv each maps hidden → hidden, packing all
+    # 12 heads into one ct (head h occupies slots [h·head_dim·L, (h+1)·head_dim·L)).
+    gc.collect()
+    t = time.time()
+    Q_full = linear_colmajor(be, x_ct, Wq, L=L, in_dim=hidden, out_dim=hidden)
+    stamp("Wq_fused", time.time() - t, depth=be._ops.depth(Q_full))
+    gc.collect()
+    t = time.time()
+    K_full = linear_colmajor(be, x_ct, Wk, L=L, in_dim=hidden, out_dim=hidden)
+    stamp("Wk_fused", time.time() - t)
+    gc.collect()
+    t = time.time()
+    V_full = linear_colmajor(be, x_ct, Wv, L=L, in_dim=hidden, out_dim=hidden)
+    stamp("Wv_fused", time.time() - t)
+
     O_full = None  # accumulator at hidden col-major layout
     for h in range(num_heads):
+        # Extract per-head Q/K/V: rotate left by h·head_dim·L so that the
+        # head's slots land at [0, head_dim·L). Beyond that the rotation
+        # contains other heads' data — but qk_scores_nexus / attn_apply_nexus
+        # operate only on the first head_dim·L slots, so it's harmless.
         gc.collect()
-        t = time.time()
-        Q = linear_colmajor(be, x_ct, Wq[h], L=L, in_dim=hidden, out_dim=head_dim)
-        stamp(f"Wq[h{h:02d}]", time.time() - t)
-        t = time.time()
-        K = linear_colmajor(be, x_ct, Wk[h], L=L, in_dim=hidden, out_dim=head_dim)
-        stamp(f"Wk[h{h:02d}]", time.time() - t)
-        t = time.time()
-        V = linear_colmajor(be, x_ct, Wv[h], L=L, in_dim=hidden, out_dim=head_dim)
-        stamp(f"Wv[h{h:02d}]", time.time() - t)
+        if h == 0:
+            Q, K, V = Q_full, K_full, V_full
+        else:
+            t = time.time()
+            shift = h * head_dim * L
+            Q = be.rotate(Q_full, shift)
+            K = be.rotate(K_full, shift)
+            V = be.rotate(V_full, shift)
+            stamp(f"extract[h{h:02d}]", time.time() - t)
 
         t = time.time()
         S = qk_scores_nexus(be, Q, K, L=L, head_dim=head_dim, scale=inv_sqrt_d)
@@ -206,7 +230,8 @@ def main():
     total = sum(times.values())
     # group by stage
     groups = {
-        "Wq/Wk/Wv (3 × heads)": sum(v for k, v in times.items() if k.startswith(("Wq[", "Wk[", "Wv["))),
+        "Wq/Wk/Wv (3 fused)":   times.get("Wq_fused", 0.0) + times.get("Wk_fused", 0.0) + times.get("Wv_fused", 0.0),
+        "extract (heads)":      sum(v for k, v in times.items() if k.startswith("extract[")),
         "qk (heads)":            sum(v for k, v in times.items() if k.startswith("qk[")),
         "softmax (heads)":       sum(v for k, v in times.items() if k.startswith("softmax[")),
         "av (heads)":            sum(v for k, v in times.items() if k.startswith("av[")),
