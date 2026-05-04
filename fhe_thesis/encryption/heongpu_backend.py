@@ -508,7 +508,6 @@ class HEonGPUBackend(CKKSBackend):
                 chunk_shifts, diag_pts, low_pts, high_pts,
                 with_bias, bias_pt,
             )
-            del diag_pts, low_pts, high_pts, bias_pt
 
             if result is None:
                 result = chunk_result
