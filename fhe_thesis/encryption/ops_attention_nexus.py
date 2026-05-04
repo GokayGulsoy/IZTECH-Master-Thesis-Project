@@ -210,3 +210,97 @@ def qk_scores_nexus(
     if S is None:
         S = backend.mul_plain(Q_ct, [0.0] * n_slots)
     return S
+
+
+# ---------------------------------------------------------------------------
+# NEXUS-style diagonal A@V
+# ---------------------------------------------------------------------------
+
+
+def attn_apply_nexus(
+    backend: CKKSBackend,
+    A_ct: Ciphertext,
+    V_ct: Ciphertext,
+    *,
+    L: int,
+    head_dim: int,
+) -> Ciphertext:
+    """NEXUS-style diagonal A @ V in column-major layout.
+
+    Inputs:
+      A_ct: in diagonal-row layout (output of qk_scores_nexus).
+            slot[d*L + i] = A[i, (i+d) mod L]
+      V_ct: column-major.  slot[j*L + i] = V[i, j]
+
+    Output:
+      Out_ct: column-major.  slot[j*L + i] = Out[i, j]
+              where  Out[i, j] = Σ_k A[i, k] * V[k, j]
+                              = Σ_d A[i, (i+d) mod L] * V[(i+d) mod L, j]
+
+    Algorithm per d ∈ [0, L):
+      1. Extract row d of A: rotate(A, d*L) + mask first L slots
+         → slot i (for i ∈ [0, L)) holds A[i, (i+d) mod L].
+      2. Broadcast across head_dim columns via L-stride bare-doublings.
+      3. V_shift_d: within-column cyclic shift of V by d (same trick
+         as in qk_scores_nexus).
+      4. prod = a_row_bcast * V_shift_d
+      5. accumulate.
+
+    Cost per d: ~14 ops. Total: L * 14 ≈ 1800 ops/head at L=128.
+    Same complexity as qk_scores_nexus.
+    """
+    n_slots = backend.capabilities.n_slots
+    if L * head_dim > n_slots:
+        raise ValueError(f"L*head_dim={L*head_dim} > num_slots={n_slots}")
+
+    Out: Optional[Ciphertext] = None
+
+    # Pre-build the "first L slots" mask (used to isolate row d after
+    # the global rotate).
+    first_L_mask = [0.0] * n_slots
+    for i in range(L):
+        first_L_mask[i] = 1.0
+
+    for d in range(L):
+        # Step 1: bring row d of A to slots [0, L).
+        if d == 0:
+            a_row = A_ct
+        else:
+            a_row = backend.rotate(A_ct, d * L)
+        a_row = backend.mul_plain(a_row, first_L_mask)
+
+        # Step 2: broadcast row d across all head_dim columns.
+        bcast = a_row
+        step = L
+        while step < L * head_dim:
+            bcast = backend.add(bcast, backend.rotate(bcast, -step))
+            step <<= 1
+        # bcast now has the row-d values replicated in every L-stride
+        # column block: slot[j*L + i] = A[i, (i+d) mod L] for all j.
+
+        # Step 3: within-column cyclic shift of V by d (same as QK^T).
+        if d == 0:
+            V_shift = V_ct
+        else:
+            top_mask = [0.0] * n_slots
+            bot_mask = [0.0] * n_slots
+            for j in range(head_dim):
+                base = j * L
+                for i in range(L - d):
+                    top_mask[base + i] = 1.0
+                for i in range(L - d, L):
+                    bot_mask[base + i] = 1.0
+            V_left  = backend.rotate(V_ct, d)
+            V_right = backend.rotate(V_ct, d - L)
+            V_shift = backend.add(
+                backend.mul_plain(V_left, top_mask),
+                backend.mul_plain(V_right, bot_mask),
+            )
+
+        # Step 4+5: product and accumulate.
+        prod = backend.mul(bcast, V_shift)
+        Out = prod if Out is None else backend.add(Out, prod)
+
+    if Out is None:
+        Out = backend.mul_plain(V_ct, [0.0] * n_slots)
+    return Out
