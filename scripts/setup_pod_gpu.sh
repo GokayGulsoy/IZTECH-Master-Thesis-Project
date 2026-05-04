@@ -46,9 +46,13 @@ echo
 echo "[1/5] System packages..."
 apt-get update -qq
 DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    cmake ninja-build g++ gcc python3-dev python3-pip \
-    git ca-certificates wget curl build-essential
+    ninja-build g++ gcc python3-dev python3-pip \
+    git ca-certificates wget curl build-essential \
+    libssl-dev libgmp-dev libomp-dev libntl-dev
 
+# Apt's cmake (3.22) is too old for HEonGPU (>=3.26.4). Use pip cmake.
+python3 -m pip install --quiet --upgrade "cmake>=3.28"
+export PATH=/usr/local/bin:$PATH
 cmake --version | head -1
 ninja --version
 
