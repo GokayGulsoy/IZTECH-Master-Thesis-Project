@@ -39,9 +39,9 @@ def main():
     # We pick a very simple polynomial so the parity test is meaningful:
     # invsqrt(x) ≈ p(x) on x ∈ [a, b] using degree-3 minimax.
     # For the smoke test we use a tight interval near σ²≈1.
-    a, b = 0.1, 5.0
-    # Sample minimax: fit degree-3 to invsqrt on [a,b].
-    xs = np.linspace(a, b, 200)
+    a, b = -1.0, 1.0  # trivial interval so absorb is identity
+    # Fit polynomial on actual variance domain.
+    xs = np.linspace(0.1, 5.0, 200)
     ys = 1.0 / np.sqrt(xs)
     coeffs = np.polyfit(xs, ys, 3)[::-1].tolist()  # power basis [c0..c3]
 
