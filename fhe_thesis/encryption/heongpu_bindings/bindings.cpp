@@ -206,7 +206,35 @@ struct Decryptor {
 
 struct Operator {
     heongpu::HEArithmeticOperator<SCHEME> ops;
-    Operator(CKKSContext& c, Encoder& enc) : ops(c.ctx, enc.enc) {}
+    heongpu::HEEncoder<SCHEME>* enc_ptr = nullptr;   // shared with Encoder
+    CKKSContext* ctx_ptr = nullptr;
+    double scale_cache = 0.0;
+    Operator(CKKSContext& c, Encoder& enc)
+        : ops(c.ctx, enc.enc), enc_ptr(&enc.enc), ctx_ptr(&c) {}
+
+    // Phase 7b-BSGS: batched encode + mod-drop entirely in C++.
+    // Releases the GIL once and runs all encodes back-to-back.
+    // ``target_depth`` is the chain depth at which each plaintext should
+    // sit when returned (the equivalent of N python mod_drop_inplace_pt
+    // calls per plaintext).
+    std::vector<Plaintext> encode_many_drop(
+        const std::vector<std::vector<double>>& vs,
+        double scale,
+        int target_depth)
+    {
+        std::vector<Plaintext> out;
+        out.reserve(vs.size());
+        for (size_t i = 0; i < vs.size(); ++i) {
+            auto pt = std::make_shared<heongpu::Plaintext<SCHEME>>(ctx_ptr->ctx);
+            std::vector<double> v_copy = vs[i];
+            enc_ptr->encode(*pt, v_copy, scale);
+            while (pt->depth() < target_depth) {
+                ops.mod_drop_inplace(*pt);
+            }
+            out.emplace_back(Plaintext{pt});
+        }
+        return out;
+    }
 
     void add_inplace(Ciphertext& a, Ciphertext& b)               { ops.add_inplace(*a.ct, *b.ct); }
     void sub_inplace(Ciphertext& a, Ciphertext& b)               { ops.sub_inplace(*a.ct, *b.ct); }
@@ -985,6 +1013,12 @@ PYBIND11_MODULE(_heongpu, m) {
              "masks at ct_x.depth(). For shifts[k]==0 the (low,high) masks are "
              "ignored; the diagonal multiplies ct_x directly. Result depth = "
              "ct_x.depth() + 2.")
+        .def("encode_many_drop", &Operator::encode_many_drop,
+             py::arg("vs"), py::arg("scale"), py::arg("target_depth"),
+             py::call_guard<py::gil_scoped_release>(),
+             "Phase 7b-BSGS: encode + mod-drop a batch of vectors in one "
+             "C++ call. Eliminates Python<->C++ boundary crossings for "
+             "thousands of per-matmul plaintext encodings.")
         .def("pre_rotate_babies", &Operator::pre_rotate_babies,
              py::arg("ct_x"), py::arg("galois_key"), py::arg("block"),
              py::arg("baby_shifts"), py::arg("low_pts"), py::arg("high_pts"),
