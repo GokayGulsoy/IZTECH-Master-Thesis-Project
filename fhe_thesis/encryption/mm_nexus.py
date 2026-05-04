@@ -242,3 +242,44 @@ def linear_compressed(
         pt_w = _encode_weight_row_inner_product(backend, W[i])
         out.append(backend._mul_plain_pt(x_compressed, pt_w))
     return out
+
+
+# ---------------------------------------------------------------------------
+# Phase 8e: fold per-scalar output cts back into a single packed ct
+# ---------------------------------------------------------------------------
+
+
+def fold_outputs_to_packed(
+    backend,
+    out_cts: List,
+    *,
+    start_index: int = 0,
+) -> "object":
+    """Combine M ciphertexts (each with a scalar at coeff[0]) into one ct.
+
+    Each input ct ``out_cts[i]`` holds a polynomial whose coefficient 0 is
+    the scalar ``y_i`` (other coefficients ~0, as produced by
+    :func:`linear_compressed`). The result is a single ciphertext holding
+    ``Σ_i y_i X^{start_index + i}`` — i.e. the packed-polynomial layout that
+    :func:`enc_compress` would produce if we encrypted the plaintext vector
+    ``[0, ..., 0, y_0, y_1, ..., y_{M-1}, 0, ...]``.
+
+    Suitable input for the next :func:`linear_compressed` call.
+
+    Cost: M-1 ``multiply_power_of_x`` ops + M-1 ``add_inplace``.
+    """
+    if not out_cts:
+        raise ValueError("out_cts is empty")
+    ops = backend._ops
+    M = len(out_cts)
+
+    # i = 0 term: shift by start_index (skip the multiply if start_index == 0).
+    acc = backend._clone(out_cts[0])
+    if start_index != 0:
+        ops.multiply_power_of_x_inplace(acc, start_index)
+
+    for i in range(1, M):
+        shifted = backend._clone(out_cts[i])
+        ops.multiply_power_of_x_inplace(shifted, start_index + i)
+        ops.add_inplace_match(acc, shifted)
+    return acc
