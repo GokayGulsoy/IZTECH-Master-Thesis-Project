@@ -1078,7 +1078,9 @@ def enc_self_attention_diagonal(
         raise ValueError(f"hidden {hidden} not divisible by num_heads {num_heads}")
     head_dim = hidden // num_heads
     L = x.seq_len
-    block_attn = next_pow2(L)
+    # block_attn must accommodate both head_dim valid values per token AND
+    # L diagonal slots per row block.
+    block_attn = next_pow2(max(L, head_dim))
     num_slots = x.num_slots
     target_block = x.block
     inv_sqrt_d = 1.0 / np.sqrt(head_dim)
