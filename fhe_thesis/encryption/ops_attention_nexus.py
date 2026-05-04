@@ -466,6 +466,210 @@ def linear_colmajor(
 
 
 # ---------------------------------------------------------------------------
+# Phase 7e-7: C++-batched column-major linear with cached pre-encoded diagonals
+# ---------------------------------------------------------------------------
+
+
+class ColmajorLinearPlan:
+    """Pre-built BSGS plan for ``linear_colmajor_bsgs_cpp``.
+
+    Holds:
+      - the BSGS schedule (baby_shifts, giant_shifts, bucket arrays)
+      - one pre-encoded :class:`Plaintext` per (giant, baby) term, with
+        the giant-shift baked in so the C++ kernel only has to do
+        baby-rot, mul_plain, add (no plaintext rotation).
+      - the cyclic-replicate steps (depend on backend num_slots and L)
+      - bias plaintext (replicated to col-major slots)
+
+    Build cost (one-off): ``in_dim_padded`` plaintext encodes (~30-50 ms each
+    on H100 for N=2^16 ⇒ ~30-50 s for hidden=768). After build, every
+    inference reuses this plan with zero re-encoding cost.
+
+    All plaintexts are encoded at the SAME chain depth (= depth of input ct
+    at execution time). Caller is responsible for invoking ``rebuild`` if
+    the input ct depth changes between executions (depth is also recorded
+    here so we can detect a mismatch fast).
+    """
+
+    def __init__(self, backend, *, L, in_dim, out_dim, in_dim_padded,
+                 bs, gs, baby_shifts, giant_shifts, bucket_offsets,
+                 bucket_baby_idx, bucket_masks, bias_pt, ct_depth):
+        self.backend = backend
+        self.L = L
+        self.in_dim = in_dim
+        self.out_dim = out_dim
+        self.in_dim_padded = in_dim_padded
+        self.bs = bs
+        self.gs = gs
+        self.baby_shifts = baby_shifts
+        self.giant_shifts = giant_shifts
+        self.bucket_offsets = bucket_offsets
+        self.bucket_baby_idx = bucket_baby_idx
+        self.bucket_masks = bucket_masks
+        self.bias_pt = bias_pt
+        self.ct_depth = ct_depth
+
+
+def build_colmajor_linear_plan(
+    backend: CKKSBackend,
+    W: np.ndarray,
+    *,
+    L: int,
+    in_dim: int,
+    out_dim: int,
+    bias: Optional[np.ndarray] = None,
+    ct_depth: int = 0,
+) -> ColmajorLinearPlan:
+    """Pre-encode all BSGS diagonals for one ``linear_colmajor`` matrix.
+
+    The plan is reusable across many invocations on different inputs (same
+    W, same chain depth at execution time). Encoded once, queried many.
+    """
+    n_slots = backend.capabilities.n_slots
+    if W.shape != (out_dim, in_dim):
+        raise ValueError(f"W.shape {W.shape} != ({out_dim}, {in_dim})")
+    max_cols = n_slots // L
+    if max_cols * L != n_slots or (max_cols & (max_cols - 1)) != 0:
+        raise ValueError(
+            f"L={L} doesn't cleanly divide num_slots={n_slots} into a "
+            f"power-of-2 column count"
+        )
+    in_dim_padded = 1
+    while in_dim_padded < in_dim:
+        in_dim_padded <<= 1
+    if in_dim_padded > max_cols:
+        raise ValueError(
+            f"in_dim_padded={in_dim_padded} > max_cols={max_cols}"
+        )
+
+    n = in_dim_padded
+    log2_n = n.bit_length() - 1
+    bs = 1 << (log2_n // 2)
+    gs = n // bs
+
+    # Baby shifts: 0, L, 2L, ..., (bs-1)*L.
+    baby_shifts = [i * L for i in range(bs)]
+    # Giant shifts: 0, bs*L, 2*bs*L, ..., (gs-1)*bs*L.
+    giant_shifts = [j * bs * L for j in range(gs)]
+
+    bucket_offsets = [0]
+    bucket_baby_idx = []
+    bucket_masks = []
+
+    def _build_diag(d: int) -> np.ndarray:
+        v = np.zeros(n_slots, dtype=np.float64)
+        for j in range(out_dim):
+            col_src = (j + d) % n
+            if col_src >= in_dim:
+                continue
+            w = float(W[j, col_src])
+            if w == 0.0:
+                continue
+            base = j * L
+            v[base:base + L] = w
+        return v
+
+    def _rot_left_np(v: np.ndarray, k: int) -> np.ndarray:
+        k %= n_slots
+        if k == 0:
+            return v
+        return np.concatenate([v[k:], v[:k]])
+
+    for j in range(gs):
+        shift = -j * bs * L  # plaintext is left-rotated by `shift`
+        for i in range(bs):
+            d = i + j * bs
+            diag = _build_diag(d)
+            if not np.any(diag):
+                continue
+            diag_shifted = _rot_left_np(diag, shift)
+            pt = backend._encode(diag_shifted.tolist())
+            # Mod-drop plaintext to ct depth so the C++ multiply_plain_inplace
+            # sees matching levels.
+            while backend._ops.depth_of_plaintext(pt) < ct_depth:
+                backend._ops.mod_drop_inplace_pt(pt)
+            bucket_baby_idx.append(i)
+            bucket_masks.append(pt)
+        bucket_offsets.append(len(bucket_baby_idx))
+
+    bias_vec = None
+    if bias is not None:
+        if bias.shape != (out_dim,):
+            raise ValueError(f"bias.shape {bias.shape} != ({out_dim},)")
+        bvec = np.zeros(n_slots, dtype=np.float64)
+        for j in range(out_dim):
+            base = j * L
+            bvec[base:base + L] = float(bias[j])
+        bias_vec = bvec.tolist()
+
+    return ColmajorLinearPlan(
+        backend, L=L, in_dim=in_dim, out_dim=out_dim,
+        in_dim_padded=in_dim_padded, bs=bs, gs=gs,
+        baby_shifts=baby_shifts, giant_shifts=giant_shifts,
+        bucket_offsets=bucket_offsets, bucket_baby_idx=bucket_baby_idx,
+        bucket_masks=bucket_masks, bias_pt=bias_vec, ct_depth=ct_depth,
+    )
+
+
+def linear_colmajor_bsgs_cpp(
+    backend: CKKSBackend,
+    x_ct: Ciphertext,
+    plan: ColmajorLinearPlan,
+) -> Ciphertext:
+    """Execute a pre-built column-major linear via C++ ``gather_slots_bsgs``.
+
+    Internally:
+      1. Replicate x cyclically to fill all num_slots (Python doubling).
+      2. Single C++ call: per-giant accumulate (baby_rot · mask), lazy
+         rescale, giant rotate, sum across giants.
+      3. (Optional) add bias.
+
+    Cost: ``bs + gs - 2`` rotations + ``in_dim_padded`` plain-muls
+    (no Python overhead, no per-mul rescale) + ``gs`` giant rotates.
+
+    Depth: +1 (single rescale per giant, all in C++).
+    """
+    n_slots = backend.capabilities.n_slots
+    L = plan.L
+    in_dim_padded = plan.in_dim_padded
+
+    # 1. Replicate x to fill num_slots.
+    x_replicated = x_ct
+    cur = in_dim_padded * L
+    while cur < n_slots:
+        x_replicated = backend.add(
+            x_replicated, backend.rotate(x_replicated, -cur)
+        )
+        cur <<= 1
+
+    # Sanity: plan was built for a specific input depth.
+    actual_depth = backend._ops.depth(x_replicated)
+    if actual_depth != plan.ct_depth:
+        raise RuntimeError(
+            f"plan was built for ct_depth={plan.ct_depth} but input is at "
+            f"depth {actual_depth}; rebuild the plan or wrap x in mod-drop"
+        )
+
+    # 2. Register Galois keys (no-op if already cached).
+    needed_keys = set(plan.baby_shifts + plan.giant_shifts) - {0}
+    if needed_keys:
+        backend.register_rotation_keys(needed_keys)
+
+    # 3. Single C++ call.
+    Y = backend._ops.gather_slots_bsgs(
+        x_replicated, backend._gk,
+        plan.baby_shifts, plan.giant_shifts,
+        plan.bucket_offsets, plan.bucket_baby_idx, plan.bucket_masks,
+    )
+
+    # 4. Bias (one-off encrypt + add).
+    if plan.bias_pt is not None:
+        Y = backend.add_plain(Y, plan.bias_pt)
+
+    return Y
+
+
+# ---------------------------------------------------------------------------
 # Column-major LayerNorm (stride-L per-token reduction)
 # ---------------------------------------------------------------------------
 
