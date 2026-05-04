@@ -879,9 +879,17 @@ struct Operator {
     {
         std::shared_ptr<heongpu::Ciphertext<SCHEME>> S;
 
+        // Pre-align K to match Q's depth (Q*K requires equal depth).
+        const int target_depth = Q_at.ct->depth();
+        heongpu::Ciphertext<SCHEME> K_aligned = *K_cyc.ct;
+        while (K_aligned.depth() < target_depth) {
+            ops.mod_drop_inplace(K_aligned);
+        }
+        // (If Q is shallower, we'd need to drop Q instead; assume equal in practice.)
+
         for (int d = 0; d < L; ++d) {
             // K_rot
-            heongpu::Ciphertext<SCHEME> K_rot = *K_cyc.ct;
+            heongpu::Ciphertext<SCHEME> K_rot = K_aligned;
             if (d > 0) {
                 ops.rotate_rows_inplace(K_rot, *gk.gk, d * block_attn);
             }
@@ -955,6 +963,15 @@ struct Operator {
                 "diag_attn_apply: col_pts size must equal L");
         }
 
+        // a_d is at A.depth() + 1 (after mask + rescale). V is at its own
+        // depth. We need them aligned for the mul. Pre-clone V_cyc and
+        // drop to match A.depth() + 1 (V is typically shallower).
+        const int target_depth = A_diag.ct->depth() + 1;
+        heongpu::Ciphertext<SCHEME> V_aligned = *V_cyc.ct;
+        while (V_aligned.depth() < target_depth) {
+            ops.mod_drop_inplace(V_aligned);
+        }
+
         std::shared_ptr<heongpu::Ciphertext<SCHEME>> Out;
 
         for (int d = 0; d < L; ++d) {
@@ -975,8 +992,8 @@ struct Operator {
                 ops.add_inplace(a_d, rot);
             }
 
-            // V cyclic rotate.
-            heongpu::Ciphertext<SCHEME> V_rot = *V_cyc.ct;
+            // V cyclic rotate (use V_aligned which is mod-dropped to a_d depth).
+            heongpu::Ciphertext<SCHEME> V_rot = V_aligned;
             if (d > 0) {
                 ops.rotate_rows_inplace(V_rot, *gk.gk, d * block_attn);
             }
