@@ -280,6 +280,7 @@ def enc_linear_matrix(
                 low_masks=low_masks,
                 high_masks=high_masks,
                 bias_vec=bias_vec,
+                weight_id=cache_key,
             )
             out_cts.append(result_ct)
             continue

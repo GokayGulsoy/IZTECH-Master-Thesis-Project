@@ -117,6 +117,17 @@ class HEonGPUBackend(CKKSBackend):
         # Cache for Halevi-Shoup diagonals — keyed by sha1(weight.bytes()).
         self._diag_cache: Dict[str, Tuple[List[Optional[List[float]]], int]] = {}
         self._diag_cache_lock = Lock()
+        # Phase 7b-BSGS: cached encoded mask plaintexts.
+        # Key: (block, shift, depth) → Plaintext.
+        # Mask plaintexts are layer-shape-shared and reused across
+        # every linear in the network.
+        self._mask_pt_cache: Dict[Tuple[int, int, int], object] = {}
+        # Per-weight encoded BSGS plaintext cache.
+        # Key: (weight_id, x_depth) → (diag0_pts: list, diagj_pts: list).
+        # On first call we encode once and stash; subsequent calls at
+        # the same x_depth reuse the GPU plaintexts — the dominant cost
+        # of a BSGS matmul.
+        self._bsgs_diag_cache: Dict[Tuple[int, int], Tuple[list, list]] = {}
         # Becomes True after configure_bootstrapping() succeeds; gates
         # auto-refresh inside mul/mul_plain.
         self._bootstrap_ready = False
@@ -457,6 +468,31 @@ class HEonGPUBackend(CKKSBackend):
                 high[base + j] = 1.0
         return low, high
 
+    def _get_mask_pt(self, block: int, shift: int, depth: int):
+        """Return cached (low_pt, high_pt) at the requested chain depth.
+
+        The first request encodes both plaintexts at depth 0 and mod-drops
+        them to ``depth``; subsequent requests at the same ``depth`` reuse
+        the GPU plaintexts directly. Same-shape masks dominate the BSGS
+        plaintext encoding cost, so this cache yields a large win.
+        """
+        key_lo = (block, shift, depth, 0)
+        key_hi = (block, shift, depth, 1)
+        lo_pt = self._mask_pt_cache.get(key_lo)
+        hi_pt = self._mask_pt_cache.get(key_hi)
+        if lo_pt is not None and hi_pt is not None:
+            return lo_pt, hi_pt
+        lo, hi = self._block_masks_static(block, shift, self._num_slots)
+        lo_pt = self._encode(lo)
+        hi_pt = self._encode(hi)
+        while self._ops.depth_of_plaintext(lo_pt) < depth:
+            self._ops.mod_drop_inplace_pt(lo_pt)
+        while self._ops.depth_of_plaintext(hi_pt) < depth:
+            self._ops.mod_drop_inplace_pt(hi_pt)
+        self._mask_pt_cache[key_lo] = lo_pt
+        self._mask_pt_cache[key_hi] = hi_pt
+        return lo_pt, hi_pt
+
     def halevi_shoup_matmul(
         self,
         ct_x: Ciphertext,
@@ -467,11 +503,15 @@ class HEonGPUBackend(CKKSBackend):
         low_masks: Sequence[Optional[Sequence[float]]],
         high_masks: Sequence[Optional[Sequence[float]]],
         bias_vec: Optional[Sequence[float]] = None,
+        weight_id: Optional[str] = None,
     ) -> Ciphertext:
         """Run the matrix-packed Halevi-Shoup matvec entirely in C++.
 
         For ``len(shifts) > BSGS_THRESHOLD`` the wrapper switches to
         baby-step/giant-step (Galois keys: O(√n) instead of O(n)).
+        ``weight_id`` (when provided) keys a per-weight diagonal
+        plaintext cache so subsequent calls at the same input depth
+        skip diagonal encoding.
         """
         if not (len(shifts) == len(diagonals) == len(low_masks) == len(high_masks)):
             raise ValueError("shifts/diagonals/low_masks/high_masks size mismatch")
@@ -490,14 +530,12 @@ class HEonGPUBackend(CKKSBackend):
             return out
 
         n = len(shifts)
-        # Verify shifts match an identity layout (i.e. shifts[k] == k).
-        # The BSGS layout assumes consecutive shifts. The linear path
-        # works for arbitrary shifts.
         consecutive = all(int(shifts[k]) == k for k in range(n))
 
         if n > self.BSGS_THRESHOLD and consecutive:
             return self._halevi_shoup_matmul_bsgs(
-                ct_x, block=block, n=n, diagonals=diagonals, bias_vec=bias_vec,
+                ct_x, block=block, n=n, diagonals=diagonals,
+                bias_vec=bias_vec, weight_id=weight_id,
             )
         return self._halevi_shoup_matmul_linear(
             ct_x, block=block, shifts=shifts, diagonals=diagonals,
@@ -590,16 +628,13 @@ class HEonGPUBackend(CKKSBackend):
         n: int,
         diagonals: Sequence[Optional[Sequence[float]]],
         bias_vec: Optional[Sequence[float]] = None,
+        weight_id: Optional[str] = None,
     ) -> Ciphertext:
         """BSGS path: O(√n) Galois keys, O(√n) baby rotations.
 
-        Uses ``n`` consecutive shifts ``[0, 1, …, n-1]`` factored as
-        ``b1 * b2``; pre-rotates ``ct_x`` by every baby shift once,
-        then per-giant accumulates an inner product over ``b1``
-        babies (with lazy rescale) and applies the giant per-block
-        rotation.
-
-        Result depth = ``ct_x.depth() + 3`` (vs +2 for the linear path).
+        Uses the per-(block,shift,depth) mask plaintext cache and an
+        optional per-weight diagonal plaintext cache (keyed on
+        ``weight_id`` and ``ct_x.depth()``).
         """
         b1, b2 = self._factor_bsgs(n)
         x_depth = self._ops.depth(ct_x)
@@ -623,13 +658,7 @@ class HEonGPUBackend(CKKSBackend):
         baby_low_pts = [self._encode(zero_pad)]   # idx 0 unused
         baby_high_pts = [self._encode(zero_pad)]
         for j in range(1, b1):
-            lo, hi = self._block_masks_static(block, j, num_slots)
-            lo_pt = self._encode(lo)
-            hi_pt = self._encode(hi)
-            while self._ops.depth_of_plaintext(lo_pt) < x_depth:
-                self._ops.mod_drop_inplace_pt(lo_pt)
-            while self._ops.depth_of_plaintext(hi_pt) < x_depth:
-                self._ops.mod_drop_inplace_pt(hi_pt)
+            lo_pt, hi_pt = self._get_mask_pt(block, j, x_depth)
             baby_low_pts.append(lo_pt)
             baby_high_pts.append(hi_pt)
 
@@ -637,14 +666,49 @@ class HEonGPUBackend(CKKSBackend):
             ct_x, self._gk, int(block),
             baby_shifts, baby_low_pts, baby_high_pts,
         )
-        # Babies live at depth d (idx 0) and d+1 (idx>=1) — see C++ kernel.
-        del baby_low_pts, baby_high_pts
 
-        # ── 3. Per-giant chunk dispatch ──
+        # ── 3. Diagonal plaintext cache (per (weight_id, x_depth)) ──
+        diag_cache_key = (weight_id, x_depth) if weight_id is not None else None
+        cached_diags = (
+            self._bsgs_diag_cache.get(diag_cache_key)
+            if diag_cache_key is not None else None
+        )
+
+        # ── 4. Per-giant chunk dispatch ──
         result: Optional[Ciphertext] = None
+        # acc_depth feeding the giant rotate.
+        acc_depth = x_depth + 2 if b1 > 1 else x_depth + 1
+
+        if cached_diags is not None:
+            all_diag0_pts, all_diagj_pts = cached_diags
+        else:
+            # Encode every diagonal once up-front (still bounded; eagerness
+            # avoids re-encoding on subsequent BSGS calls of the same shape).
+            all_diag0_pts: list = []
+            all_diagj_pts: list = []
+            for g in range(b2):
+                gs = g * b1
+                d0 = diagonals[gs] if gs < n else None
+                if d0 is None:
+                    d0 = zero_pad
+                pt_d0 = self._encode(self._per_block_roll(d0, gs, block, num_slots))
+                while self._ops.depth_of_plaintext(pt_d0) < x_depth:
+                    self._ops.mod_drop_inplace_pt(pt_d0)
+                all_diag0_pts.append(pt_d0)
+                for j in range(1, b1):
+                    idx = gs + j
+                    dj = diagonals[idx] if idx < n else None
+                    if dj is None:
+                        dj = zero_pad
+                    pt_dj = self._encode(self._per_block_roll(dj, gs, block, num_slots))
+                    while self._ops.depth_of_plaintext(pt_dj) < x_depth + 1:
+                        self._ops.mod_drop_inplace_pt(pt_dj)
+                    all_diagj_pts.append(pt_dj)
+            if diag_cache_key is not None:
+                self._bsgs_diag_cache[diag_cache_key] = (all_diag0_pts, all_diagj_pts)
+
         for g_start in range(0, b2, self.BSGS_GIANT_CHUNK):
             g_end = min(g_start + self.BSGS_GIANT_CHUNK, b2)
-            G = g_end - g_start
 
             chunk_giant_shifts: List[int] = []
             diag0_pts = []
@@ -654,41 +718,16 @@ class HEonGPUBackend(CKKSBackend):
             for g in range(g_start, g_end):
                 gs = g * b1
                 chunk_giant_shifts.append(gs)
+                diag0_pts.append(all_diag0_pts[g])
+                # diagj layout: contiguous per-giant block of (b1-1) entries.
+                for jj in range(b1 - 1):
+                    diagj_pts.append(all_diagj_pts[g * (b1 - 1) + jj])
 
-                # j=0 diag: rolled right by g·b1 within block, at depth d.
-                d0 = diagonals[g * b1] if (g * b1) < n else None
-                if d0 is None:
-                    d0 = zero_pad
-                pt_d0 = self._encode(self._per_block_roll(d0, gs, block, num_slots))
-                while self._ops.depth_of_plaintext(pt_d0) < x_depth:
-                    self._ops.mod_drop_inplace_pt(pt_d0)
-                diag0_pts.append(pt_d0)
-
-                # j>=1 diags: rolled right by g·b1 within block, at depth d+1.
-                for j in range(1, b1):
-                    idx = g * b1 + j
-                    dj = diagonals[idx] if idx < n else None
-                    if dj is None:
-                        dj = zero_pad
-                    pt_dj = self._encode(self._per_block_roll(dj, gs, block, num_slots))
-                    while self._ops.depth_of_plaintext(pt_dj) < x_depth + 1:
-                        self._ops.mod_drop_inplace_pt(pt_dj)
-                    diagj_pts.append(pt_dj)
-
-                # Giant masks for per_block_rotate(g·b1) at depth d+2.
-                # The acc fed to the giant rotate is at depth d+2 (or d+1 if b1==1).
-                acc_depth = x_depth + 2 if b1 > 1 else x_depth + 1
                 if gs == 0:
                     glo_pts.append(self._encode(zero_pad))
                     ghi_pts.append(self._encode(zero_pad))
                 else:
-                    lo, hi = self._block_masks_static(block, gs, num_slots)
-                    lo_pt = self._encode(lo)
-                    hi_pt = self._encode(hi)
-                    while self._ops.depth_of_plaintext(lo_pt) < acc_depth:
-                        self._ops.mod_drop_inplace_pt(lo_pt)
-                    while self._ops.depth_of_plaintext(hi_pt) < acc_depth:
-                        self._ops.mod_drop_inplace_pt(hi_pt)
+                    lo_pt, hi_pt = self._get_mask_pt(block, gs, acc_depth)
                     glo_pts.append(lo_pt)
                     ghi_pts.append(hi_pt)
 
@@ -696,14 +735,13 @@ class HEonGPUBackend(CKKSBackend):
                 babies, self._gk, int(block),
                 chunk_giant_shifts, diag0_pts, diagj_pts, glo_pts, ghi_pts,
             )
-            del diag0_pts, diagj_pts, glo_pts, ghi_pts
 
             if result is None:
                 result = chunk_result
             else:
                 self._ops.add_inplace_match(result, chunk_result)
 
-        # ── 4. Bias ──
+        # ── 5. Bias ──
         if bias_vec is not None:
             r_depth = self._ops.depth(result)
             bias_pt = self._encode(list(bias_vec))
