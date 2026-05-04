@@ -44,7 +44,7 @@ def torch_attn(x, Wq, bq, Wk, bk, Wv, bv, Wo, bo, n_heads, sm_coeffs, interval):
 
 
 def main():
-    hidden, n_heads, L = 64, 2, 8
+    hidden, n_heads, L = 128, 2, 32
     head_dim = hidden // n_heads
     block = 256
     log(f"Config hidden={hidden} heads={n_heads} L={L} block={block}")
