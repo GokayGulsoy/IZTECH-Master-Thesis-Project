@@ -46,7 +46,7 @@ def main():
         ct_x = be.encrypt_coeff(x.tolist())
         # Mod-drop to start_depth
         for _ in range(start_depth):
-            be._ops.mod_drop_inplace(ct_x)
+            be._ops.mod_drop_inplace_ct(ct_x)
         d = be._ops.depth(ct_x)
         # Time
         t = time.time()
