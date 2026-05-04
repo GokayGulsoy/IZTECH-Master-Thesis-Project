@@ -21,22 +21,21 @@ def log(m): print(f"[{time.strftime('%H:%M:%S')}] {m}", flush=True)
 
 
 def main():
-    L = 128
+    L = 64
     hidden = 768
     num_heads = 12
     head_dim = hidden // num_heads     # 64
     inter = 4 * hidden                  # 3072
 
     log(f"Config L={L} hidden={hidden} heads={num_heads} head_dim={head_dim}")
-    # n_slots = N/2; need n_slots >= L*hidden = 98304 -> N=2^18 (131072 slots).
-    N = 1 << 18
+    # n_slots = N/2; need n_slots >= L*hidden = 49152 -> N=2^17 (65536 slots).
+    N = 1 << 17
     log(f"Init backend N={N}...")
     be = HEonGPUBackend(
         poly_modulus_degree=N,
-        # Tighter chain to fit Galois keys in GPU memory at N=2^18.
-        # 1 layer needs ~12 levels (3 linears + softmax + LN + GELU each ~2).
-        q_prime_bits=(60,) + (50,) * 14,
-        p_prime_bits=(60, 60),
+        # Standard chain at N=2^17 — fits in GPU memory comfortably.
+        q_prime_bits=(60,) + (50,) * 30,
+        p_prime_bits=(60, 60, 60),
         scale_bits=50,
         bootstrap_hamming_weight=16,
         sec_none=True,
