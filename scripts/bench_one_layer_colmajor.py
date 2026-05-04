@@ -34,6 +34,7 @@ from fhe_thesis.encryption.ops_attention_nexus import (
     linear_colmajor, layernorm_colmajor,
     qk_scores_nexus, attn_apply_nexus,
     prepare_colmajor_keys,
+    build_colmajor_linear_plan, linear_colmajor_bsgs_cpp,
 )
 
 
@@ -94,28 +95,43 @@ def main():
 
     inv_sqrt_d = 1.0 / np.sqrt(head_dim)
     times = {}
+    build_times = {}
 
     def stamp(name, dt, depth=None):
         times[name] = times.get(name, 0.0) + dt
         d = f" depth={depth}" if depth is not None else ""
         log(f"  {name:<22s} {dt*1000:8.1f} ms{d}")
 
+    def stamp_build(name, dt):
+        build_times[name] = build_times.get(name, 0.0) + dt
+
+    def linear_cpp(name, input_ct, W, bias=None):
+        """Build plan at input depth + execute via C++ BSGS. Reports
+        build and exec times separately. Plan is one-off cost amortized
+        across all inferences using the same model weights."""
+        in_d = W.shape[1]
+        out_d = W.shape[0]
+        depth = be._ops.depth(input_ct)
+        t = time.time()
+        plan = build_colmajor_linear_plan(
+            be, W, L=L, in_dim=in_d, out_dim=out_d, bias=bias, ct_depth=depth,
+        )
+        stamp_build(name, time.time() - t)
+        t = time.time()
+        Y = linear_colmajor_bsgs_cpp(be, input_ct, plan)
+        stamp(name, time.time() - t, depth=be._ops.depth(Y))
+        return Y
+
     # ──────────── ATTENTION ────────────
     log("=== ATTENTION (fused QKV + 4-head packing) ===")
     # 3 fused linears: Wq/Wk/Wv each maps hidden → hidden, packing all
     # 12 heads into one ct (head h occupies slots [h·head_dim·L, (h+1)·head_dim·L)).
     gc.collect()
-    t = time.time()
-    Q_full = linear_colmajor(be, x_ct, Wq, L=L, in_dim=hidden, out_dim=hidden)
-    stamp("Wq_fused", time.time() - t, depth=be._ops.depth(Q_full))
+    Q_full = linear_cpp("Wq_fused", x_ct, Wq)
     gc.collect()
-    t = time.time()
-    K_full = linear_colmajor(be, x_ct, Wk, L=L, in_dim=hidden, out_dim=hidden)
-    stamp("Wk_fused", time.time() - t)
+    K_full = linear_cpp("Wk_fused", x_ct, Wk)
     gc.collect()
-    t = time.time()
-    V_full = linear_colmajor(be, x_ct, Wv, L=L, in_dim=hidden, out_dim=hidden)
-    stamp("Wv_fused", time.time() - t)
+    V_full = linear_cpp("Wv_fused", x_ct, Wv)
 
     # Group heads by num_heads_per_ct = 12 (all heads in one ct).
     # 12·head_dim·L = 12·64·32 = 24576 ≤ 32768 ✓
@@ -166,9 +182,7 @@ def main():
 
     # ──────────── Wo + residual + LN1 ────────────
     log("=== Wo + LN1 ===")
-    t = time.time()
-    O = linear_colmajor(be, O_full, Wo, L=L, in_dim=hidden, out_dim=hidden)
-    stamp("Wo", time.time() - t, depth=be._ops.depth(O))
+    O = linear_cpp("Wo", O_full, Wo)
 
     t = time.time()
     res1 = be.add(O, x_ct)
@@ -191,9 +205,7 @@ def main():
     for s in range(4):
         gc.collect()
         Ws = W1[s * hidden:(s + 1) * hidden, :]   # (768, 768)
-        t = time.time()
-        Hs = linear_colmajor(be, h1, Ws, L=L, in_dim=hidden, out_dim=hidden)
-        stamp(f"W1[s{s}]", time.time() - t, depth=be._ops.depth(Hs))
+        Hs = linear_cpp(f"W1[s{s}]", h1, Ws)
         t = time.time()
         Gs = be.polyval(Hs, [0.5, 0.398, 0.0, -0.0066])
         stamp(f"gelu[s{s}]", time.time() - t, depth=be._ops.depth(Gs))
@@ -209,9 +221,7 @@ def main():
     for s in range(4):
         gc.collect()
         Ws2 = W2[:, s * hidden:(s + 1) * hidden]   # (768, 768)
-        t = time.time()
-        Y = linear_colmajor(be, slabs[s], Ws2, L=L, in_dim=hidden, out_dim=hidden)
-        stamp(f"W2[s{s}]", time.time() - t, depth=be._ops.depth(Y))
+        Y = linear_cpp(f"W2[s{s}]", slabs[s], Ws2)
         H2 = Y if H2 is None else be.add(H2, Y)
 
     # ──────────── residual + LN2 ────────────
@@ -257,6 +267,10 @@ def main():
     print(f"  {'TOTAL (1 layer)':<32s}  {total*1000:8.1f} ms")
     print(f"  {'PROJECTED 12-layer e2e':<32s}  {total*12:8.1f} s")
     print("=" * 70)
+    if build_times:
+        bt = sum(build_times.values())
+        print(f"  {'plan-build (one-off, amortizable)':<32s}  {bt*1000:8.1f} ms")
+        print("=" * 70)
 
 
 if __name__ == "__main__":
