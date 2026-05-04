@@ -117,10 +117,9 @@ def main():
     V_full = linear_colmajor(be, x_ct, Wv, L=L, in_dim=hidden, out_dim=hidden)
     stamp("Wv_fused", time.time() - t)
 
-    # Group heads by num_heads_per_ct = 4. Each group: extract 4 heads side-by-side
-    # via one rotation, run packed attention, scatter back.
-    num_heads_per_ct = 4
-    n_groups = num_heads_per_ct  # NOT — n_groups = num_heads // num_heads_per_ct
+    # Group heads by num_heads_per_ct = 12 (all heads in one ct).
+    # 12·head_dim·L = 12·64·32 = 24576 ≤ 32768 ✓
+    num_heads_per_ct = 12
     n_groups = num_heads // num_heads_per_ct
     head_block = head_dim * L  # 2048 slots per head
     group_block = num_heads_per_ct * head_block  # 8192 slots per group
