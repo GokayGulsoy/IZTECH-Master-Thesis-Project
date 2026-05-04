@@ -413,6 +413,111 @@ struct Operator {
     void set_rescale_required(Ciphertext& c) {
         c.ct->set_rescale_required();
     }
+
+    // ── NEXUS Phase 6: batched BSGS gather inside one C++ call ──
+    //
+    // Replaces the Python ``gather_slots`` BSGS loop:
+    //   1. pre-rotate ``ct`` by each baby shift
+    //   2. for each giant g_i, accumulate Σⱼ baby_rotsⱼ ⊙ maskⱼ
+    //   3. single ``rescale_inplace`` per giant (lazy rescale folds N
+    //      mul_plain rescales into one), then optional giant rotate
+    //   4. add giant accumulators into a single result ciphertext.
+    //
+    // Inputs (all parallel, CSR-style):
+    //   baby_shifts        – distinct ``b`` values; ``b == 0`` skips rotation
+    //   giant_shifts       – distinct ``g`` values per accumulator
+    //   bucket_offsets     – size = giant_shifts.size() + 1 (CSR row ptrs)
+    //   bucket_baby_idx    – per term: index into baby_shifts
+    //   bucket_masks       – per term: pre-encoded mask plaintext at the
+    //                        SAME chain depth as ``ct``
+    //
+    // Caller is responsible for:
+    //   * Galois keys for every shift in ``baby_shifts ∪ giant_shifts``
+    //     (excluding 0) being already generated.
+    //   * Plaintext masks being mod-dropped to ct.depth() before the call.
+    //
+    // Output: single ciphertext at depth ``ct.depth() + 1`` (one rescale).
+    Ciphertext gather_slots_bsgs(
+        Ciphertext& ct,
+        GaloisKey&  gk,
+        const std::vector<int>&       baby_shifts,
+        const std::vector<int>&       giant_shifts,
+        const std::vector<int>&       bucket_offsets,
+        const std::vector<int>&       bucket_baby_idx,
+        const std::vector<Plaintext>& bucket_masks)
+    {
+        if (baby_shifts.empty() || giant_shifts.empty()) {
+            throw std::invalid_argument(
+                "gather_slots_bsgs: baby_shifts/giant_shifts must be non-empty");
+        }
+        if (bucket_offsets.size() != giant_shifts.size() + 1) {
+            throw std::invalid_argument(
+                "gather_slots_bsgs: bucket_offsets size must be "
+                "giant_shifts.size() + 1");
+        }
+        const int total_terms = bucket_offsets.back();
+        if ((int) bucket_baby_idx.size() != total_terms ||
+            (int) bucket_masks.size()    != total_terms) {
+            throw std::invalid_argument(
+                "gather_slots_bsgs: bucket_baby_idx / bucket_masks length "
+                "mismatch with bucket_offsets.back()");
+        }
+
+        // 1. Pre-rotate. Always copy so subsequent in-place mul_plain on
+        //    a baby_rot doesn't clobber the input ciphertext.
+        std::vector<heongpu::Ciphertext<SCHEME>> baby_rots;
+        baby_rots.reserve(baby_shifts.size());
+        for (int b : baby_shifts) {
+            baby_rots.emplace_back(*ct.ct);   // copy
+            if (b != 0) {
+                ops.rotate_rows_inplace(baby_rots.back(), *gk.gk, b);
+            }
+        }
+
+        // 2-4. Per-giant accumulate, lazy rescale, optional giant-rotate,
+        //      sum across giants.
+        std::shared_ptr<heongpu::Ciphertext<SCHEME>> result;
+
+        for (size_t gi = 0; gi < giant_shifts.size(); ++gi) {
+            const int start = bucket_offsets[gi];
+            const int end   = bucket_offsets[gi + 1];
+            if (start == end) continue;          // empty bucket — skip
+
+            // First term initialises the accumulator (avoids encrypting 0).
+            heongpu::Ciphertext<SCHEME> acc =
+                baby_rots[bucket_baby_idx[start]];   // copy
+            ops.multiply_plain_inplace(acc, *bucket_masks[start].pt);
+
+            for (int j = start + 1; j < end; ++j) {
+                heongpu::Ciphertext<SCHEME> term =
+                    baby_rots[bucket_baby_idx[j]];   // copy
+                ops.multiply_plain_inplace(term, *bucket_masks[j].pt);
+                ops.add_inplace(acc, term);
+            }
+
+            // Single rescale for this giant — folds N mul_plain rescales
+            // into one. All N terms shared the same scale so adds were
+            // valid; after rescale the giant rotate sees a clean cipher.
+            ops.rescale_inplace(acc);
+
+            if (giant_shifts[gi] != 0) {
+                ops.rotate_rows_inplace(acc, *gk.gk, giant_shifts[gi]);
+            }
+
+            if (!result) {
+                result = std::make_shared<heongpu::Ciphertext<SCHEME>>(acc);
+            } else {
+                ops.add_inplace(*result, acc);
+            }
+        }
+
+        if (!result) {
+            // All buckets were empty — caller bug, but fail soft by
+            // returning a copy of the input untouched.
+            result = std::make_shared<heongpu::Ciphertext<SCHEME>>(*ct.ct);
+        }
+        return Ciphertext{result};
+    }
 };
 
 // -----------------------------------------------------------------------------
@@ -586,5 +691,17 @@ PYBIND11_MODULE(_heongpu, m) {
         .def("set_rescale_required", &Operator::set_rescale_required,
              "NEXUS escape hatch: force rescale_required_=true so a "
              "follow-up rescale_inplace can drop a Q prime to bring "
-             "scale back to canonical (e.g. after CtoS leaves us at scale²).");
+             "scale back to canonical (e.g. after CtoS leaves us at scale²).")
+        .def("gather_slots_bsgs",   &Operator::gather_slots_bsgs,
+             py::arg("ct"), py::arg("galois_key"),
+             py::arg("baby_shifts"), py::arg("giant_shifts"),
+             py::arg("bucket_offsets"), py::arg("bucket_baby_idx"),
+             py::arg("bucket_masks"),
+             py::call_guard<py::gil_scoped_release>(),
+             "NEXUS Phase 6: batched BSGS gather inside one C++ call. "
+             "Pre-rotates ct by each baby shift, accumulates per-giant "
+             "Σ baby_rot ⊙ mask, single rescale per giant, optional "
+             "giant-rotate, sums giants. Eliminates Python wrapper "
+             "overhead (encoding masks must be pre-built and at "
+             "ct.depth()). Result depth = ct.depth() + 1.");
 }

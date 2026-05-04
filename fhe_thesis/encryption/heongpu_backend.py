@@ -589,6 +589,10 @@ class HEonGPUBackend(CKKSBackend):
         the difference between gathering 256 distinct shifts at ~32 keys
         vs 256 keys (avoids OOM on the Galois eval keys).
 
+        Phase 6: dispatches to the C++ ``gather_slots_bsgs`` binding so
+        the entire pre-rotate / per-giant accumulate / lazy-rescale /
+        giant-rotate / sum loop runs without crossing the Python boundary.
+
         Multiplicative depth: 1.
         """
         N = self._num_slots
@@ -606,10 +610,7 @@ class HEonGPUBackend(CKKSBackend):
         # We want result[dst] = ct[src]. With our convention
         # rotate(x, k)[i] = x[(i+k) mod N], we need a total shift of
         # k = (src - dst) mod N. Decompose k = g + b, g multiple of B,
-        # b ∈ [0, B). Pre-rotate ct by each b, mask at position (dst+g),
-        # then giant-rotate by g.
-        # mask_{g,b}[(dst + g) mod N] = 1 contributes ct[(dst+g+b) mod N]
-        # = ct[src] when dst+g+b ≡ src (mod N).
+        # b ∈ [0, B).
         all_k = [(srcs[i] - dsts[i]) % N for i in range(m)]
         B, _, _ = self._bsgs_decompose(all_k, baby_size=baby_size)
 
@@ -622,33 +623,40 @@ class HEonGPUBackend(CKKSBackend):
             babies_used.add(b)
             giant_buckets.setdefault(g, {}).setdefault(b, []).append((dst + g) % N)
 
-        # Pre-rotate ct by each baby step.
-        baby_rots: Dict[int, Ciphertext] = {}
-        for b in babies_used:
-            baby_rots[b] = self.rotate(ct, b) if b else ct
-
-        # Register Galois keys: babies (positive) ∪ giants (positive)
-        needed_keys = set(babies_used) | set(giant_buckets.keys())
-        # rotate() expects signed shifts; convert (we use positive only here)
+        # Register Galois keys: babies (positive) ∪ giants (positive),
+        # excluding 0 (no rotation needed).
+        needed_keys = (babies_used | set(giant_buckets.keys())) - {0}
         self.register_rotation_keys(needed_keys)
 
-        # Build masked sums per giant, then giant-rotate, accumulate.
-        result: Optional[Ciphertext] = None
-        for g, b_to_positions in giant_buckets.items():
-            acc: Optional[Ciphertext] = None
-            for b, positions in b_to_positions.items():
+        # Build flat CSR arrays for the C++ call.
+        baby_shifts_list: List[int] = sorted(babies_used)
+        baby_idx_map: Dict[int, int] = {b: i for i, b in enumerate(baby_shifts_list)}
+        giant_list: List[int] = sorted(giant_buckets.keys())
+
+        bucket_offsets: List[int] = [0]
+        bucket_baby_idx: List[int] = []
+        bucket_masks: list = []  # list of heongpu_bindings.Plaintext
+
+        ct_depth = self._ops.depth(ct)
+        for g in giant_list:
+            for b, positions in giant_buckets[g].items():
                 mask = [0.0] * N
                 for p in positions:
                     mask[p] = 1.0
-                term = self.mul_plain(baby_rots[b], mask)
-                acc = term if acc is None else self.add(acc, term)
-            assert acc is not None
-            moved = self.rotate(acc, g) if g else acc
-            result = moved if result is None else self.add(result, moved)
+                pt = self._encode(mask)
+                # Plaintexts start at depth 0; mod-drop to ct's level so
+                # multiply_plain_inplace inside C++ sees matching depth.
+                while self._ops.depth_of_plaintext(pt) < ct_depth:
+                    self._ops.mod_drop_inplace_pt(pt)
+                bucket_baby_idx.append(baby_idx_map[b])
+                bucket_masks.append(pt)
+            bucket_offsets.append(len(bucket_baby_idx))
 
-        if result is None:
-            return self.mul_plain(ct, [0.0] * N)
-        return result
+        return self._ops.gather_slots_bsgs(
+            ct, self._gk,
+            baby_shifts_list, giant_list,
+            bucket_offsets, bucket_baby_idx, bucket_masks,
+        )
 
     def nexus_linear(
         self,
@@ -730,17 +738,10 @@ class HEonGPUBackend(CKKSBackend):
 
         HEonGPU operations are in-place; to honour the out-of-place
         contract of :class:`CKKSBackend` we materialise a working copy
-        by adding a freshly-encrypted zero ciphertext. Keeps depth flat
-        (no rescale).
+        via the C++ ``clone_ct`` (a single copy-assign on the device).
+        Keeps depth flat (no rescale, no encrypt-of-zero).
         """
-        zero = self._encryptor.encrypt(
-            self._ctx,
-            self._encoder.encode(
-                self._ctx, [0.0] * self._num_slots, self._scale
-            ),
-        )
-        self._ops.add_inplace_match(zero, ct)
-        return zero
+        return self._ops.clone_ct(ct)
 
     # ── bootstrapping (Phase 4) ───────────────────────────────────────
     def configure_bootstrapping(
