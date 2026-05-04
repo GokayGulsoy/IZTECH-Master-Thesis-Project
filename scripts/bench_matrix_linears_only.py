@@ -22,7 +22,7 @@ def main():
     log("Init backend (no bootstrap config — just measure depth)...")
     be = HEonGPUBackend(
         poly_modulus_degree=1 << 16,
-        q_prime_bits=(60,) + (50,) * 30,
+        q_prime_bits=(60,) + (50,) * 6,  # only 4-6 levels needed for linears + BSGS
         p_prime_bits=(60, 60, 60),
         scale_bits=50,
         bootstrap_hamming_weight=16,
