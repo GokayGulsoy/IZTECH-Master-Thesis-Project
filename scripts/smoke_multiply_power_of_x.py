@@ -46,8 +46,8 @@ def main() -> None:
     ct = be._encryptor.encrypt(be._ctx, pt)
 
     # Decode roundtrip sanity:
-    dec = be._decryptor.decrypt(ct)
-    rec = np.array(be._encoder.decode_coeff(dec)[:N])
+    dec = be._decryptor.decrypt(be._ctx, ct)
+    rec = np.array(be._encoder.decode_coeff(be._ctx, dec)[:N])
     err0 = np.max(np.abs(rec - coeffs))
     print(f"roundtrip err (k=0): {err0:.3e}")
 
@@ -55,8 +55,8 @@ def main() -> None:
         pt2 = be._encoder.encode_coeff(be._ctx, list(coeffs), be._scale)
         ct2 = be._encryptor.encrypt(be._ctx, pt2)
         be._ops.multiply_power_of_x_inplace(ct2, k)
-        dec2 = be._decryptor.decrypt(ct2)
-        rec2 = np.array(be._encoder.decode_coeff(dec2)[:N])
+        dec2 = be._decryptor.decrypt(be._ctx, ct2)
+        rec2 = np.array(be._encoder.decode_coeff(be._ctx, dec2)[:N])
 
         ref = negacyclic_shift_ref(coeffs, k)
         err = np.max(np.abs(rec2 - ref))
