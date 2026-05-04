@@ -1133,6 +1133,10 @@ def enc_self_attention_diagonal(
     concat = _concat_heads_matrix(backend, head_outputs, hidden, target_block)
     return enc_linear_matrix(backend, concat, Wo, bias=bo)
 
+
+def enc_self_attention_matrix(
+    backend: CKKSBackend,
+    x: MatrixPackedTensor,
     Wq: np.ndarray, bq: np.ndarray,
     Wk: np.ndarray, bk: np.ndarray,
     Wv: np.ndarray, bv: np.ndarray,
