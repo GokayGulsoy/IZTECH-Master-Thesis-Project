@@ -15,7 +15,8 @@ def log(m): print(f"[{time.strftime('%H:%M:%S')}] {m}", flush=True)
 
 
 def main():
-    L, in_dim, out_dim = 32, 64, 32
+    # BERT-base hidden=768 head_dim=64. L=32 fits in N=2^16 (768*32=24576 ≤ 32768).
+    L, in_dim, out_dim = 32, 768, 64
     log(f"Config L={L} in_dim={in_dim} out_dim={out_dim}")
 
     log("Init backend...")
