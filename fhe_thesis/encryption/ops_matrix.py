@@ -380,13 +380,12 @@ def per_block_sum_then_broadcast(
 
     Total depth: **1 level** (the single mul_plain in step 2).
 
-    Safety constraint: ``2·hidden_dim ≤ block`` so the broadcast doesn't
-    leak into adjacent blocks. Always satisfied for BERT-base LN inputs
-    (hidden_dim=768, block=4096).
+    Safety constraint: ``hidden_dim ≤ block`` (no inter-block leak
+    because the largest right-rotation in step 3 is ``hidden_dim/2 ≤ block/2``).
     """
-    if 2 * hidden_dim > block:
+    if hidden_dim > block:
         raise ValueError(
-            f"per_block_sum_then_broadcast requires 2*hidden_dim ≤ block; "
+            f"per_block_sum_then_broadcast requires hidden_dim ≤ block; "
             f"got hidden_dim={hidden_dim}, block={block}"
         )
 
@@ -808,9 +807,332 @@ def _concat_heads_matrix(
     )
 
 
-def enc_self_attention_matrix(
+# ---------------------------------------------------------------------------
+# Phase 7d: diagonal attention (NEXUS-style, O(L) instead of O(L^2))
+# ---------------------------------------------------------------------------
+#
+# Layout used inside attention:
+#   • block_attn = next_pow2(L)
+#   • Q, K, V:  slot[i*block_attn + k] = X[i, k]   (k < head_dim, rest zero)
+#   • S, A   :  diagonal layout — slot[i*block_attn + d] = S[i, (i+d) mod L]
+#   • A @ V output: same as Q layout (slot[i*block_attn + k] = Out[i, k])
+#
+# Constraints:
+#   • L * block_attn <= num_slots  → all L tokens fit in ONE ciphertext
+#   • head_dim <= block_attn       (always: block_attn = next_pow2(L) >= L >= head_dim
+#                                   for typical configs, but we assert)
+#   • Output Q/K/V projection still uses original block; we repack here.
+
+
+def _repack_to_attn_layout(
+    backend: CKKSBackend,
+    mpt: MatrixPackedTensor,
+    *,
+    block_attn: int,
+) -> Ciphertext:
+    """Pack ``mpt`` (block=B_full) into one ct with stride ``block_attn``.
+
+    Output ct slot ``i*block_attn + k`` holds ``mpt[i, k]`` for
+    ``k < mpt.hidden_dim``; trailing ``block_attn - hidden_dim`` slots
+    of each token block are zero. Requires ``L * block_attn ≤ num_slots``.
+
+    Cost: ``L`` rotations + ``L`` mul_plain (mask) + ``L`` adds.
+    """
+    L = mpt.seq_len
+    head_dim = mpt.hidden_dim
+    num_slots = mpt.num_slots
+    if L * block_attn > num_slots:
+        raise ValueError(
+            f"_repack_to_attn_layout: L*block_attn={L*block_attn} > "
+            f"num_slots={num_slots}"
+        )
+    if head_dim > block_attn:
+        raise ValueError(
+            f"head_dim {head_dim} > block_attn {block_attn}"
+        )
+
+    # Mask keeping only first head_dim slots (used after every extract+rotate).
+    mask = [0.0] * num_slots
+    for j in range(head_dim):
+        mask[j] = 1.0  # head_dim valid slots at slot 0 of result
+
+    out: Optional[Ciphertext] = None
+    for i in range(L):
+        tok = _extract_token(backend, mpt, i)  # token at slots [0..head_dim)
+        # Right-rotate by i*block_attn so token i lands at slot i*block_attn.
+        if i > 0:
+            tok = backend.rotate(tok, -i * block_attn)
+        out = tok if out is None else backend.add(out, tok)
+    if out is None:
+        out = backend.mul_plain(mpt.cts[0], [0.0] * num_slots)
+    return out
+
+
+def _repack_from_attn_layout(
+    backend: CKKSBackend,
+    ct: Ciphertext,
+    *,
+    L: int,
+    head_dim: int,
+    block_attn: int,
+    target_block: int,
+    num_slots: int,
+) -> MatrixPackedTensor:
+    """Inverse of :func:`_repack_to_attn_layout`: attn-layout → MPT(block=target_block).
+
+    Token i lives at slots ``[i*block_attn, i*block_attn + head_dim)`` of
+    ``ct``. We rebuild a MatrixPackedTensor with the original block.
+
+    Cost: ``L`` rotations + ``L`` mul_plain + ``L`` adds, distributed
+    across ``ceil(L / B_target)`` output ciphertexts.
+    """
+    B_target = num_slots // target_block
+    n_out_cts = (L + B_target - 1) // B_target
+
+    out_cts: List[Optional[Ciphertext]] = [None] * n_out_cts
+
+    # Mask isolating one token's head_dim values at slot 0.
+    mask0 = [0.0] * num_slots
+    for j in range(head_dim):
+        mask0[j] = 1.0
+
+    for i in range(L):
+        # Extract token i to slot 0..head_dim
+        rot = backend.rotate(ct, i * block_attn) if i > 0 else ct
+        tok = backend.mul_plain(rot, mask0)
+        # Place into output ct at block k of group g.
+        g, k = divmod(i, B_target)
+        if k > 0:
+            tok = backend.rotate(tok, -k * target_block)
+        out_cts[g] = tok if out_cts[g] is None else backend.add(out_cts[g], tok)
+
+    final: List[Ciphertext] = []
+    for c in out_cts:
+        if c is None:
+            c = backend.mul_plain(ct, [0.0] * num_slots)
+        final.append(c)
+
+    return MatrixPackedTensor.from_ciphertexts(
+        final,
+        seq_len=L,
+        hidden_dim=head_dim,
+        block=target_block,
+        tokens_per_ct=B_target,
+        num_slots=num_slots,
+    )
+
+
+def enc_qk_scores_diagonal(
+    backend: CKKSBackend,
+    Q_at: Ciphertext,
+    K_at: Ciphertext,
+    *,
+    L: int,
+    head_dim: int,
+    block_attn: int,
+    num_slots: int,
+    scale: float,
+) -> Ciphertext:
+    """Diagonal Q@K^T at attn layout.
+
+    Returns a single ct in **diagonal layout**:
+        slot[i*block_attn + d] = scale · S[i, (i+d) mod L]   for d ∈ [0, L)
+    Other slots in each token block are zero.
+
+    Algorithm — for each diagonal d ∈ [0, L):
+      1. K_rot = rotate(K_at, d * block_attn)  ── token i+d aligns with token i.
+      2. prod = Q_at * K_rot   (per-slot mult, depth +1)
+      3. diag = per_block_sum_then_broadcast(prod, head_dim → block_attn,
+                                              scale=scale)
+         — sums the head_dim valid product slots, broadcasts inside block.
+         Depth +1 (the single mul_plain inside).
+      4. mask to slot d of each block, add into accumulator.
+
+    Total: ``L`` ct-mults + ``L`` rotations + ``L`` per_block_sum +
+    ``L`` mul_plain masks + ``L`` adds.  → **O(L)** instead of O(L^2).
+    """
+    if head_dim > block_attn:
+        raise ValueError(f"head_dim {head_dim} > block_attn {block_attn}")
+
+    S: Optional[Ciphertext] = None
+    for d in range(L):
+        K_rot = backend.rotate(K_at, d * block_attn) if d > 0 else K_at
+        prod = backend.mul(Q_at, K_rot)
+        diag_bc = per_block_sum_then_broadcast(
+            backend, prod, hidden_dim=head_dim, block=block_attn,
+            num_slots=num_slots, scale=scale,
+        )
+        # Mask: keep only slot d of each token block.
+        mask = [0.0] * num_slots
+        for i in range(L):
+            slot = i * block_attn + d
+            if slot < num_slots:
+                mask[slot] = 1.0
+        masked = backend.mul_plain(diag_bc, mask)
+        S = masked if S is None else backend.add(S, masked)
+    if S is None:
+        S = backend.mul_plain(Q_at, [0.0] * num_slots)
+    return S
+
+
+def enc_attention_apply_diagonal(
+    backend: CKKSBackend,
+    A_diag: Ciphertext,
+    V_at: Ciphertext,
+    *,
+    L: int,
+    head_dim: int,
+    block_attn: int,
+    num_slots: int,
+) -> Ciphertext:
+    """Diagonal A@V at attn layout. ``A_diag`` is in diagonal layout.
+
+    Out[i, k] = Σ_j A[i, j] · V[j, k]
+             = Σ_d A_diag[i, d] · V[(i+d) mod L, k]
+             = Σ_d (column-d of A_diag) ⊙ rotate_token(V, d)
+
+    For each d ∈ [0, L):
+      1. mask A_diag to keep only slot (i*block_attn + d) for each i.
+      2. broadcast that scalar across the head_dim slots of the block
+         (using bare-rotate doubling — no levels consumed).
+      3. V_rot = rotate(V_at, d * block_attn)
+      4. accumulate mul(broadcast, V_rot)
+
+    Total: ``L`` ct-mults + ``L`` rotations + ``L`` mul_plain masks +
+    ``L * log2(head_dim)`` bare-rotate broadcasts (depth-free) + adds.
+    """
+    if head_dim > block_attn:
+        raise ValueError(f"head_dim {head_dim} > block_attn {block_attn}")
+
+    Out: Optional[Ciphertext] = None
+    for d in range(L):
+        # 1. Pick the d-column of A_diag: keep only slot i*block_attn + d.
+        mask = [0.0] * num_slots
+        for i in range(L):
+            slot = i * block_attn + d
+            if slot < num_slots:
+                mask[slot] = 1.0
+        a_d = backend.mul_plain(A_diag, mask)
+
+        # 2. Broadcast each isolated value across slots [i*block_attn,
+        #    i*block_attn + head_dim) using bare doubling rotations.
+        #    The value sits at slot i*block_attn + d (d may be > 0).
+        #    First, shift it to slot i*block_attn (per-block left rotate
+        #    by d) — but per_block rotates cost 1 level. Cheaper: do
+        #    NOT realign; instead broadcast across the full block with
+        #    bare rotates of powers of 2, then mask back to head_dim.
+        #    Because slot s in [i*block_attn, (i+1)*block_attn) only
+        #    has one nonzero at offset d, after log2(block_attn)
+        #    bare-rotates the value populates the whole block.
+        bcast = a_d
+        step = 1
+        while step < block_attn:
+            bcast = backend.add(bcast, backend.rotate(bcast, step))
+            step <<= 1
+        # bcast now has the d-column value broadcast across the full
+        # block_attn slots of every token block (and zero elsewhere).
+        # We do NOT need to mask to head_dim — V_at already has zeros
+        # in slots [head_dim..block_attn) so the multiplication zeros
+        # those products.
+
+        # 3. Rotate V_at by d token-blocks (V[(i+d) mod L] aligns with i).
+        V_rot = backend.rotate(V_at, d * block_attn) if d > 0 else V_at
+
+        # 4. Accumulate.
+        prod = backend.mul(bcast, V_rot)
+        Out = prod if Out is None else backend.add(Out, prod)
+
+    if Out is None:
+        Out = backend.mul_plain(V_at, [0.0] * num_slots)
+    return Out
+
+
+def enc_self_attention_diagonal(
     backend: CKKSBackend,
     x: MatrixPackedTensor,
+    Wq: np.ndarray, bq: np.ndarray,
+    Wk: np.ndarray, bk: np.ndarray,
+    Wv: np.ndarray, bv: np.ndarray,
+    Wo: np.ndarray, bo: np.ndarray,
+    softmax_coeffs: "PolyCoeffs",
+    num_heads: int,
+) -> MatrixPackedTensor:
+    """Phase 7d: NEXUS-style diagonal multi-head self-attention.
+
+    Same external contract as :func:`enc_self_attention_matrix` but the
+    attention dot-products are ``O(L)`` instead of ``O(L^2)``.
+
+    Pipeline per head:
+      Q,K,V (block=full)
+        → repack to attn-layout (block=next_pow2(L), single ct each)
+        → Q@K^T diagonal → S in diagonal layout
+        → softmax polynomial (slot-local; works on diagonal layout)
+        → A@V diagonal → Out at attn-layout
+        → repack back to full-block MPT
+      → concat heads → Wo
+    """
+    if Wq.shape != Wk.shape or Wq.shape != Wv.shape:
+        raise ValueError("Q/K/V weight shapes must match")
+    hidden = Wq.shape[0]
+    if hidden % num_heads != 0:
+        raise ValueError(f"hidden {hidden} not divisible by num_heads {num_heads}")
+    head_dim = hidden // num_heads
+    L = x.seq_len
+    block_attn = next_pow2(L)
+    num_slots = x.num_slots
+    target_block = x.block
+    inv_sqrt_d = 1.0 / np.sqrt(head_dim)
+
+    if L * block_attn > num_slots:
+        raise ValueError(
+            f"diagonal attention requires L*next_pow2(L) ≤ num_slots; "
+            f"got L={L}, block_attn={block_attn}, num_slots={num_slots}"
+        )
+
+    head_outputs: List[MatrixPackedTensor] = []
+    for h in range(num_heads):
+        s, e = h * head_dim, (h + 1) * head_dim
+        Q_h = enc_linear_matrix(backend, x, Wq[s:e, :], bias=bq[s:e])
+        K_h = enc_linear_matrix(backend, x, Wk[s:e, :], bias=bk[s:e])
+        V_h = enc_linear_matrix(backend, x, Wv[s:e, :], bias=bv[s:e])
+
+        Q_at = _repack_to_attn_layout(backend, Q_h, block_attn=block_attn)
+        K_at = _repack_to_attn_layout(backend, K_h, block_attn=block_attn)
+        V_at = _repack_to_attn_layout(backend, V_h, block_attn=block_attn)
+
+        S_diag = enc_qk_scores_diagonal(
+            backend, Q_at, K_at,
+            L=L, head_dim=head_dim, block_attn=block_attn,
+            num_slots=num_slots, scale=inv_sqrt_d,
+        )
+
+        # Softmax poly (slot-local, layout-agnostic).
+        if softmax_coeffs.per_head:
+            head_pc = softmax_coeffs.power_coeffs[h].tolist()
+        else:
+            head_pc = softmax_coeffs.power_coeffs.tolist()
+        a, b = softmax_coeffs.interval
+        ssc = 2.0 / (b - a)
+        ssh = -(a + b) / (b - a)
+        absorbed = _absorb_affine(head_pc, ssc, ssh)
+        A_diag = backend.polyval(S_diag, list(absorbed))
+
+        Out_at = enc_attention_apply_diagonal(
+            backend, A_diag, V_at,
+            L=L, head_dim=head_dim, block_attn=block_attn,
+            num_slots=num_slots,
+        )
+
+        out_mpt = _repack_from_attn_layout(
+            backend, Out_at,
+            L=L, head_dim=head_dim, block_attn=block_attn,
+            target_block=target_block, num_slots=num_slots,
+        )
+        head_outputs.append(out_mpt)
+
+    concat = _concat_heads_matrix(backend, head_outputs, hidden, target_block)
+    return enc_linear_matrix(backend, concat, Wo, bias=bo)
+
     Wq: np.ndarray, bq: np.ndarray,
     Wk: np.ndarray, bk: np.ndarray,
     Wv: np.ndarray, bv: np.ndarray,
