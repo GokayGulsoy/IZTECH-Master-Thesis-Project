@@ -26,9 +26,7 @@ def main():
     pt_d0 = be._encode(d0)
     pt_d1 = be._encode(d1)
     print(f"  fresh pt d0 depth={be._ops.depth_of_plaintext(pt_d0)}")
-    be._ops.mod_drop_inplace_pt(pt_d0)
-    be._ops.mod_drop_inplace_pt(pt_d1)
-    print(f"  after 1 drop: d0 depth={be._ops.depth_of_plaintext(pt_d0)}")
+    # NOTE: leave diags at depth 0 — C++ kernel mod-drops them per iter.
 
     lo = [0.0] * num_slots
     hi = [0.0] * num_slots
