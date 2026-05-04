@@ -51,9 +51,9 @@ def make_coeffs(num_layers: int):
     coeffs = {}
     for i in range(num_layers):
         coeffs[i] = {
-            "GELU":    PolyCoeffs(power_coeffs=gelu_p, interval=(-4.0, 4.0)),
-            "Softmax": PolyCoeffs(power_coeffs=sm_p,   interval=(-8.0, 8.0)),
-            "LN":      PolyCoeffs(power_coeffs=ln_p,   interval=(0.01, 4.0)),
+            "GELU":    PolyCoeffs(power_coeffs=gelu_p, interval=(-4.0, 4.0), degree=len(gelu_p)-1),
+            "Softmax": PolyCoeffs(power_coeffs=sm_p,   interval=(-8.0, 8.0), degree=len(sm_p)-1),
+            "LN":      PolyCoeffs(power_coeffs=ln_p,   interval=(0.01, 4.0), degree=len(ln_p)-1),
         }
     return coeffs
 
