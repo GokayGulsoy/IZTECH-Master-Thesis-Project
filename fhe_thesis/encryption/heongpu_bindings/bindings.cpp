@@ -813,6 +813,189 @@ struct Operator {
 
         return Ciphertext{result};
     }
+
+    // ────────────────────────────────────────────────────────────────
+    // Phase 7d-2: batched diagonal attention in C++.
+    //
+    // Eliminates Python overhead for the L-iteration diagonal loops in
+    // enc_qk_scores_diagonal / enc_attention_apply_diagonal. Each loop
+    // body has ~30 calls (rotate, mul, add, mul_plain) — at L=128 that's
+    // ~4000 Python<->C++ round trips per layer per head. Moving the
+    // whole loop to C++ removes GIL/dispatch overhead.
+    //
+    // All per-d plaintexts are pre-encoded by the Python wrapper at the
+    // correct depth so we never call encode/mod_drop inside the kernel.
+    // ────────────────────────────────────────────────────────────────
+
+    // diag_qk_scores: Q@K^T in diagonal layout.
+    //
+    //  Inputs:
+    //    Q_at, K_cyc      — already in attn layout, K_cyc replicated to 2L.
+    //    gk               — galois keys covering rotations:
+    //                       {-block_attn..-1, +1..+block_attn,
+    //                        d*block_attn for d in [1,L)}
+    //    L, block_attn, head_dim, num_slots
+    //    scale_pt         — encoded mask: scale at slot 0 of each block,
+    //                       0 elsewhere; at depth Q.depth() + 1 (post mul).
+    //                       Actually we mul Q*K → depth +1; rescale → depth +1.
+    //                       Then mul_plain by scale_pt → depth +1; rescale → +2.
+    //                       So scale_pt encoded at Q.depth() + 1.
+    //    col_pts[d]       — keep-slot-d mask (1.0 at slot d of each token
+    //                       block, 0 elsewhere); at depth Q.depth() + 2.
+    //                       (We mul_plain after the per-block-sum rescale.)
+    //
+    //  Algorithm per d in [0, L):
+    //    K_rot = (d==0) ? K_cyc : rotate(K_cyc, d * block_attn)
+    //    prod  = Q_at * K_rot                  # depth +1
+    //    rescale(prod)
+    //    # bare-doubling sum within block_attn (no levels consumed since
+    //    # we do not rescale after add):
+    //    sum = prod; for s=1; s<block_attn; s<<=1: sum += rotate(sum, s)
+    //    # single mul_plain by scale-at-slot-0 mask:
+    //    sum = sum * scale_pt                  # depth +1
+    //    rescale(sum)                           # → depth Q+2
+    //    # value lives at slot 0 of each block. Right-rotate by d to put
+    //    # it at slot d:
+    //    if d > 0: sum = rotate(sum, -d)
+    //    # Mask only slot d of each block (zero garbage we'd accumulate):
+    //    # Actually slot d is the only nonzero — others are 0 — so we
+    //    # CAN skip the mask. BUT: the bare-doubling sum populated
+    //    # garbage in many slots, which the slot-0 mask zeroed; after
+    //    # rotate-by-(-d) the value is at slot d and everything else
+    //    # is zero. No mask needed. ✓
+    //    S += sum
+    //
+    //  Result depth = Q.depth() + 2.
+    Ciphertext diag_qk_scores(
+        Ciphertext& Q_at,
+        Ciphertext& K_cyc,
+        GaloisKey&  gk,
+        RelinKey&   rk,
+        int L,
+        int block_attn,
+        int /*head_dim*/,
+        int /*num_slots*/,
+        Plaintext& scale_pt)
+    {
+        std::shared_ptr<heongpu::Ciphertext<SCHEME>> S;
+
+        for (int d = 0; d < L; ++d) {
+            // K_rot
+            heongpu::Ciphertext<SCHEME> K_rot = *K_cyc.ct;
+            if (d > 0) {
+                ops.rotate_rows_inplace(K_rot, *gk.gk, d * block_attn);
+            }
+
+            // prod = Q * K_rot ; rescale.
+            heongpu::Ciphertext<SCHEME> prod = *Q_at.ct;
+            ops.multiply_inplace(prod, K_rot);
+            ops.relinearize_inplace(prod, *rk.rk);
+            ops.rescale_inplace(prod);                       // depth +1
+
+            // Bare-doubling sum across block_attn (no rescale between adds).
+            heongpu::Ciphertext<SCHEME> sum = prod;
+            for (int step = 1; step < block_attn; step <<= 1) {
+                heongpu::Ciphertext<SCHEME> rot = sum;
+                ops.rotate_rows_inplace(rot, *gk.gk, step);
+                ops.add_inplace(sum, rot);
+            }
+
+            // Single scaled-mask multiply (collapses garbage, applies scale).
+            ops.multiply_plain_inplace(sum, *scale_pt.pt);
+            ops.rescale_inplace(sum);                        // depth +2
+
+            // Place at slot d via global right-rotate by d (only for d>0).
+            if (d > 0) {
+                ops.rotate_rows_inplace(sum, *gk.gk, -d);
+            }
+
+            if (!S) {
+                S = std::make_shared<heongpu::Ciphertext<SCHEME>>(std::move(sum));
+            } else {
+                ops.add_inplace(*S, sum);
+            }
+        }
+
+        return Ciphertext{S};
+    }
+
+    // diag_attn_apply: A@V in attn layout.
+    //
+    //  Inputs:
+    //    A_diag           — softmax output in diagonal layout.
+    //    V_cyc            — V_at replicated to 2L copies for cyclic shift.
+    //    gk               — covers rotations {1..head_dim/2, -1..-head_dim/2,
+    //                       +1..+L for col-d alignment, d*block_attn for d in [1,L)}
+    //    L, block_attn, head_dim, num_slots
+    //    col_pts[d]       — keep-slot-d-of-each-block mask (1.0 at slot d
+    //                       of each token block); at depth A_diag.depth().
+    //
+    //  Algorithm per d in [0, L):
+    //    a_d   = A_diag * col_pts[d]           # depth A+1
+    //    rescale(a_d)
+    //    if d>0: a_d = rotate(a_d, d)          # value moves to slot 0
+    //    bcast = a_d
+    //    for s=1; s<head_dim; s<<=1: bcast += rotate(bcast, -s)
+    //    V_rot = (d==0) ? V_cyc : rotate(V_cyc, d * block_attn)
+    //    prod  = bcast * V_rot ; rescale.       # depth A+2
+    //    Out += prod
+    Ciphertext diag_attn_apply(
+        Ciphertext& A_diag,
+        Ciphertext& V_cyc,
+        GaloisKey&  gk,
+        RelinKey&   rk,
+        int L,
+        int block_attn,
+        int head_dim,
+        int /*num_slots*/,
+        const std::vector<Plaintext>& col_pts)
+    {
+        if ((int)col_pts.size() != L) {
+            throw std::invalid_argument(
+                "diag_attn_apply: col_pts size must equal L");
+        }
+
+        std::shared_ptr<heongpu::Ciphertext<SCHEME>> Out;
+
+        for (int d = 0; d < L; ++d) {
+            // Pick d-column.
+            heongpu::Ciphertext<SCHEME> a_d = *A_diag.ct;
+            ops.multiply_plain_inplace(a_d, *col_pts[d].pt);
+            ops.rescale_inplace(a_d);                        // depth +1
+
+            // Bring to slot 0 of each block.
+            if (d > 0) {
+                ops.rotate_rows_inplace(a_d, *gk.gk, d);
+            }
+
+            // Bare-doubling broadcast across head_dim slots (right-rotate).
+            for (int step = 1; step < head_dim; step <<= 1) {
+                heongpu::Ciphertext<SCHEME> rot = a_d;
+                ops.rotate_rows_inplace(rot, *gk.gk, -step);
+                ops.add_inplace(a_d, rot);
+            }
+
+            // V cyclic rotate.
+            heongpu::Ciphertext<SCHEME> V_rot = *V_cyc.ct;
+            if (d > 0) {
+                ops.rotate_rows_inplace(V_rot, *gk.gk, d * block_attn);
+            }
+
+            // Multiply, rescale, accumulate.
+            heongpu::Ciphertext<SCHEME> prod = a_d;
+            ops.multiply_inplace(prod, V_rot);
+            ops.relinearize_inplace(prod, *rk.rk);
+            ops.rescale_inplace(prod);                       // depth +2
+
+            if (!Out) {
+                Out = std::make_shared<heongpu::Ciphertext<SCHEME>>(std::move(prod));
+            } else {
+                ops.add_inplace(*Out, prod);
+            }
+        }
+
+        return Ciphertext{Out};
+    }
 };
 
 PYBIND11_MODULE(_heongpu, m) {
@@ -1034,5 +1217,28 @@ PYBIND11_MODULE(_heongpu, m) {
              py::call_guard<py::gil_scoped_release>(),
              "Phase 7b-BSGS: per-chunk BSGS giant accumulation. Inner "
              "product over b1 babies with lazy rescale, then giant "
-             "per_block_rotate, summed across the chunk.");
+             "per_block_rotate, summed across the chunk.")
+        .def("diag_qk_scores", &Operator::diag_qk_scores,
+             py::arg("Q_at"), py::arg("K_cyc"),
+             py::arg("galois_key"), py::arg("relin_key"),
+             py::arg("L"), py::arg("block_attn"),
+             py::arg("head_dim"), py::arg("num_slots"),
+             py::arg("scale_pt"),
+             py::call_guard<py::gil_scoped_release>(),
+             "Phase 7d-2: batched diagonal Q@K^T attention scores. "
+             "Runs the full L-iteration loop in C++ with a single GIL "
+             "release; eliminates per-d Python overhead. K_cyc must be "
+             "the 2L-replicated K_at; scale_pt encodes the slot-0-each-block "
+             "mask scaled by 1/sqrt(d), at depth Q.depth() + 1.")
+        .def("diag_attn_apply", &Operator::diag_attn_apply,
+             py::arg("A_diag"), py::arg("V_cyc"),
+             py::arg("galois_key"), py::arg("relin_key"),
+             py::arg("L"), py::arg("block_attn"),
+             py::arg("head_dim"), py::arg("num_slots"),
+             py::arg("col_pts"),
+             py::call_guard<py::gil_scoped_release>(),
+             "Phase 7d-2: batched diagonal A@V attention apply. "
+             "Runs the L-iteration loop in C++ with a single GIL "
+             "release. col_pts[d] is the slot-d-of-each-block mask at "
+             "depth A_diag.depth().");
 }
