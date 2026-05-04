@@ -34,8 +34,8 @@ def main():
     be = HEonGPUBackend(
         poly_modulus_degree=N,
         # Standard chain at N=2^17 — fits in GPU memory comfortably.
-        q_prime_bits=(60,) + (50,) * 30,
-        p_prime_bits=(60, 60, 60),
+        q_prime_bits=(60,) + (50,) * 14,
+        p_prime_bits=(60, 60),
         scale_bits=50,
         bootstrap_hamming_weight=16,
         sec_none=True,
