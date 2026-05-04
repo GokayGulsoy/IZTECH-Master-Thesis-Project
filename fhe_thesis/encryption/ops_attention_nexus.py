@@ -349,20 +349,43 @@ def linear_colmajor(
             f"> num_slots {n_slots}"
         )
 
-    # Need cyclic shift over the in_dim*L portion of the ct. The ciphertext
-    # is num_slots wide, so a global rotate by d*L wraps at num_slots. To
-    # get the right cyclic-shift behaviour, we replicate x to fill all
-    # min(num_slots, in_dim*L*2) slots — same trick as K replication in
-    # phase 7d. Easier: add x to itself rotated by in_dim*L, doubling.
-    # As long as in_dim*L*2 ≤ num_slots we get cyclic shift across in_dim
-    # columns "for free" via global rotation.
-    needs_replicate = (in_dim * L * 2) <= n_slots and in_dim * L < n_slots
-    if needs_replicate:
-        x_replicated = backend.add(x_ct, backend.rotate(x_ct, -in_dim * L))
-    else:
-        x_replicated = x_ct  # in_dim*L == n_slots: rotation already wraps cleanly
+    # For the global-rotate-by-d*L cyclic-shift trick to be correct, we
+    # need the active data region (in_dim · L) to evenly divide num_slots
+    # AND to be replicated to fill num_slots. Otherwise a rotation by d*L
+    # for d near in_dim wraps into trailing zero slots instead of cycling
+    # back to column 0.
+    #
+    # Solution: round in_dim up to in_dim_padded (next power of 2 dividing
+    # num_slots/L) and zero-pad. Then replicate to fill num_slots so the
+    # global rotation is naturally cyclic over in_dim_padded.
+    max_cols = n_slots // L
+    if max_cols * L != n_slots or (max_cols & (max_cols - 1)) != 0:
+        raise ValueError(
+            f"L={L} doesn't cleanly divide num_slots={n_slots} into a "
+            f"power-of-2 column count"
+        )
+    in_dim_padded = 1
+    while in_dim_padded < in_dim:
+        in_dim_padded <<= 1
+    if in_dim_padded > max_cols:
+        raise ValueError(
+            f"in_dim_padded={in_dim_padded} > max_cols={max_cols}"
+        )
 
-    n = in_dim  # number of diagonals
+    # Replicate x_ct to fill num_slots: x_ct holds in_dim valid columns
+    # in slots [0, in_dim*L); we want the same data periodically repeated
+    # so that slot (j+d)*L + i for any j,d hits a valid column value.
+    # Doubling-add with rotation: add(x, rotate(x, -in_dim_padded*L * 2^k))
+    # log2(num_slots / (in_dim_padded*L)) times.
+    x_replicated = x_ct
+    cur = in_dim_padded * L
+    while cur < n_slots:
+        x_replicated = backend.add(
+            x_replicated, backend.rotate(x_replicated, -cur)
+        )
+        cur <<= 1
+
+    n = in_dim_padded  # number of diagonals
     Y: Optional[Ciphertext] = None
     for d in range(n):
         if d == 0:
@@ -370,16 +393,19 @@ def linear_colmajor(
         else:
             x_rot = backend.rotate(x_replicated, d * L)
         diag = [0.0] * n_slots
+        any_nz = False
         for j in range(out_dim):
             col_src = (j + d) % n
+            if col_src >= in_dim:
+                continue  # padded column, weight is implicitly zero
             w = float(W[j, col_src])
             if w == 0.0:
                 continue
+            any_nz = True
             base = j * L
             for i in range(L):
                 diag[base + i] = w
-        # All-zero-diagonal short-circuit.
-        if not any(v != 0.0 for v in diag):
+        if not any_nz:
             continue
         term = backend.mul_plain(x_rot, diag)
         Y = term if Y is None else backend.add(Y, term)
