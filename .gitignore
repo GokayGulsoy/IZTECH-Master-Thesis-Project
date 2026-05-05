@@ -46,3 +46,6 @@ IZTECH_Master_Thesis/frontmatter/*.bak
 
 # HuggingFace cache
 .cache/
+build_heongpu_py/
+*.so
+__pycache__/

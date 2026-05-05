@@ -354,12 +354,15 @@ struct Operator {
     // a Galois key from `bootstrapping_key_indexs()`.
     void generate_bootstrapping_params(double scale,
                                        int CtoS_piece, int StoC_piece,
-                                       int taylor_number, bool less_key_mode) {
+                                       int taylor_number, bool less_key_mode,
+                                       bool slim = false) {
         heongpu::BootstrappingConfig cfg(CtoS_piece, StoC_piece,
                                          taylor_number, less_key_mode);
         ops.generate_bootstrapping_params(
             scale, cfg,
-            heongpu::arithmetic_bootstrapping_type::REGULAR_BOOTSTRAPPING);
+            slim
+                ? heongpu::arithmetic_bootstrapping_type::SLIM_BOOTSTRAPPING
+                : heongpu::arithmetic_bootstrapping_type::REGULAR_BOOTSTRAPPING);
     }
 
     std::vector<int> bootstrapping_key_indexs() {
@@ -369,6 +372,12 @@ struct Operator {
     Ciphertext regular_bootstrapping(Ciphertext& a, GaloisKey& g, RelinKey& rk) {
         auto out = std::make_shared<heongpu::Ciphertext<SCHEME>>();
         *out = ops.regular_bootstrapping(*a.ct, *g.gk, *rk.rk);
+        return Ciphertext{out};
+    }
+
+    Ciphertext slim_bootstrapping(Ciphertext& a, GaloisKey& g, RelinKey& rk) {
+        auto out = std::make_shared<heongpu::Ciphertext<SCHEME>>();
+        *out = ops.slim_bootstrapping(*a.ct, *g.gk, *rk.rk);
         return Ciphertext{out};
     }
 
@@ -571,6 +580,71 @@ struct Operator {
             result = std::make_shared<heongpu::Ciphertext<SCHEME>>(*ct.ct);
         }
         return Ciphertext{result};
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 8i: streaming variant of gather_slots_bsgs.
+    //
+    // Splits the work so Python can encode plaintexts one-giant-at-a-time
+    // (peak plaintext memory = bs instead of bs·gs). Compute pattern is
+    // identical to gather_slots_bsgs, just sliced.
+    //
+    // - prepare_baby_rotations(ct, gk, baby_shifts) -> [Ciphertext]
+    //     Pre-rotates ct by each baby shift, keeps the resulting cts on
+    //     GPU. Caller holds the returned list across all giant calls.
+    //
+    // - accumulate_giant(baby_rots, gk, baby_idx, masks, giant_shift,
+    //                    out_or_null) -> Ciphertext
+    //     Computes Σ_j baby_rots[baby_idx[j]] ⊙ masks[j], single rescale,
+    //     optional rotate-by-giant_shift. If out_or_null is non-empty,
+    //     the result is added into out and returned; otherwise a fresh
+    //     ct is returned.
+    // -------------------------------------------------------------------------
+    std::vector<Ciphertext> prepare_baby_rotations(
+        Ciphertext& ct,
+        GaloisKey&  gk,
+        const std::vector<int>& baby_shifts)
+    {
+        std::vector<Ciphertext> out;
+        out.reserve(baby_shifts.size());
+        for (int b : baby_shifts) {
+            auto cp = std::make_shared<heongpu::Ciphertext<SCHEME>>(*ct.ct);
+            if (b != 0) {
+                ops.rotate_rows_inplace(*cp, *gk.gk, b);
+            }
+            out.push_back(Ciphertext{cp});
+        }
+        return out;
+    }
+
+    Ciphertext accumulate_giant(
+        const std::vector<Ciphertext>& baby_rots,
+        GaloisKey&  gk,
+        const std::vector<int>&        baby_idx,
+        const std::vector<Plaintext>&  masks,
+        int                            giant_shift)
+    {
+        if (baby_idx.empty() || masks.empty() ||
+            baby_idx.size() != masks.size()) {
+            throw std::invalid_argument(
+                "accumulate_giant: baby_idx/masks must be non-empty and same length");
+        }
+        // First term initialises the accumulator.
+        heongpu::Ciphertext<SCHEME> acc = *baby_rots[baby_idx[0]].ct;  // copy
+        ops.multiply_plain_inplace(acc, *masks[0].pt);
+
+        for (size_t j = 1; j < baby_idx.size(); ++j) {
+            heongpu::Ciphertext<SCHEME> term = *baby_rots[baby_idx[j]].ct;  // copy
+            ops.multiply_plain_inplace(term, *masks[j].pt);
+            ops.add_inplace(acc, term);
+        }
+
+        ops.rescale_inplace(acc);
+
+        if (giant_shift != 0) {
+            ops.rotate_rows_inplace(acc, *gk.gk, giant_shift);
+        }
+        return Ciphertext{std::make_shared<heongpu::Ciphertext<SCHEME>>(acc)};
     }
 
     // -------------------------------------------------------------------------
@@ -1179,9 +1253,12 @@ PYBIND11_MODULE(_heongpu, m) {
              py::arg("CtoS_piece") = 3,
              py::arg("StoC_piece") = 3,
              py::arg("taylor_number") = 11,
-             py::arg("less_key_mode") = true)
+             py::arg("less_key_mode") = true,
+             py::arg("slim") = false)
         .def("bootstrapping_key_indexs", &Operator::bootstrapping_key_indexs)
         .def("regular_bootstrapping",    &Operator::regular_bootstrapping,
+             py::arg("ct"), py::arg("galois_key"), py::arg("relin_key"))
+        .def("slim_bootstrapping",       &Operator::slim_bootstrapping,
              py::arg("ct"), py::arg("galois_key"), py::arg("relin_key"))
         .def("clone_ct",                 &Operator::clone_ct,
              "Shallow copy preserving depth/scale/encoding metadata.")
@@ -1234,6 +1311,18 @@ PYBIND11_MODULE(_heongpu, m) {
              "giant-rotate, sums giants. Eliminates Python wrapper "
              "overhead (encoding masks must be pre-built and at "
              "ct.depth()). Result depth = ct.depth() + 1.")
+        .def("prepare_baby_rotations", &Operator::prepare_baby_rotations,
+             py::arg("ct"), py::arg("galois_key"), py::arg("baby_shifts"),
+             py::call_guard<py::gil_scoped_release>(),
+             "Phase 8i: pre-rotate ct by each baby shift, return list of "
+             "ciphertexts kept on GPU. Used by chunked-streaming linear.")
+        .def("accumulate_giant", &Operator::accumulate_giant,
+             py::arg("baby_rots"), py::arg("galois_key"),
+             py::arg("baby_idx"), py::arg("masks"), py::arg("giant_shift"),
+             py::call_guard<py::gil_scoped_release>(),
+             "Phase 8i: single-giant accumulator. Σ baby_rots[baby_idx[j]] ⊙ "
+             "masks[j], one rescale, optional giant rotate. Result depth = "
+             "baby_rot.depth() + 1.")
         .def("halevi_shoup_matvec_block", &Operator::halevi_shoup_matvec_block,
              py::arg("ct_x"), py::arg("galois_key"),
              py::arg("block"),

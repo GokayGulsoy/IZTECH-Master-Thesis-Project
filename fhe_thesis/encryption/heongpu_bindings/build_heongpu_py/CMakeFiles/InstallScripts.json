@@ -1,0 +1,18 @@
+{
+	"InstallScripts" : 
+	[
+		"/workspace/repo/fhe_thesis/encryption/heongpu_bindings/build_heongpu_py/cmake_install.cmake",
+		"/workspace/repo/fhe_thesis/encryption/heongpu_bindings/build_heongpu_py/_HEonGPU_build/cmake_install.cmake",
+		"/workspace/repo/fhe_thesis/encryption/heongpu_bindings/build_heongpu_py/_HEonGPU_build/thirdparty/cmake_install.cmake",
+		"/workspace/repo/fhe_thesis/encryption/heongpu_bindings/build_heongpu_py/_deps/rmm-build/cmake_install.cmake",
+		"/workspace/repo/fhe_thesis/encryption/heongpu_bindings/build_heongpu_py/_deps/rapids-cmake-build/cmake_install.cmake",
+		"/workspace/repo/fhe_thesis/encryption/heongpu_bindings/build_heongpu_py/_HEonGPU_build/thirdparty/GPU-FFT/cmake_install.cmake",
+		"/workspace/repo/fhe_thesis/encryption/heongpu_bindings/build_heongpu_py/_HEonGPU_build/thirdparty/GPU-FFT/src/cmake_install.cmake",
+		"/workspace/repo/fhe_thesis/encryption/heongpu_bindings/build_heongpu_py/_HEonGPU_build/thirdparty/GPU-NTT/cmake_install.cmake",
+		"/workspace/repo/fhe_thesis/encryption/heongpu_bindings/build_heongpu_py/_HEonGPU_build/thirdparty/GPU-NTT/src/cmake_install.cmake",
+		"/workspace/repo/fhe_thesis/encryption/heongpu_bindings/build_heongpu_py/_HEonGPU_build/thirdparty/RNGonGPU/cmake_install.cmake",
+		"/workspace/repo/fhe_thesis/encryption/heongpu_bindings/build_heongpu_py/_HEonGPU_build/thirdparty/RNGonGPU/src/cmake_install.cmake",
+		"/workspace/repo/fhe_thesis/encryption/heongpu_bindings/build_heongpu_py/_HEonGPU_build/src/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

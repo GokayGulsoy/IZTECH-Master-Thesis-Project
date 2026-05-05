@@ -1,0 +1,12 @@
+# This is a generated file and its contents are an internal implementation detail.
+# The download step will be re-executed if anything in this file changes.
+# No other meaning or use of this file is supported.
+
+method=url
+command=/usr/local/lib/python3.11/dist-packages/cmake/data/bin/cmake;-DCMAKE_MESSAGE_LOG_LEVEL=VERBOSE;-P;/workspace/repo/fhe_thesis/encryption/heongpu_bindings/build_heongpu_py/CMakeFiles/fc-stamp/rapids-cmake/download-rapids-cmake.cmake;COMMAND;/usr/local/lib/python3.11/dist-packages/cmake/data/bin/cmake;-DCMAKE_MESSAGE_LOG_LEVEL=VERBOSE;-P;/workspace/repo/fhe_thesis/encryption/heongpu_bindings/build_heongpu_py/CMakeFiles/fc-stamp/rapids-cmake/verify-rapids-cmake.cmake;COMMAND;/usr/local/lib/python3.11/dist-packages/cmake/data/bin/cmake;-DCMAKE_MESSAGE_LOG_LEVEL=VERBOSE;-P;/workspace/repo/fhe_thesis/encryption/heongpu_bindings/build_heongpu_py/CMakeFiles/fc-stamp/rapids-cmake/extract-rapids-cmake.cmake
+source_dir=/workspace/repo/fhe_thesis/encryption/heongpu_bindings/build_heongpu_py/_deps/rapids-cmake-src
+work_dir=/workspace/repo/fhe_thesis/encryption/heongpu_bindings/build_heongpu_py/_deps
+url(s)=https://github.com/rapidsai/rapids-cmake/archive/refs/heads/branch-25.08.zip
+hash=
+      no_extract=
+

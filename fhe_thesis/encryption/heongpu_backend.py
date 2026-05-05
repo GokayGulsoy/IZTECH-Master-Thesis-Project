@@ -1225,17 +1225,26 @@ class HEonGPUBackend(CKKSBackend):
         taylor_number: int = 11,
         less_key_mode: bool = True,
         extra_shifts: Optional[Sequence[int]] = None,
+        slim: bool = False,
+        include_pow2_shifts: bool = True,
     ) -> None:
         self._ops.generate_bootstrapping_params(
-            self._scale, CtoS_piece, StoC_piece, taylor_number, less_key_mode
+            self._scale, CtoS_piece, StoC_piece, taylor_number, less_key_mode,
+            slim,
         )
+        self._slim_bootstrap = bool(slim)
+        self._slim_StoC_piece = int(StoC_piece)
         # Merge boot shifts with the existing ±2^k power-of-two set so
         # matmul / rotate paths keep working after configure_bootstrapping.
         boot_shifts = list(self._ops.bootstrapping_key_indexs())
-        max_log = (self._num_slots).bit_length() - 1
-        pow2 = [1 << k for k in range(max_log)]
+        if include_pow2_shifts:
+            max_log = (self._num_slots).bit_length() - 1
+            pow2 = [1 << k for k in range(max_log)]
+            pow2_set = pow2 + [-s for s in pow2]
+        else:
+            pow2_set = []
         extras = list(extra_shifts) if extra_shifts is not None else []
-        all_shifts = sorted(set(boot_shifts + pow2 + [-s for s in pow2] + extras))
+        all_shifts = sorted(set(boot_shifts + pow2_set + extras))
         kg = self._hg.KeyGenerator(self._ctx)
         self._gk = kg.generate_galois_key(self._ctx, self._sk, all_shifts)
         self._bootstrap_ready = True
@@ -1282,6 +1291,12 @@ class HEonGPUBackend(CKKSBackend):
         caller doesn't have to keep track of depth themselves.
         """
         out = self._clone(ct)
+        if getattr(self, "_slim_bootstrap", False):
+            # Slim StoC happens *before* ModRaise; needs StoC_piece levels left.
+            target = self._max_depth - int(self._slim_StoC_piece)
+            while self._ops.depth(out) < target:
+                self._ops.mod_drop_inplace_ct(out)
+            return self._ops.slim_bootstrapping(out, self._gk, self._rk)
         while self._ops.depth(out) < self._max_depth:
             self._ops.mod_drop_inplace_ct(out)
         return self._ops.regular_bootstrapping(out, self._gk, self._rk)

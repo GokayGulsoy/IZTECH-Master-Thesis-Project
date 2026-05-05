@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/workspace/repo/fhe_thesis/encryption/heongpu_bindings/build_heongpu_py/_deps/rapids_logger-subbuild/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

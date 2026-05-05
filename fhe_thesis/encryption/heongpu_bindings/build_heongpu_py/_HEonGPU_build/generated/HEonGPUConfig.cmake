@@ -1,0 +1,40 @@
+include(CMakeFindDependencyMacro)
+
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}")
+
+set(_HEONGPU_CUDA_PREFIX_CANDIDATES
+    $ENV{CUDA_HOME}
+    $ENV{CUDA_PATH}
+    $ENV{CUDA_ROOT}
+    ${CUDAToolkit_ROOT}
+    ${CUDA_TOOLKIT_ROOT_DIR}
+    /usr/local/cuda)
+foreach(_prefix IN LISTS _HEONGPU_CUDA_PREFIX_CANDIDATES)
+    if(_prefix AND EXISTS "${_prefix}")
+        list(APPEND CMAKE_PREFIX_PATH "${_prefix}")
+    endif()
+endforeach()
+list(REMOVE_DUPLICATES CMAKE_PREFIX_PATH)
+unset(_HEONGPU_CUDA_PREFIX_CANDIDATES)
+
+find_dependency(GPUNTT REQUIRED)
+find_dependency(GPUFFT REQUIRED)
+find_dependency(rmm REQUIRED)
+find_dependency(OpenSSL REQUIRED)
+find_dependency(RNGonGPU REQUIRED)
+find_dependency(ZLIB REQUIRED)
+
+if(NOT TARGET GMP::GMP)
+    find_library(GMP_LIBRARY NAMES gmp)
+    find_path(GMP_INCLUDE_DIR gmp.h)
+    if(NOT GMP_LIBRARY OR NOT GMP_INCLUDE_DIR)
+        message(FATAL_ERROR "GMP not found. Please install the GMP development package.")
+    endif()
+    add_library(GMP::GMP UNKNOWN IMPORTED)
+    set_target_properties(GMP::GMP PROPERTIES
+        IMPORTED_LOCATION ${GMP_LIBRARY}
+        INTERFACE_INCLUDE_DIRECTORIES ${GMP_INCLUDE_DIR}
+    )
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/HEonGPUTargets.cmake")
