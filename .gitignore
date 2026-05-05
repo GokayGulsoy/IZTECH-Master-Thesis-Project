@@ -49,3 +49,4 @@ IZTECH_Master_Thesis/frontmatter/*.bak
 build_heongpu_py/
 *.so
 __pycache__/
+fhe_thesis/encryption/heongpu_bindings/_heongpu*.so

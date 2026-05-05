@@ -1,7 +1,0 @@
-{
-	"InstallScripts" : 
-	[
-		"/workspace/repo/fhe_thesis/encryption/heongpu_bindings/build_heongpu_py/_deps/rmm-subbuild/cmake_install.cmake"
-	],
-	"Parallel" : false
-}

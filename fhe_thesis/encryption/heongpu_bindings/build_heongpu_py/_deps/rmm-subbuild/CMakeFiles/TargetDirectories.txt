@@ -1,3 +1,0 @@
-/workspace/repo/fhe_thesis/encryption/heongpu_bindings/build_heongpu_py/_deps/rmm-subbuild/CMakeFiles/rmm-populate.dir
-/workspace/repo/fhe_thesis/encryption/heongpu_bindings/build_heongpu_py/_deps/rmm-subbuild/CMakeFiles/edit_cache.dir
-/workspace/repo/fhe_thesis/encryption/heongpu_bindings/build_heongpu_py/_deps/rmm-subbuild/CMakeFiles/rebuild_cache.dir
