@@ -2,7 +2,7 @@
 # Build the HEonGPU pybind11 wrapper. Defaults match the H100 Pod layout.
 set -euo pipefail
 
-HEONGPU_DIR=${HEONGPU_DIR:-/workspace/HEonGPU}
+HEONGPU_DIR=${HEONGPU_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../third_party/HEonGPU" && pwd)}
 CUDA_ARCH=${CUDA_ARCH:-90}
 BUILD_DIR=${BUILD_DIR:-build_heongpu_py}
 JOBS=${JOBS:-$(nproc)}
