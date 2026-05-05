@@ -1,74 +1,18 @@
-"""CKKS encryption context and homomorphic operations.
+"""Encrypted compute primitives for Synthesizer-LPAN over CKKS.
 
-Public surface for the LPAN-FHE protocol (see ``docs/ckks_protocol.md``).
+Public API (all exported names live in submodules listed below):
 
-Imports are deliberately lazy so that backend-agnostic modules
-(``depth``, ``packing``) can be imported without triggering openfhe.
+- ``backend``           -- abstract CKKSBackend interface and Ciphertext type.
+- ``heongpu_backend``   -- HEonGPU (CUDA) implementation.
+- ``ops_attention_nexus`` -- packed-token operators (linear, layernorm,
+  Synthesizer attention, multi-head bundles, BSGS variants).
+
+Nothing is imported eagerly so that ``import fhe_thesis.encryption`` is cheap
+even when the GPU bindings are unavailable.
 """
 
-from __future__ import annotations
-
-from .depth import DEPTH_COST, DepthAudit, transformer_layer_depth
-
 __all__ = [
-    "BackendCapabilities",
-    "CKKSBackend",
-    "DEPTH_COST",
-    "DepthAudit",
-    "PolyCoeffs",
-    "TokenPackedTensor",
-    "enc_attention_apply",
-    "enc_gelu_poly",
-    "enc_linear",
-    "enc_ln_poly",
-    "enc_qk_scores",
-    "enc_self_attention",
-    "enc_softmax_poly",
-    "encrypt_attention_block",
-    "encrypt_ffn_block",
-    "encrypt_inference",
-    "encrypt_layer",
-    "load_coefficients",
-    "load_model_weights",
-    "run_phase",
-    "transformer_layer_depth",
+    "backend",
+    "heongpu_backend",
+    "ops_attention_nexus",
 ]
-
-
-def __getattr__(name):  # PEP 562 lazy import
-    if name in {"BackendCapabilities", "CKKSBackend"}:
-        from . import backend
-
-        return getattr(backend, name)
-    if name == "TokenPackedTensor":
-        from . import packing
-
-        return packing.TokenPackedTensor
-    if name in {
-        "enc_attention_apply",
-        "enc_gelu_poly",
-        "enc_linear",
-        "enc_ln_poly",
-        "enc_qk_scores",
-        "enc_self_attention",
-        "enc_softmax_poly",
-    }:
-        from . import ops
-
-        return getattr(ops, name)
-    if name in {"PolyCoeffs", "load_coefficients"}:
-        from . import coefficients
-
-        return getattr(coefficients, name)
-    if name in {
-        "encrypt_attention_block",
-        "encrypt_ffn_block",
-        "encrypt_inference",
-        "encrypt_layer",
-        "load_model_weights",
-        "run_phase",
-    }:
-        from . import protocol
-
-        return getattr(protocol, name)
-    raise AttributeError(f"module 'fhe_thesis.encryption' has no attribute {name!r}")
