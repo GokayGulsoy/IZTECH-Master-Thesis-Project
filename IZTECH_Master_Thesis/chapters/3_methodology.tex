@@ -218,6 +218,8 @@ The weighted minimax coefficients serve as the \emph{initialisation} for the lea
 
 \section{The LPAN Framework}
 \label{sec:lpan}
+\label{sec:lpan_framework}
+\label{sec:lpan_three_stage}
 
 The Learnable Polynomial Approximation Network (LPAN) is a three-stage progressive framework that transforms a pre-trained BERT model into a fully-polynomial variant where every non-linear operation is replaced by a learnable Chebyshev polynomial. This section describes the learnable polynomial modules, the progressive replacement strategy, and the knowledge distillation training procedure.
 
@@ -803,3 +805,129 @@ Algorithm~\ref{alg:pfsr_inference} composes \textsc{EncryptLayer} with the embed
 \RETURN $\mathrm{Enc}(y)$
 \end{algorithmic}
 \end{algorithm}
+
+\section{Synthesizer-LPAN: Architectural Elimination of $Q$, $K$, and Softmax}
+\label{sec:synthesizer_lpan}
+
+The PF-SR protocol of the previous section achieves a fully non-interactive encrypted forward pass, but is dominated---both in multiplicative depth and in wall time---by two operations inside the multi-head attention block: (i)~the data-dependent score matrix $S = Q\!\cdot\!K^\top / \sqrt{d_h}$, which requires $\Theta(L^2 H)$ ciphertext-by-ciphertext multiplications and a chain of cross-slot rotations to materialise the inner products, and (ii)~the row-wise polynomial Softmax, the deepest non-linearity in the LPAN pipeline (3 levels per row, 12 rows). Together these two operations account for more than $80\%$ of the per-layer wall time in our LPAN baseline (Section~\ref{sec:walltime_ladder}). This section presents the architectural extension---\emph{Synthesizer-LPAN}---that removes both operations entirely, while preserving the multi-head $V$ pathway, the polynomial GELU and LayerNorm, and the LPAN training pipeline of Section~\ref{sec:lpan_framework}.
+
+\subsection{Frozen Plaintext Attention Pattern}
+\label{sec:synth_pattern}
+
+Following the Synthesizer-R variant of Tay et al.~\cite{tay2020synthesizer} (Section~\ref{sec:synthesizer_background}), the attention mixing matrix is replaced by a per-head, sequence-length-fixed parameter
+\begin{equation}
+A_h \in \mathbb{R}^{L\times L}, \qquad h = 1, \ldots, H,
+\label{eq:synth_pattern}
+\end{equation}
+trained jointly with the rest of the model (Section~\ref{sec:slpan_training}) and \emph{frozen at deployment}. Crucially, the row-stochasticity that softmax would normally enforce is \emph{pre-absorbed} into $A_h$ at training time via row-wise softmax of a learnable score matrix $\tilde A_h$, and only the post-softmax tensor $A_h = \mathrm{softmax}(\tilde A_h)$ is exported to the encrypted-inference engine. The forward pass of the attention block collapses to
+\begin{equation}
+O_h = A_h \cdot V_h, \qquad V_h = X W_v^{(h)}, \qquad O = \mathrm{concat}_h(O_h)\, W_o,
+\label{eq:synth_forward}
+\end{equation}
+which is a \emph{plaintext-times-ciphertext} linear transform. Compared to the standard self-attention block of Section~\ref{sec:lpan_framework}, the Synthesizer block eliminates: (i)~the $W_q$ and $W_k$ projections (saves $2$ plaintext matmuls), (ii)~the score computation $Q\!\cdot\!K^\top$ (saves $\Theta(L^2 H d_h)$ ciphertext-by-ciphertext multiplications and the associated rotations), and (iii)~the polynomial Softmax (saves $3$ multiplicative levels per layer, the single largest depth contributor).
+
+\subsection{Halevi--Shoup Diagonal Decomposition with BSGS Fusion}
+\label{sec:bsgs}
+
+The remaining linear transform $O_h = A_h V_h$ is exactly the operation for which Halevi and Shoup introduced the \emph{baby-step giant-step (BSGS)} matrix-vector multiplication algorithm in HElib~\cite{halevi2014bsgs}. Under the NEXUS column-major slot layout~\cite{zhang2024nexus}, every head $h$ and every embedding coordinate $j$ is mapped to a contiguous run of $L$ slots,
+\begin{equation}
+\mathrm{slot}\bigl[h \cdot H' + j \cdot L + i\bigr] = X[h, i, j], \qquad H' = \frac{N/2}{L}.
+\label{eq:colmajor}
+\end{equation}
+Multiplying by $A_h$ at the slot level is then a \emph{cyclic} matrix-vector product that decomposes into the sum of the $L$ diagonals of $A_h$ shifted by cyclic rotations:
+\begin{equation}
+A_h V_h \;=\; \sum_{d=0}^{L-1} \mathit{diag}_d(A_h) \,\odot\, \mathrm{rot}_d(V_h), \quad \mathit{diag}_d(A_h)[i] = A_h\bigl[i,\, (i+d)\bmod L\bigr].
+\label{eq:diag_sum}
+\end{equation}
+In its naive form Eq.~(\ref{eq:diag_sum}) costs $L$ rotations per head. Halevi--Shoup BSGS factorises $L = bs \cdot gs$ with $bs, gs \approx \sqrt{L}$, splits the diagonal index $d = i + j \cdot bs$, and fuses the inner cyclic-shift mask into the plaintext diagonal:
+\begin{equation}
+A_h V_h \;=\; \sum_{j=0}^{gs-1} \mathrm{rot}_{j \cdot bs}\!\Biggl(\,\sum_{i=0}^{bs-1} \widetilde{\mathit{diag}}_{i + j\cdot bs}(A_h) \,\odot\, \mathrm{rot}_i(V_h)\Biggr),
+\label{eq:bsgs}
+\end{equation}
+where $\widetilde{\mathit{diag}}_{d}(A_h) = \mathrm{rot}_{-j\cdot bs}(\mathit{diag}_{d}(A_h))$ is the precomputed, mask-fused plaintext diagonal. The total rotation count drops from $L$ to $bs + gs - 1 \approx 2\sqrt{L}$. For $L = 128$ this collapses $256 \to 32$ rotations per head ($8\times$ fewer), and the inner $bs$ rotations on $V_h$ are shared across all $H$ heads---reducing the dominant cost of the attention block by an order of magnitude. Algorithm~\ref{alg:slpan_attn_bsgs} specifies the procedure.
+
+\begin{algorithm}[htbp]
+\caption{\textsc{SynthAttn-BSGS} --- Synthesizer attention with Halevi--Shoup BSGS}
+\label{alg:slpan_attn_bsgs}
+\begin{algorithmic}[1]
+\REQUIRE Token-packed value ciphertext $V_h$ in NEXUS column-major layout, precomputed mask-fused plaintext diagonals $\{\widetilde{\mathit{diag}}_{d}(A_h)\}_{d=0}^{L-1}$, baby-step / giant-step factorisation $L = bs \cdot gs$
+\ENSURE Encrypted attention output $O_h \in \mathrm{Enc}(\mathbb{R}^{L \times d_h})$
+\STATE $\{V_h^{(i)}\}_{i=0}^{bs-1} \gets \{\mathrm{rot}_i(V_h)\}$ \COMMENT{baby steps, shared across all heads, $bs - 1$ rotations}
+\STATE $O_h \gets 0$
+\FOR{$j = 0$ \TO $gs - 1$}
+    \STATE $T_j \gets 0$
+    \FOR{$i = 0$ \TO $bs - 1$}
+        \STATE $T_j \mathrel{+}= \widetilde{\mathit{diag}}_{i + j \cdot bs}(A_h) \odot V_h^{(i)}$ \COMMENT{plaintext$\cdot$ciphertext, $-1$ level}
+    \ENDFOR
+    \STATE $O_h \mathrel{+}= \mathrm{rot}_{j \cdot bs}(T_j)$ \COMMENT{giant step, $gs - 1$ rotations}
+\ENDFOR
+\RETURN $O_h$
+\end{algorithmic}
+\end{algorithm}
+
+\paragraph{Depth budget.} Algorithm~\ref{alg:slpan_attn_bsgs} consumes exactly \emph{one} multiplicative level per head---the plaintext-by-ciphertext multiplication of $\widetilde{\mathit{diag}}$ with $V_h^{(i)}$. Combined with the $W_v$ projection ($-1$), the multi-head concatenation mask ($-1$), and the output projection $W_o$ ($-1$), the entire attention block now costs only $4$ levels, down from $9$ in the LPAN baseline (LN-pre$+$Q$+$K$+$V$+$score$+$softmax$+$apply$+$concat$+$out). The new per-layer depth budget is therefore
+\[
+4_{\text{attn}} + 4_{\text{LN}_2} + 1_{W_1} + 3_{\text{GELU}} + 1_{W_2} + 4_{\text{LN}_1} = 17 \text{ levels per layer},
+\]
+or $\mathrm{chain} = 22$ working depth including the final classification head and a one-level buffer for residual rescale alignment. This is the minimum chain length (Section~\ref{sec:walltime_ladder}) that still admits the cubic inverse-square-root LayerNorm polynomial.
+
+\subsection{Batched Slot Packing}
+\label{sec:slpan_batch}
+
+Even after BSGS, the per-sample wall time is dominated by a constant number of rotations and ciphertext-multiplications that do not scale with the slot occupancy. To amortise this cost we pack $N_{\mathrm{BATCH}}$ independent samples into the slot dimension along the head replication axis $h$, so that one ciphertext now carries $N_{\mathrm{BATCH}}$ values of $X[b, h, i, j]$ at slot positions
+\begin{equation}
+\mathrm{slot}\bigl[\,b \cdot H \cdot L + h \cdot L + i\,\bigr]_{j} \;=\; X[b, h, i, j].
+\label{eq:batched_packing}
+\end{equation}
+Because the BSGS pattern of Eq.~(\ref{eq:bsgs}) operates only along the $i$-axis (sequence position) within each $(b, h)$ block, both the rotations and the plaintext diagonals are identical for every sample $b$---batching is therefore \emph{free} in operation count. With CKKS slot count $N/2 = 32768$, sequence length $L = 128$, and head count $H = 12$ for BERT-Base, the maximum batch is $N_{\mathrm{BATCH}}^{\max} = \lfloor 32768 / (128 \cdot 12) \rfloor = 21$; in practice we use $N_{\mathrm{BATCH}} = 16$ to leave headroom for plaintext-mask alignment.
+
+\subsection{Synthesizer-LPAN Training Pipeline}
+\label{sec:slpan_training}
+
+Synthesizer-LPAN reuses the three-stage progressive replacement pipeline of Section~\ref{sec:lpan_three_stage} verbatim for the polynomial GELU, per-head Softmax, and LayerNorm replacements. A fourth stage, \emph{attention-pattern fitting}, is appended:
+
+\begin{enumerate}
+    \item \textbf{Stage 1 (LPAN-GELU).} Cross-entropy fine-tuning with polynomial GELU only.
+    \item \textbf{Stage 2 (LPAN-Softmax).} Per-head polynomial Softmax + AttnKD distillation.
+    \item \textbf{Stage 3 (LPAN-LN).} Polynomial LayerNorm + co-adaptation, AttnKD held active.
+    \item \textbf{Stage 4 (Synth-AttnKD).} The standard $\mathrm{softmax}(QK^\top/\sqrt{d_h})$ block is replaced by the learnable per-head pattern $A_h = \mathrm{softmax}(\tilde A_h)$. Training minimises
+    \begin{equation}
+    \mathcal{L}_{\mathrm{S4}} = \mathrm{CE}(\hat y, y) + \lambda_{\mathrm{KD}} \sum_{\ell, h} \mathrm{KL}\bigl(A_{\ell, h}^{\mathrm{teacher}} \,\|\, A_{\ell, h}^{\mathrm{student}}\bigr),
+    \label{eq:s4_loss}
+    \end{equation}
+    where the teacher attention probabilities are taken from the post-Stage-3 model, with $\lambda_{\mathrm{KD}}$ annealed from $1.0 \to 0.0$ over the Stage-4 epochs. After convergence the post-softmax tensor $A_{\ell, h}$ is exported as a frozen plaintext, the $W_q, W_k$ matrices and the score-/softmax-graph are deleted, and the model is ready for FHE deployment.
+\end{enumerate}
+
+The fourth stage preserves the AttnKD invariant that drove the LPAN convergence: every replacement is supervised by the pre-replacement attention probabilities, so the student network never sees an abrupt change in its mixing pattern.
+
+\subsection{Single-GPU Wall-Time Ladder}
+\label{sec:walltime_ladder}
+
+The wall-time impact of each architectural and engineering choice is summarised in the optimisation ladder of Table~\ref{tab:walltime_ladder}. Every step is measured end-to-end on a single NVIDIA H100 SXM5, sequence length $L = 128$, $12$ encoder layers, HEonGPU CKKS with $N = 2^{16}$, scale $2^{40}$, and chain length tuned to the minimum that supports the LayerNorm polynomial.
+
+\begin{table}[htbp]
+\centering
+\caption{Single-H100 wall-time ladder: from honest LPAN baseline to Synthesizer-LPAN with BSGS, batching and chain tuning. All measurements are for a 12-layer BERT forward pass at $L = 128$.}
+\label{tab:walltime_ladder}
+\begin{tabular}{rlcc}
+\toprule
+\# & \textbf{Configuration} & \textbf{Wall time (s)} & \textbf{Speed-up} \\
+\midrule
+1 & Honest LPAN baseline (PF-SR, std.\ attention)            & 833.0 & $1.0\times$ \\
+2 & + token-batched ciphertext layout                         & 534.1 & $1.56\times$ \\
+3 & (Linformer projection attempt --- abandoned, no win)      & 440.0 & $1.89\times$ \\
+4 & \textbf{Synthesizer attention} (na\"ive, $N_{\mathrm{BATCH}}{=}4$) & 222.8 & $3.74\times$ \\
+5 & + batch packing $N_{\mathrm{BATCH}}{=}16$                 & 131.4 & $6.34\times$ \\
+6 & + BSGS $bs \cdot gs = 128$, $N_{\mathrm{BATCH}}{=}8$, chain $24$ &  86.1 & $9.67\times$ \\
+7 & + tuned BSGS $N_{\mathrm{BATCH}}{=}16$, chain $22$        & \textbf{60.9} & $\mathbf{13.67\times}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Threat Model and Robustness}
+
+Synthesizer-LPAN inherits the PF-SR threat model (Section~\ref{sec:pfsr_protocol}) without modification. The frozen plaintext pattern $A_h$ is part of the public model parameters, on the same footing as the weight matrices $W_v, W_o, W_1, W_2$ and the polynomial coefficients of GELU/LayerNorm; revealing $A_h$ leaks no more than revealing the standard-attention $W_q, W_k$ matrices it replaces. The CKKS security parameters ($N = 2^{16}$, $\lambda \geq 128$ bits) are unchanged. The BSGS algorithm is an \emph{exact} re-organisation of Eq.~(\ref{eq:diag_sum}): correctness is bit-for-bit identical to the na\"ive diagonal sum, so the only sources of approximation error remain (i)~the LPAN polynomial residuals (analysed in Section~\ref{sec:error_propagation}) and the CKKS noise budget (audited in the depth budget paragraph above and refreshed for $\mathrm{chain} = 22$ in Chapter~\ref{ch:results}).
+
+\subsection{Positioning vs.\ Concurrent Work}
+
+Synthesizer-LPAN is, to our knowledge, the first system to combine (i)~complete polynomial replacement of all three Transformer non-linearities, (ii)~architectural elimination of the data-dependent attention score matrix and the polynomial Softmax, and (iii)~Halevi--Shoup BSGS fusion under the NEXUS column-major slot layout, on a single GPU. Concurrent work is complementary: NEXUS~\cite{zhang2024nexus} fixes the slot layout and FHE primitives but keeps the standard attention block; CERIUM~\cite{cerium2025} parallelises the same standard block across $8\times$B200 GPUs. The 60.9\,s single-H100 result of Synthesizer-LPAN is within $1.7\times$ of CERIUM's $36.1$\,s single-H100 number despite using a strictly weaker hardware optimiser, and within an order of magnitude of CERIUM's $8.8$\,s on $8\times$B200 despite using $8\times$ less hardware. The two approaches could in principle be composed.

@@ -493,9 +493,9 @@ BOLT achieves accuracy within 1--3\% of the plaintext baseline on BERT-Base acro
 
 \subsection{Summary and Positioning of This Work}
 
-Table~\ref{tab:framework_comparison} provides a comparative summary of existing secure inference frameworks. A critical observation is that \emph{no prior work replaces all three non-linear operations}---GELU, Softmax, and LayerNorm---with polynomial approximations suitable for non-interactive FHE evaluation. Existing methods either leave LayerNorm to client-side computation (THE-X), handle it via interactive MPC protocols (MPCFormer, BOLT), approximate it with a simple affine transformation that discards the normalisation effect (THE-X), or delegate it to a TEE (THEF).
+Table~\ref{tab:framework_comparison} provides a comparative summary of existing secure inference frameworks. A critical observation is that \emph{no prior work replaces all three non-linear operations}---GELU, Softmax, and LayerNorm---with polynomial approximations suitable for non-interactive FHE evaluation. Existing methods either leave LayerNorm to client-side computation (THE-X), handle it via interactive MPC protocols (MPCFormer, BOLT), approximate it with a simple affine transformation that discards the normalisation effect (THE-X), or delegate it to a TEE (THEF). Among recent pure-FHE GPU systems, NEXUS~\cite{zhang2024nexus} keeps the standard self-attention block and absorbs the cost of $Q\!\cdot\!K^\top$ + polynomial Softmax, while CERIUM~\cite{cerium2025} attacks wall-time by parallelising the same standard block across $8\times$B200 GPUs.
 
-This thesis addresses this gap through the LPAN framework, which replaces all three non-linear operations with learnable Chebyshev polynomial approximations trained via a progressive, knowledge-distillation-guided pipeline. The result is a fully-polynomial Transformer that can be evaluated entirely within the CKKS scheme without any interactive protocols or trusted hardware.
+This thesis addresses both gaps. First, the LPAN framework replaces all three non-linear operations with learnable Chebyshev polynomial approximations trained via a progressive, knowledge-distillation-guided pipeline. Second, \emph{Synthesizer-LPAN} additionally replaces the standard self-attention block with a frozen, learned, plaintext attention pattern (Section~\ref{sec:synthesizer_background}), eliminating the $Q\!\cdot\!K^\top$ ciphertext-by-ciphertext multiplications and the polynomial Softmax entirely. The result is a fully-polynomial Transformer with a drastically reduced FHE circuit that can be evaluated entirely within the CKKS scheme on a single GPU.
 
 \begin{table}[ht]
 \centering
@@ -510,6 +510,9 @@ THE-X~\cite{chen2022thex} & CKKS & ReLU + learned net & G$^\dagger$, S & BERT-Ti
 MPCFormer~\cite{li2023mpcformer} & MPC & Quad + distillation & G, S$^\dagger$ & BERT-Base & 1.1--5.3\% \\ \hline
 BOLT~\cite{pang2024bolt} & MPC+OT & Approx-aware FT & G, S$^\dagger$ & BERT-Base & 1--3\% \\ \hline
 THEF~\cite{li2024thef} & HE+TEE & Exact (in TEE) & None (TEE) & Transformer & $\sim$0\% \\ \hline
-\textbf{LPAN (Ours)} & \textbf{CKKS} & \textbf{Learnable poly} & \textbf{G, S, LN} & \textbf{BERT-Base} & \textbf{0.34\%} \\ \hline
+NEXUS~\cite{zhang2024nexus} & CKKS (1$\times$GPU) & Std.\ attn + poly & G, S, LN & BERT-Base & $\sim$1\% \\ \hline
+CERIUM~\cite{cerium2025} & CKKS (8$\times$GPU) & Std.\ attn + poly & G, S, LN & BERT-Base & $\sim$1\% \\ \hline
+\textbf{LPAN (Ours)} & \textbf{CKKS} & \textbf{Learnable poly} & \textbf{G, S, LN} & \textbf{BERT-Base} & \textbf{0.34--1.72\%} \\ \hline
+\textbf{Synth-LPAN (Ours)} & \textbf{CKKS (1$\times$GPU)} & \textbf{Synth-attn + LPAN} & \textbf{G, S, LN, $Q\!K^\top$} & \textbf{BERT-Base} & \textbf{TBD (training)} \\ \hline
 \end{tabular}
 \end{table}

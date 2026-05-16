@@ -15,7 +15,7 @@ REPO_DIR="${REPO_DIR:-$WORKSPACE/repo}"
 HEONGPU_DIR="${HEONGPU_DIR:-$WORKSPACE/HEonGPU}"
 
 REPO_URL="${REPO_URL:-https://github.com/GokayGulsoy/IZTECH-Master-Thesis-Project.git}"
-REPO_BRANCH="${REPO_BRANCH:-feature/matrix-packing-and-gpu}"
+REPO_BRANCH="${REPO_BRANCH:-synthesizer-lpan-production}"
 
 HEONGPU_URL="${HEONGPU_URL:-https://github.com/Alisah-Ozcan/HEonGPU.git}"
 HEONGPU_COMMIT="${HEONGPU_COMMIT:-f91381a1b73da33118b0a1d511b4e81bf943ed83}"
@@ -27,7 +27,7 @@ export PATH=/usr/local/cuda/bin:$PATH
 export CUDACXX=/usr/local/cuda/bin/nvcc
 
 echo "=============================================="
-echo "  LPAN-FHE GPU pod setup"
+echo "  Synthesizer-LPAN GPU pod setup"
 echo "  workspace = $WORKSPACE"
 echo "  repo      = $REPO_DIR ($REPO_BRANCH)"
 echo "  HEonGPU   = $HEONGPU_DIR @ $HEONGPU_COMMIT"
@@ -99,10 +99,10 @@ echo
 echo "[4/5] Python deps..."
 python3 -m pip install --upgrade pip setuptools wheel -q
 python3 -m pip install --upgrade "pybind11>=2.12" -q
-# Repo-level deps (skip torch — already preinstalled in container)
-grep -vE "^(torch|torchvision|torchaudio|openfhe)" "$REPO_DIR/requirements.txt" \
-    > /tmp/req_no_torch.txt || true
-python3 -m pip install -r /tmp/req_no_torch.txt -q
+# Install a CUDA-enabled torch build first, then let pyproject.toml pull the
+# remaining project dependencies.
+python3 -m pip install --upgrade torch --index-url "${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu121}" -q
+python3 -m pip install -e "$REPO_DIR" -q
 echo "  pip deps installed ✓"
 
 # ── 5. Build bindings ──────────────────────────────────────────────────
@@ -113,6 +113,5 @@ HEONGPU_DIR="$HEONGPU_DIR" CUDA_ARCH="$CUDA_ARCH" bash build.sh
 echo
 echo "=============================================="
 echo "  Setup complete. Quick smoke test:"
-echo "    cd $REPO_DIR && PYTHONPATH=. python -c \\"
-echo "      'from fhe_thesis.encryption import heongpu_bindings as h; print(h.CudaStream)'"
+echo "    cd $REPO_DIR && python scripts/smoke_heongpu_backend.py"
 echo "=============================================="

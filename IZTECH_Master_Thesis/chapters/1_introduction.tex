@@ -10,6 +10,8 @@ Despite its theoretical elegance, integrating FHE with massive Transformer archi
 
 Existing approaches to this challenge---such as THE-X~\cite{chen2022thex}, Iron~\cite{hao2022iron}, MPCFormer~\cite{li2023mpcformer}, and BOLT~\cite{pang2024bolt}---replace only two of the three non-linear operations (typically GELU and Softmax), while either leaving LayerNorm intact, delegating it to client-side computation, or replacing it with a simple affine transformation that discards the normalisation effect entirely. This leaves a critical gap: LayerNorm cannot be evaluated homomorphically, preventing fully non-interactive encrypted inference.
 
+A \emph{second}, equally important gap is left untouched even by recent pure-FHE Transformer systems such as NEXUS~\cite{zhang2024nexus} (CRYPTO'24) and the multi-GPU compiler/runtime CERIUM~\cite{cerium2025} (December 2025): the standard self-attention mechanism still requires $\Theta(L^2)$ ciphertext-by-ciphertext multiplications for the score matrix $Q\!\cdot\!K^\top$ and a deep polynomial Softmax on top of it---together accounting for the majority of the per-layer wall-time. CERIUM attacks this with framework-level engineering on 8$\times$B200 GPUs; NEXUS keeps the standard architecture and absorbs the cost. Neither modifies the architecture itself.
+
 Table~\ref{tab:plaintext_vs_fhe} illustrates the critical trade-offs between standard inference and FHE-based secure inference, highlighting the motivation for optimising these cryptographic systems.
 
 \begin{table}[h]
@@ -27,10 +29,10 @@ Multiplicative Depth & Unlimited & Fixed budget ($D$ levels) \\ \hline
 \end{table}
 
 \subsection{Problem Statement}
-The primary challenge addressed in this thesis is the complete replacement of all non-polynomial operations in the Transformer architecture with learnable polynomial approximations that can be evaluated under CKKS encryption, while maintaining competitive accuracy with the original model. The core research question is:
+The primary challenge addressed in this thesis is twofold. First, the complete replacement of all non-polynomial operations in the Transformer architecture with learnable polynomial approximations that can be evaluated under CKKS encryption, while maintaining competitive accuracy with the original model. Second, the architectural reduction of the dominant ciphertext-by-ciphertext cost of self-attention so that the resulting circuit becomes practical on a \emph{single} GPU. The core research questions are:
 
 \begin{quote}
-\emph{How can all three non-linear operations in Transformers---GELU, Softmax, and LayerNorm---be replaced by learnable polynomial approximations using a progressive training strategy, such that the resulting fully-polynomial model achieves accuracy competitive with the original while enabling non-interactive encrypted inference?}
+\emph{(i) How can all three non-linear operations in Transformers---GELU, Softmax, and LayerNorm---be replaced by learnable polynomial approximations using a progressive training strategy, such that the resulting fully-polynomial model achieves accuracy competitive with the original while enabling non-interactive encrypted inference? (ii) Can the standard self-attention block itself be replaced by an FHE-friendly variant that eliminates the data-dependent $Q\!\cdot\!K^\top$ ciphertext-by-ciphertext multiplications and the polynomial Softmax, while preserving GLUE-level accuracy and pushing single-GPU end-to-end FHE BERT inference into the sub-100-second regime?}
 \end{quote}
 
 
@@ -48,6 +50,8 @@ This thesis proposes the \textbf{Learnable Polynomial Approximation Network (LPA
     \item \textbf{Per-Head Polynomial Softmax.} An architecture where each attention head maintains independent learnable Chebyshev coefficients for the exponential approximation, enabling head specialisation. Unlike shared-polynomial approaches, per-head coefficients capture the distinct attention patterns learned by different heads.
 
     \item \textbf{Complete Polynomial LayerNorm Replacement.} The first approach to replace LayerNorm's inverse square root $1/\sqrt{\sigma^2 + \epsilon}$ with a learnable polynomial approximation across all layers of a deep Transformer, maintaining competitive accuracy. Prior methods (THE-X, Iron, BOLT, MPCFormer) either skip LayerNorm replacement, delegate it to client-side computation, or replace it with a simple affine transformation.
+
+    \item \textbf{Synthesizer-LPAN: Architectural Elimination of $Q$, $K$, and Softmax under FHE.} An architectural extension that replaces the standard self-attention block with a frozen, learned, plaintext attention pattern $A \in \mathbb{R}^{L\times L}$ in the spirit of Tay et al.~\cite{tay2020synthesizer}. Under FHE this eliminates the $W_q$ and $W_k$ projections, the $Q\!\cdot\!K^\top$ ciphertext-by-ciphertext multiplications, and the depth-12 polynomial Softmax \emph{entirely}. Combined with Halevi--Shoup baby-step giant-step (BSGS) fusion of the cyclic-shift mask with each plaintext diagonal~\cite{halevi2014bsgs} ($2L \to 2\sqrt{L}$ rotations), batched LPAN polynomial evaluation ($N_{\mathrm{BATCH}}{=}16$), and a tuned CKKS chain budget ($\mathrm{chain}{=}22$), Synthesizer-LPAN delivers a \emph{single-GPU sub-100-second end-to-end coherent FHE BERT result on plain HEonGPU}: \textbf{60.9\,s} for a 12-layer forward pass at $L{=}128$ on a single H100, a $\mathbf{13.67\times}$ speed-up over the honest LPAN baseline ($833$\,s), measured on the vendored HEonGPU~\cite{kim2024heongpu} CKKS backend. Concurrent Cerium results are faster on the same hardware via compiler/runtime optimization; our contribution is therefore architectural complementarity rather than current latency SOTA.
 \end{enumerate}
 
 All contributions are validated through a complete end-to-end pipeline on four BERT model variants (Tiny, Mini, Small, and Base) across two GLUE tasks: SST-2 sentiment classification and MRPC paraphrase detection. Smaller models (Tiny, Mini, Small) were trained on a local NVIDIA RTX 5070~Ti laptop GPU (12~GB VRAM, CUDA~12.8); BERT-Base was trained on a RunPod NVIDIA H100 SXM pod (80~GB HBM3, 28-vCPU Intel Xeon Platinum 8480+, CUDA~13.0). The LPAN framework achieves:
@@ -68,9 +72,9 @@ The remainder of this thesis is organised as follows:
 \begin{itemize}
     \item \textbf{Chapter~\ref{ch:background}} provides background on the CKKS homomorphic encryption scheme, the non-linearity bottleneck in Transformers, and existing secure inference frameworks (CryptoNets, Iron, THE-X, MPCFormer, BOLT).
 
-    \item \textbf{Chapter~\ref{ch:methodology}} presents the proposed LPAN methodology, including distribution-weighted minimax polynomial initialisation, the three-stage progressive replacement pipeline, attention-level knowledge distillation, per-head polynomial Softmax, polynomial LayerNorm, and error propagation analysis.
+    \item \textbf{Chapter~\ref{ch:methodology}} presents the proposed LPAN methodology, including distribution-weighted minimax polynomial initialisation, the three-stage progressive replacement pipeline, attention-level knowledge distillation, per-head polynomial Softmax, polynomial LayerNorm, and error propagation analysis. It then introduces the \emph{Synthesizer-LPAN} architectural extension, the BSGS-fused diagonal decomposition of the plaintext attention pattern, and the batched packed CKKS evaluation strategy that delivers the headline 60.9\,s single-GPU result.
 
-    \item \textbf{Chapter~\ref{ch:results}} reports experimental results across four BERT model variants, including activation profiling, approximation quality, progressive training analysis for BERT-Base, comparison with existing frameworks, and CKKS encrypted inference benchmarks.
+    \item \textbf{Chapter~\ref{ch:results}} reports experimental results across four BERT model variants, including activation profiling, approximation quality, progressive training analysis for BERT-Base, comparison with existing frameworks, and CKKS encrypted inference benchmarks. A dedicated section presents the Synthesizer-LPAN end-to-end FHE benchmark, the wall-time ladder of optimisations (LPAN baseline $\to$ Synthesizer-LPAN+BSGS), and a positioning table against NEXUS, CERIUM, BOLT, Iron and MPCFormer.
 
     \item \textbf{Chapter~\ref{ch:conclusion}} summarises the contributions, discusses limitations, and outlines future research directions including GPU-accelerated CKKS inference and multi-task evaluation.
 \end{itemize}

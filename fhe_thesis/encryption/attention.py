@@ -124,7 +124,7 @@ def encode_synthesizer_diagonals(
 
 
 
-def attn_synthesizer_nexus(
+def attn_synthesizer(
     backend: CKKSBackend,
     V_ct: Ciphertext,
     diag_pts: Sequence,
@@ -223,7 +223,7 @@ def encode_synthesizer_bsgs(
     head_dim: int,
     num_heads_per_ct: int = 1,
 ) -> dict:
-    """Pre-encode BSGS-fused plaintexts for :func:`attn_synthesizer_bsgs_nexus`.
+    """Pre-encode BSGS-fused plaintexts for :func:`attn_synthesizer_bsgs`.
 
     Returns a dict with two key-arrays of length L:
       - ``top_combined[d]`` = mask_top[d] · diag[d]   (plaintext)
@@ -233,7 +233,7 @@ def encode_synthesizer_bsgs(
     The fusion of top/bot mask × diagonal turns 2L rotations + 2L mul_plain
     + L add into 2·(2√L) rotations + 2L mul_plain + 2L add — eliminating
     the dominant rotation cost while preserving exact mathematical
-    equivalence to :func:`attn_synthesizer_nexus`.
+    equivalence to :func:`attn_synthesizer`.
     """
     n_slots = backend.capabilities.n_slots
     H = head_dim * L
@@ -313,7 +313,7 @@ def encode_synthesizer_bsgs(
 
 
 
-def attn_synthesizer_bsgs_nexus(
+def attn_synthesizer_bsgs(
     backend: CKKSBackend,
     V_ct: Ciphertext,
     bsgs_pts: dict,
@@ -323,7 +323,7 @@ def attn_synthesizer_bsgs_nexus(
 ) -> Ciphertext:
     """BSGS-accelerated Synthesizer-LPAN attention.
 
-    Mathematically equivalent to :func:`attn_synthesizer_nexus`. Reduces
+    Mathematically equivalent to :func:`attn_synthesizer`. Reduces
     rotation count from 2L = 256 (for L=128) to 2(bs+gs) ≈ 32.
 
     Algorithm (using d = b + g·bs):

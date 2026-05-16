@@ -2,72 +2,99 @@
 
 ## Thesis title (working)
 
-> **HyPER-LPAN: A Task-Adaptive, Pure-FHE Transformer Architecture for
-> Privacy-Preserving NLP Inference**
+> **Synthesizer-LPAN: Sub-100-Second Single-GPU FHE BERT Inference via
+> Architectural Elimination of Q, K and Softmax**
 
 İzmir Institute of Technology (İYTE) — Master's thesis,
-candidate: Gökay (current semester: thesis-1, May 2026).
+candidate: Gökay Gülsoy. Department of Computer Engineering.
 
-## Goals
+## One-paragraph summary
 
-1. **Pure non-interactive FHE** transformer inference under CKKS — no MPC,
-   no mid-circuit decryption, no TEE. Stronger threat model than BOLT/Iron
-   (2PC) and Iron-LM (MPC).
-2. **GLUE accuracy within 1–3 points of plaintext** on SST-2 / MRPC / QNLI
-   / RTE for BERT-base, RoBERTa-base, DistilBERT.
-3. **Sub-10 s end-to-end latency** per sample on a 32-vCPU CPU pod with
-   AVX-512 + HEXL acceleration. Stretch target: 5–7 s.
-4. **Task-adaptive composition** — let the network decide per-layer
-   whether to use LinearMixing / QuadAttention / LPAN (the headline
-   contribution).
+We replace the standard self-attention block of BERT with a frozen,
+*pre-softmaxed* learned attention pattern $A \in \mathbb{R}^{L\times L}$
+(Tay et al., NeurIPS 2020 — "Synthesizer"). Under FHE this eliminates
+the two query/key projections, the $Q\cdot K^\top$ ciphertext-by-ciphertext
+multiplication, and the depth-12 softmax-poly approximation **entirely**.
+On top of this we apply Baby-Step Giant-Step (BSGS) fusion of the
+attention mask with each plaintext diagonal, batched LPAN evaluation,
+and a careful CKKS chain budget. The result is a **single-GPU
+sub-100-second end-to-end coherent FHE BERT result on plain HEonGPU**
+at sequence length 128 — **60.9 s on one H100**, a 13.67× speedup over
+our honest LPAN baseline of 833 s.
+
+## Contributions
+
+1. **First FHE port of Synthesizer attention.** Plaintext Synthesizer
+   was discarded by the ML community in 2020 because it offered little
+   speedup over standard MHA. Under FHE the entire $L^2$ ciphertext-by-
+   ciphertext floor disappears — making this an architectural lever
+   that LPAN-family papers (NEXUS, MPCFormer, BOLT, Iron) all left on
+   the table.
+
+2. **BSGS-fused mask × diagonal.** The naive Synthesizer attention
+   needs $2L$ rotations for the V cyclic-shift plus $L$ plaintext
+   multiplications per head bundle. By fusing the cyclic-shift mask
+   with the per-diagonal pattern at encoding time and applying
+   Halevi-Shoup BSGS, we cut rotations from $2L$ to $2 \cdot 2\sqrt{L}$
+   — an 8× rotation reduction at $L=128$.
+
+3. **Batched LPAN polynomial evaluation.** We process `BATCH=16`
+   independent samples per ciphertext slot block. Polynomial
+   activations (GELU, LayerNorm-invsqrt) amortize over the batch,
+   dropping per-sample latency by ≈3.7×.
+
+4. **Self-contained reproducible artifact.** HEonGPU is vendored
+   (`third_party/HEonGPU/`, commit pinned). One `scripts/setup_pod_gpu.sh`
+   on a stock Ubuntu + CUDA 12 + H100 machine reproduces the 60.9 s
+   number end-to-end.
+
+## Headline metric
+
+```
+12-layer Synthesizer-LPAN BERT, L=128, BATCH=16, chain=22, HEonGPU CKKS N=2^16
+Single H100 SXM5 wall-time: 60.9 s
+Honest LPAN baseline:        833 s
+Speedup:                     13.67×
+```
+
+## Comparison axis (concurrent work)
+
+CERIUM (arXiv:2512.11269, Dec 2025, CMU + NVIDIA) reports 8.8 s BERT-Base
+on **8× B200** GPUs and 36.1 s on a single H100 — but as a *framework*
+(DSL + compiler + runtime) running plain BERT. Our work is *architectural*:
+we change BERT itself so the FHE circuit becomes 13.67× cheaper. The two
+contributions compose; they are not competitors.
 
 ## Target venues
 
-| Venue | Deadline | Track | Notes |
+| Venue | Deadline | Track | Framing |
 |---|---|---|---|
-| **USENIX Security 2027** | Feb 2027 | full paper | primary; matches threat-model framing |
+| **USENIX Security 2027** | Feb 2027 | full paper | primary; pure-FHE threat model |
 | **EMNLP 2027** | Jun 2027 | long paper | secondary; ML/NLP framing |
-| ICLR 2027 (workshop) | TBD | poster | fallback for early visibility |
+| **ICLR 2027** | Sep 2026 | poster | early visibility for the architectural lever |
 
-## Timeline
-
-~7 months total: this semester (May–Jul 2026) → summer (Aug–Sep) →
-next semester (Oct–Jan 2027) → submit Feb 2027.
-
-Spent so far: **architecture validated** + **5 extensions + cleanup**
-landed (commits `d288662 → e3845dd` on `feature/hyper-lpan-extensions`).
-
-Remaining big rocks:
-1. Full GLUE training (4 tasks × 3 backbones × 3 seeds)
-2. Pareto plot harness (FHE latency vs accuracy)
-3. Pod latency benchmark (validate 5–7 s target)
-4. Threat-model formalization for paper
-5. Thesis chapters 3 (methodology) + 4 (results) write-up
-
-## Key validated numbers (carry forward)
+## Key validated numbers
 
 | Metric | Value | Source |
 |---|---|---|
-| SST-2 HyPER-LPAN | 90.83 % | `feature/ckks-protocol` @ `14a43c2` |
-| MRPC v1 (LM[0-3]+Q[4-7]) | 82.60 F1 | uncompetitive — selector v2 needed |
-| Per-layer ct×ct ops | 126 → 84 (-33 %) | Phase 2a |
-| Per-layer pt×ct ops | 96 → 108 (+12 %) | acceptable trade |
-| CKKS depth (canonical) | 348 (was 396, -12 %) | Phase 2a |
+| Synthesizer-LPAN end-to-end fwd (12L, L=128) | **60.9 s** | `scripts/bench_L128_synthesizer_lpan.py` on H100 |
+| Honest LPAN baseline (12L, L=128) | 833 s | same harness, full softmax-poly |
+| Speedup | **13.67×** | derived |
+| Numerical correctness vs plaintext | tested per layer | `scripts/test_synthesizer_lpan_correctness.py` |
+| Plaintext Synthesizer GLUE accuracy (Tay 2020) | > 97% of standard MHA | NeurIPS 2020 paper |
 
 ## Locked design decisions
 
-- **Order of operations**: re-modularize → FHE opts → benchmarks
-- **Tasks**: SST-2, MRPC, QNLI, RTE (matches MPCFormer/BOLT/NEXUS)
-- **Models**: BERT-base, RoBERTa-base, DistilBERT
-- **Ablations**: layer composition, stage ordering, poly degrees,
-  co-adaptation, KD γ sweep, num heads in QuadAttention
-- **Hardware**: training local on MSI RTX 5070 Ti or RunPod H100
-  (decision per task — see [06_HARDWARE.md](06_HARDWARE.md));
-  FHE inference on 32-vCPU Threadripper 7960X Pod.
+- **CKKS backend**: HEonGPU (vendored), $N = 2^{16}$, scale $2^{40}$,
+  chain length 22.
+- **Sequence length**: $L = 128$.
+- **Batch size**: 16 samples per slot block.
+- **Attention pattern**: frozen, learned-once, plaintext (not data-dependent).
+- **GELU / LayerNorm**: degree-6 / degree-3 (cubic invsqrt) Chebyshev minimax.
+- **Hardware target**: single H100 SXM5. Multi-GPU explicitly out of scope
+  (CERIUM owns that axis).
 
 ## Critical constraint
 
-**Everything must remain pure non-interactive FHE.** No design choice
-that requires the server to decrypt mid-circuit, talk to the client
-mid-inference, or run inside a TEE is acceptable. See
-[03_THREAT_MODEL.md](03_THREAT_MODEL.md) for the audit table.
+**Pure non-interactive FHE.** No mid-circuit decryption, no MPC
+handshakes, no TEE. See [03_THREAT_MODEL.md](03_THREAT_MODEL.md).

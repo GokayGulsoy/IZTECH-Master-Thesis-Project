@@ -1,13 +1,15 @@
 # Research Papers — Key-Takeaway Notes
 
-Reference notes for the 23 papers in `../`. Each note follows the same template:
+Reference notes for the local paper corpus in `../` plus the external
+positioning papers added during the May 2026 literature re-pass. Each note
+follows the same template:
 
 - **Citation** (authors, year, venue)
 - **One-line summary**
 - **Core contribution**
 - **Key technical mechanism** (with concrete numbers)
 - **Threat model / setting** (when applicable)
-- **Relevance to HyPER-LPAN**
+- **Relevance to Synthesizer-LPAN**
 - **Direct comparison points / how to cite**
 
 ## Categories
@@ -44,8 +46,21 @@ Reference notes for the 23 papers in `../`. Each note follows the same template:
 - [21_Sign-GD.md](21_Sign-GD.md) — distributed optimization theory (1-paragraph)
 - 22 / Gantt chart — project planning, no research note
 
+### F. Added in May 2026: mandatory architecture / positioning papers
+- [22_Synthesizer.md](22_Synthesizer.md) — architectural parent of Synthesizer-LPAN
+- [23_Cerium.md](23_Cerium.md) — concurrent compiler/runtime SOTA, changes our claim surface
+- [24_Linformer.md](24_Linformer.md) — low-rank sequence projection baseline
+- [25_Performer.md](25_Performer.md) — kernelized linear-attention baseline
+- [26_Nystromformer.md](26_Nystromformer.md) — landmark-based low-rank attention baseline
+- [27_AFT.md](27_AFT.md) — attention-free but still query-conditioned mixer
+- [28_FNet.md](28_FNet.md) — fixed Fourier token mixer, strongest alternative future branch
+
+### G. Synthesis outputs
+- [29_RELATED_WORK_MATRIX.md](29_RELATED_WORK_MATRIX.md) — thesis-safe claim matrix and comparison language
+
 ## How to use these notes
 
 When citing in `IZTECH_Master_Thesis/` LaTeX, pull the **exact numbers** and **threat-model
 position** from the relevant note rather than re-reading the PDF. The "Direct comparison
-points" section gives ready-to-use sentences for related-work / discussion.
+points" section gives ready-to-use sentences for related-work / discussion. For current,
+claim-safe thesis framing after Cerium, start from [29_RELATED_WORK_MATRIX.md](29_RELATED_WORK_MATRIX.md).

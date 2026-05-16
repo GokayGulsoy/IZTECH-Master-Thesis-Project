@@ -1,38 +1,62 @@
-# HyPER-LPAN Documentation
+# Synthesizer-LPAN — Project Documentation
 
-Living reference for the HyPER-LPAN FHE Transformer thesis project.
-Read these files first when starting a new conversation or reviewing
-the design.
+> **Synthesizer-LPAN** = **Synthesizer Learnable Polynomial Activation Network**
+> Single-GPU sub-100 s end-to-end coherent FHE BERT inference via architectural attention elimination.
+
+Living reference for the Synthesizer-LPAN FHE Transformer thesis project.
+Read these in order when starting a new conversation or onboarding.
 
 | Doc | Purpose |
 |---|---|
-| [00_PROJECT_OVERVIEW.md](00_PROJECT_OVERVIEW.md) | Thesis goals, target venues, timeline, validated baselines |
-| [01_ARCHITECTURE.md](01_ARCHITECTURE.md) | HyPER-LPAN design: LinearMixing / QuadAttention / LPAN composition |
-| [02_FHE_PROTOCOL.md](02_FHE_PROTOCOL.md) | CKKS protocol, depth budget, packing, OpenFHE backend |
-| [03_THREAT_MODEL.md](03_THREAT_MODEL.md) | Pure non-interactive FHE; leakage analysis vs BOLT/Iron/NEXUS |
-| [04_EXTENSIONS.md](04_EXTENSIONS.md) | The five extensions on `feature/hyper-lpan-extensions` |
-| [05_REPRODUCING_RESULTS.md](05_REPRODUCING_RESULTS.md) | End-to-end commands: train, select composition, FHE benchmark |
-| [06_HARDWARE.md](06_HARDWARE.md) | Local MSI 5070 Ti vs RunPod H100 vs Pod (32-vCPU Threadripper) |
-| [07_REPO_LAYOUT.md](07_REPO_LAYOUT.md) | Module map, branch structure, file conventions |
+| [00_PROJECT_OVERVIEW.md](00_PROJECT_OVERVIEW.md) | Thesis goals, headline result, contributions |
+| [01_ARCHITECTURE.md](01_ARCHITECTURE.md) | Synthesizer-LPAN design, math, algorithm |
+| [02_FHE_PROTOCOL.md](02_FHE_PROTOCOL.md) | HEonGPU CKKS configuration, depth budget, packing |
+| [03_THREAT_MODEL.md](03_THREAT_MODEL.md) | Pure non-interactive FHE, leakage analysis |
+| [04_OPTIMIZATIONS.md](04_OPTIMIZATIONS.md) | BSGS-fused mask×diag, batching, chain tuning |
+| [05_REPRODUCING_RESULTS.md](05_REPRODUCING_RESULTS.md) | Build, benchmark, correctness scripts |
+| [06_HARDWARE.md](06_HARDWARE.md) | H100 single-GPU, vendored HEonGPU build |
+| [07_REPO_LAYOUT.md](07_REPO_LAYOUT.md) | Module map, branch structure |
+| [08_TRAINING_EXPERIMENT_ROADMAP.md](08_TRAINING_EXPERIMENT_ROADMAP.md) | Pre-pod training order, gates, and experiment matrix |
+| [TECHNIQUES_JOURNEY.md](TECHNIQUES_JOURNEY.md) | What was tried, what failed, why we landed at Synthesizer-LPAN |
 
-## Branch state (May 1, 2026)
+For the paper-by-paper literature notes and the current claim-safe related-work
+matrix, see [research_papers/notes/00_INDEX.md](../research_papers/notes/00_INDEX.md).
+
+## Headline result (May 2026)
+
+| Configuration | Wall-time / 12-layer fwd | Speedup vs honest LPAN baseline |
+|---|---|---|
+| Honest LPAN (full softmax-poly, all 12 layers) | 833 s | 1.00× |
+| **Synthesizer-LPAN + BSGS, BATCH=16, chain=22** | **60.9 s** | **13.67×** |
+
+Single H100 SXM5, HEonGPU CKKS, ring N=2¹⁶, scale 2⁴⁰, sequence length L=128.
+
+## Comparison with concurrent work
+
+| System | Hardware | Wall-time | Threat model | Notes |
+|---|---|---|---|---|
+| **Synthesizer-LPAN (this work)** | **1× H100** | **60.9 s** | pure FHE | architectural breakthrough |
+| CERIUM (Dec 2025, CMU+NVIDIA) | 8× B200 | 8.8 s | pure FHE | multi-GPU framework, ~$200K cluster |
+| CERIUM | 1× H100 | 36.1 s | pure FHE | (same architecture as plain BERT) |
+| CERIUM | 1× A100 | 66 s | pure FHE | |
+| NEXUS (Crypto'24) | 1× GPU | ~7 s/sample reported (different setup) | pure FHE | |
+
+CERIUM is a **framework**-level optimization (DSL + compiler + runtime).
+Synthesizer-LPAN is an **architectural** contribution that eliminates Wq, Wk,
+Q·Kᵀ, and softmax-poly entirely. The two are orthogonal — CERIUM's runtime
+could compile our circuit; our architecture could replace any plain-BERT
+front-end inside CERIUM. They are complements, not competitors.
+
+## Branch state (May 2026)
 
 ```
-* feature/hyper-lpan-extensions   ← HEAD (5 extensions + cleanup)
-  feature/ckks-protocol           ← validated baseline
+* synthesizer-lpan-production    ← HEAD (this docs reflects)
+  feature/hyper-lpan-extensions  ← prior, archived
+  feature/ckks-protocol          ← validated baseline
   main
 ```
 
-## Validated metrics
-
-| Config | SST-2 | MRPC F1 | Notes |
-|---|---|---|---|
-| Plain BERT-base FP32 | 92.7 | 88.9 | reference |
-| LPAN | 91.28 | 82.35 | full softmax-poly all 12 layers |
-| HyPER-LPAN canonical (LM4+Q4+L4) | **90.83** | 82.60 | -0.45 from LPAN; uncompetitive on MRPC |
-| HyPER-LPAN + 5 ext (projected) | 91.0–91.5 | 86–88 | selector picks per-task composition |
-
-## Pod latency target
-
-5–7 s/sample on 32-vCPU Threadripper 7960X with AVX-512 + HEXL.
-See [06_HARDWARE.md](06_HARDWARE.md) for the full breakdown.
+Production branch invariants: vendored `third_party/HEonGPU/` (8 MB,
+commit pinned in `third_party/HEonGPU.commit`), modular
+`fhe_thesis/encryption/{attention,linear,layernorm,colmajor,multi}.py`,
+no NEXUS-suffixed public APIs.

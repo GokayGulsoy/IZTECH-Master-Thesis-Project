@@ -1,22 +1,27 @@
 """Correctness test: Synthesizer-LPAN attention vs plaintext oracle.
 
-Validates `attn_synthesizer_nexus`: O = A·V where A is a learned plaintext
+Validates `attn_synthesizer`: O = A·V where A is a learned plaintext
 attention pattern (per head). Two heads packed in one ct.
 
 PASS criterion: max abs error < 1e-3 between numpy oracle and decrypted FHE.
 """
 from __future__ import annotations
+from pathlib import Path
 import sys, time
 import numpy as np
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from fhe_thesis.encryption.heongpu_backend import HEonGPUBackend
-from fhe_thesis.encryption.ops_attention_nexus import (
+from fhe_thesis.encryption.attention import (
     encode_synthesizer_diagonals,
-    attn_synthesizer_nexus,
+    attn_synthesizer,
     encode_synthesizer_bsgs,
-    attn_synthesizer_bsgs_nexus,
-    prepare_colmajor_keys,
+    attn_synthesizer_bsgs,
 )
+from fhe_thesis.encryption.colmajor import prepare_colmajor_keys
 
 T0 = time.time()
 def log(m): print(f"[t+{time.time()-T0:5.1f}s] {m}", flush=True)
@@ -71,9 +76,9 @@ def main():
     )
     log(f"  done in {time.time()-t:.3f}s ({len(diag_pts)} pts)")
 
-    log("attn_synthesizer_nexus...")
+    log("attn_synthesizer...")
     t = time.time()
-    O_ct = attn_synthesizer_nexus(
+    O_ct = attn_synthesizer(
         be, V_ct, diag_pts, L=L, head_dim=head_dim,
         num_heads_per_ct=num_heads_per_ct,
     )
@@ -107,7 +112,7 @@ def main():
         be, A, L=L, head_dim=head_dim, num_heads_per_ct=num_heads_per_ct,
     )
     log(f"  bs={bsgs_pts['bs']} gs={bsgs_pts['gs']}")
-    O_ct_bsgs = attn_synthesizer_bsgs_nexus(
+    O_ct_bsgs = attn_synthesizer_bsgs(
         be, V_ct, bsgs_pts, head_dim=head_dim,
         num_heads_per_ct=num_heads_per_ct,
     )

@@ -57,4 +57,15 @@ $\mathcal{P}_n$      & Set of polynomials of degree at most $n$ \\
 $D_{\text{total}}$    & Total multiplicative depth of a circuit \\
 $N_{\text{layers}}$   & Number of Transformer layers \\
 $\approx$            & Polynomial approximation of a non-linear function \\
+
+\vspace{0.5cm} & \vspace{0.5cm} \\
+
+% --- Synthesizer-LPAN Symbols ---
+$A$                  & Frozen, learned, plaintext Synthesizer attention pattern, $A \in \mathbb{R}^{L\times L}$ \\
+$A_h$                & Per-head Synthesizer attention pattern, head $h$ \\
+$\mathit{diag}_d$    & $d$-th diagonal of the Synthesizer pattern, $\mathit{diag}_d[i] = A[i, (i+d)\bmod L]$ \\
+$bs, gs$             & Baby-step / giant-step dimensions in BSGS, with $bs \cdot gs = L$ \\
+$N_{\mathrm{BATCH}}$ & Number of independent samples packed into the slot dimension \\
+$\mathrm{chain}$     & Length of the CKKS modulus prime chain (working multiplicative depth) \\
+$h, j, i$            & Head index, embedding-coordinate index, token-position index in NEXUS column-major packing \\
 \end{longtable}
