@@ -20,6 +20,7 @@ REPO_BRANCH="${REPO_BRANCH:-synthesizer-lpan-production}"
 
 HEONGPU_URL="${HEONGPU_URL:-https://github.com/Alisah-Ozcan/HEonGPU.git}"
 HEONGPU_COMMIT="${HEONGPU_COMMIT:-f91381a1b73da33118b0a1d511b4e81bf943ed83}"
+SYNC_REPOS="${SYNC_REPOS:-1}"
 
 CUDA_ARCH="${CUDA_ARCH:-90}"   # H100 = sm_90
 NPROC=$(nproc)
@@ -33,6 +34,7 @@ echo "  workspace = $WORKSPACE"
 echo "  repo      = $REPO_DIR ($REPO_BRANCH)"
 echo "  HEonGPU   = $HEONGPU_DIR @ $HEONGPU_COMMIT"
 echo "  venv      = $VENV_DIR"
+echo "  sync git  = $SYNC_REPOS"
 echo "  CUDA arch = sm_$CUDA_ARCH"
 echo "  cores     = $NPROC"
 echo "=============================================="
@@ -56,21 +58,31 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
 echo
 echo "[2/6] Cloning repos..."
 mkdir -p "$WORKSPACE"
-if [[ ! -d "$REPO_DIR/.git" ]]; then
-    git clone "$REPO_URL" "$REPO_DIR"
-    git -C "$REPO_DIR" checkout "$REPO_BRANCH"
-else
-    git -C "$REPO_DIR" fetch --all -q
-    git -C "$REPO_DIR" checkout "$REPO_BRANCH"
-    git -C "$REPO_DIR" pull -q
+if [[ "$SYNC_REPOS" == "1" ]]; then
+    if [[ ! -d "$REPO_DIR/.git" ]]; then
+        git clone "$REPO_URL" "$REPO_DIR"
+        git -C "$REPO_DIR" checkout "$REPO_BRANCH"
+    else
+        git -C "$REPO_DIR" fetch --all -q
+        git -C "$REPO_DIR" checkout "$REPO_BRANCH"
+        git -C "$REPO_DIR" pull -q
+    fi
+elif [[ ! -d "$REPO_DIR/.git" ]]; then
+    echo "ERROR: SYNC_REPOS=0 requires an existing git repo at $REPO_DIR" >&2
+    exit 1
 fi
 echo "  repo HEAD: $(git -C $REPO_DIR rev-parse --short HEAD)"
 
-if [[ ! -d "$HEONGPU_DIR/.git" ]]; then
-    git clone "$HEONGPU_URL" "$HEONGPU_DIR"
+if [[ "$SYNC_REPOS" == "1" ]]; then
+    if [[ ! -d "$HEONGPU_DIR/.git" ]]; then
+        git clone "$HEONGPU_URL" "$HEONGPU_DIR"
+    fi
+    git -C "$HEONGPU_DIR" fetch --all -q
+    git -C "$HEONGPU_DIR" checkout "$HEONGPU_COMMIT"
+elif [[ ! -d "$HEONGPU_DIR/.git" ]]; then
+    echo "ERROR: SYNC_REPOS=0 requires an existing git repo at $HEONGPU_DIR" >&2
+    exit 1
 fi
-git -C "$HEONGPU_DIR" fetch --all -q
-git -C "$HEONGPU_DIR" checkout "$HEONGPU_COMMIT"
 echo "  HEonGPU HEAD: $(git -C $HEONGPU_DIR rev-parse --short HEAD)"
 
 # ── 3. Persistent Python env/tooling ────────────────────────────────────
