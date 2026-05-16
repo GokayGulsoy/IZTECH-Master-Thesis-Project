@@ -15,6 +15,8 @@
 #include <heongpu/heongpu.hpp>
 
 #include <memory>
+#include <type_traits>
+#include <utility>
 #include <vector>
 #include <stdexcept>
 
@@ -22,6 +24,112 @@ namespace py = pybind11;
 
 using Scheme = std::integral_constant<heongpu::Scheme, heongpu::Scheme::CKKS>;
 constexpr auto SCHEME = heongpu::Scheme::CKKS;
+using ArithmeticOperatorT = heongpu::HEArithmeticOperator<SCHEME>;
+using CiphertextImplT = heongpu::Ciphertext<SCHEME>;
+
+namespace detail {
+
+template <typename Ops>
+auto multiply_power_of_x_inplace(Ops& ops, CiphertextImplT& ct, int k, int)
+    -> decltype(ops.multiply_power_of_x_inplace(ct, k), void()) {
+    ops.multiply_power_of_x_inplace(ct, k);
+}
+
+template <typename Ops>
+void multiply_power_of_x_inplace(Ops&, CiphertextImplT&, int, long) {
+    throw std::runtime_error(
+        "multiply_power_of_x_inplace is unavailable in this HEonGPU build");
+}
+
+template <typename Ops>
+auto bootstrapping_scale(Ops& ops, int)
+    -> decltype(ops.bootstrapping_scale()) {
+    return ops.bootstrapping_scale();
+}
+
+template <typename Ops>
+double bootstrapping_scale(Ops&, long) {
+    throw std::runtime_error(
+        "bootstrapping_scale is unavailable in this HEonGPU build");
+}
+
+template <typename Ops>
+auto coeff_to_slot_level(Ops& ops, int)
+    -> decltype(ops.coeff_to_slot_level()) {
+    return ops.coeff_to_slot_level();
+}
+
+template <typename Ops>
+int coeff_to_slot_level(Ops&, long) {
+    throw std::runtime_error(
+        "coeff_to_slot_level is unavailable in this HEonGPU build");
+}
+
+template <typename Ops>
+auto slot_to_coeff_level(Ops& ops, int)
+    -> decltype(ops.slot_to_coeff_level()) {
+    return ops.slot_to_coeff_level();
+}
+
+template <typename Ops>
+int slot_to_coeff_level(Ops&, long) {
+    throw std::runtime_error(
+        "slot_to_coeff_level is unavailable in this HEonGPU build");
+}
+
+template <typename Ops>
+auto bootstrapping_ready(Ops& ops, int)
+    -> decltype(ops.bootstrapping_ready()) {
+    return ops.bootstrapping_ready();
+}
+
+template <typename Ops>
+bool bootstrapping_ready(Ops&, long) {
+    throw std::runtime_error(
+        "bootstrapping_ready is unavailable in this HEonGPU build");
+}
+
+template <typename CT>
+auto clear_rescale_required(CT& ct, int)
+    -> decltype(ct.clear_rescale_required(), void()) {
+    ct.clear_rescale_required();
+}
+
+template <typename CT>
+void clear_rescale_required(CT&, long) {
+    throw std::runtime_error(
+        "clear_rescale_required is unavailable in this HEonGPU build");
+}
+
+template <typename CT>
+auto set_rescale_required(CT& ct, int)
+    -> decltype(ct.set_rescale_required(), void()) {
+    ct.set_rescale_required();
+}
+
+template <typename CT>
+void set_rescale_required(CT&, long) {
+    throw std::runtime_error(
+        "set_rescale_required is unavailable in this HEonGPU build");
+}
+
+template <typename T, typename = void>
+struct has_clear_rescale_required : std::false_type {};
+
+template <typename T>
+struct has_clear_rescale_required<
+    T, std::void_t<decltype(std::declval<T&>().clear_rescale_required())>>
+    : std::true_type {};
+
+template <typename T, typename = void>
+struct has_set_rescale_required : std::false_type {};
+
+template <typename T>
+struct has_set_rescale_required<
+    T, std::void_t<decltype(std::declval<T&>().set_rescale_required())>>
+    : std::true_type {};
+
+}  // namespace detail
 
 // -----------------------------------------------------------------------------
 // Lightweight RAII wrappers. HEonGPU's classes are templated on the scheme;
@@ -214,7 +322,7 @@ struct Decryptor {
 };
 
 struct Operator {
-    heongpu::HEArithmeticOperator<SCHEME> ops;
+    ArithmeticOperatorT ops;
     heongpu::HEEncoder<SCHEME>* enc_ptr = nullptr;   // shared with Encoder
     CKKSContext* ctx_ptr = nullptr;
     double scale_cache = 0.0;
@@ -261,7 +369,7 @@ struct Operator {
     // k may be in [0, 2N); negative k is normalised modulo 2N. Depth and
     // scale are preserved (no mod-drop, no rescale).
     void multiply_power_of_x_inplace(Ciphertext& a, int k) {
-        ops.multiply_power_of_x_inplace(*a.ct, k);
+        detail::multiply_power_of_x_inplace(ops, *a.ct, k, 0);
     }
 
     // Phase 8b: NEXUS-port primitive — apply Galois automorphism by raw
@@ -458,10 +566,23 @@ struct Operator {
     // Python-side helpers need scale_boot_ and CtoS_level_ to align
     // arbitrary ciphertexts with the precomputed CtoS plaintext
     // matrices before calling coeff_to_slot.
-    double bootstrapping_scale()  const { return ops.bootstrapping_scale(); }
-    int    coeff_to_slot_level() const { return ops.coeff_to_slot_level(); }
-    int    slot_to_coeff_level() const { return ops.slot_to_coeff_level(); }
-    bool   bootstrapping_ready() const { return ops.bootstrapping_ready(); }
+    double bootstrapping_scale()  const {
+        return detail::bootstrapping_scale(const_cast<ArithmeticOperatorT&>(ops), 0);
+    }
+    int    coeff_to_slot_level() const {
+        return detail::coeff_to_slot_level(const_cast<ArithmeticOperatorT&>(ops), 0);
+    }
+    int    slot_to_coeff_level() const {
+        return detail::slot_to_coeff_level(const_cast<ArithmeticOperatorT&>(ops), 0);
+    }
+    bool   bootstrapping_ready() const {
+        return detail::bootstrapping_ready(const_cast<ArithmeticOperatorT&>(ops), 0);
+    }
+
+    bool supports_rescale_flag_override() const {
+        return detail::has_clear_rescale_required<CiphertextImplT>::value &&
+               detail::has_set_rescale_required<CiphertextImplT>::value;
+    }
 
     // NEXUS-style escape hatch: after a `multiply_plain_inplace` we
     // sometimes want to call `coeff_to_slot` directly without first
@@ -471,10 +592,10 @@ struct Operator {
     // the next op handles the larger scale (CtoS internally manages
     // scales via its own rescale chain).
     void clear_rescale_required(Ciphertext& c) {
-        c.ct->clear_rescale_required();
+        detail::clear_rescale_required(*c.ct, 0);
     }
     void set_rescale_required(Ciphertext& c) {
-        c.ct->set_rescale_required();
+        detail::set_rescale_required(*c.ct, 0);
     }
 
     // ── NEXUS Phase 6: batched BSGS gather inside one C++ call ──
@@ -1198,31 +1319,32 @@ PYBIND11_MODULE(_heongpu, m) {
         .def(py::init<CKKSContext&, SecretKey&>())
         .def("decrypt", &Decryptor::decrypt);
 
-    py::class_<Operator>(m, "Operator")
-        .def(py::init<CKKSContext&, Encoder&>())
-        .def("add_inplace",            &Operator::add_inplace)
-        .def("sub_inplace",            &Operator::sub_inplace)
-        .def("multiply_inplace",       &Operator::multiply_inplace)
-        .def("multiply_plain_inplace", &Operator::multiply_plain_inplace)
-        .def("add_plain_inplace",      &Operator::add_plain_inplace)
-        .def("relinearize_inplace",    &Operator::relinearize_inplace)
-        .def("rescale_inplace",        &Operator::rescale_inplace)
-        .def("mod_drop_inplace_ct",    &Operator::mod_drop_inplace_ct)
-        .def("mod_drop_inplace_pt",    &Operator::mod_drop_inplace_pt)
-        .def("depth",                  &Operator::depth)
-        .def("depth_of_plaintext",     &Operator::depth_pt)
-        .def("add_inplace_match",      &Operator::add_inplace_match)
-        .def("rotate_rows_inplace",    &Operator::rotate_rows_inplace,
-             py::arg("ct"), py::arg("galois_key"), py::arg("shift"))
-        .def("multiply_power_of_x_inplace", &Operator::multiply_power_of_x_inplace,
-             py::arg("ct"), py::arg("k"),
-             "Phase 8a: NEXUS port — in-place ct *= x^k mod (x^N+1). "
-             "Preserves depth & scale. Implemented via INTT + negacyclic "
-             "shift kernel + NTT-back inside HEonGPU.")
-        .def("apply_galois_elt", &Operator::apply_galois_elt,
-             py::arg("ct"), py::arg("galois_key"), py::arg("galois_elt"),
-             "Phase 8b: NEXUS port — apply Galois automorphism a(x) ↦ a(x^t) "
-             "for raw element t ∈ Z*_{2N}. galois_key must contain key for t.")
+        auto operator_cls = py::class_<Operator>(m, "Operator");
+        operator_cls
+           .def(py::init<CKKSContext&, Encoder&>())
+           .def("add_inplace",            &Operator::add_inplace)
+           .def("sub_inplace",            &Operator::sub_inplace)
+           .def("multiply_inplace",       &Operator::multiply_inplace)
+           .def("multiply_plain_inplace", &Operator::multiply_plain_inplace)
+           .def("add_plain_inplace",      &Operator::add_plain_inplace)
+           .def("relinearize_inplace",    &Operator::relinearize_inplace)
+           .def("rescale_inplace",        &Operator::rescale_inplace)
+           .def("mod_drop_inplace_ct",    &Operator::mod_drop_inplace_ct)
+           .def("mod_drop_inplace_pt",    &Operator::mod_drop_inplace_pt)
+           .def("depth",                  &Operator::depth)
+           .def("depth_of_plaintext",     &Operator::depth_pt)
+           .def("add_inplace_match",      &Operator::add_inplace_match)
+           .def("rotate_rows_inplace",    &Operator::rotate_rows_inplace,
+               py::arg("ct"), py::arg("galois_key"), py::arg("shift"))
+           .def("multiply_power_of_x_inplace", &Operator::multiply_power_of_x_inplace,
+               py::arg("ct"), py::arg("k"),
+               "Phase 8a: NEXUS port — in-place ct *= x^k mod (x^N+1). "
+               "Preserves depth & scale when the linked HEonGPU build "
+               "exposes the primitive.")
+           .def("apply_galois_elt", &Operator::apply_galois_elt,
+               py::arg("ct"), py::arg("galois_key"), py::arg("galois_elt"),
+               "Phase 8b: NEXUS port — apply Galois automorphism a(x) ↦ a(x^t) "
+               "for raw element t ∈ Z*_{2N}. galois_key must contain key for t.")
         // ── NEXUS Phase 5: stream-aware variants ──
         .def("multiply_plain_inplace_s", &Operator::multiply_plain_inplace_s,
              py::arg("ct"), py::arg("plain"), py::arg("stream"),
@@ -1283,6 +1405,10 @@ PYBIND11_MODULE(_heongpu, m) {
              py::arg("ct0"), py::arg("ct1"), py::arg("galois_key"),
              py::arg("transform_ctx"),
              "Phase 4: ctx-aware StoC — input depth must equal ctx.stoc_level().")
+           .def("supports_rescale_flag_override",
+               &Operator::supports_rescale_flag_override,
+               "True iff the linked HEonGPU build exposes direct rescale-flag "
+               "setters used by the old depth-0 coeff_to_slot fast path.")
         .def("bootstrapping_scale",  &Operator::bootstrapping_scale,
              "Internal scale (`scale_boot_`) used by the CtoS/StoC matrices.")
         .def("coeff_to_slot_level",  &Operator::coeff_to_slot_level,

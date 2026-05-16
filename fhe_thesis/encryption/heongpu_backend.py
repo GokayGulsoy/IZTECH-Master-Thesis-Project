@@ -123,6 +123,7 @@ class HEonGPUBackend(CKKSBackend):
         # Mask plaintexts are layer-shape-shared and reused across
         # every linear in the network.
         self._mask_pt_cache: Dict[Tuple[int, int, int], object] = {}
+        self._encoding_transform_ctx: Dict[int, object] = {}
         # Per-weight encoded BSGS plaintext cache.
         # Key: (weight_id, x_depth) → (diag0_pts: list, diagj_pts: list).
         # On first call we encode once and stash; subsequent calls at
@@ -137,6 +138,12 @@ class HEonGPUBackend(CKKSBackend):
         # Becomes True after configure_bootstrapping() succeeds; gates
         # auto-refresh inside mul/mul_plain.
         self._bootstrap_ready = False
+        self._bootstrap_ctos_piece = 3
+        self._bootstrap_stoc_piece = 3
+        self._bootstrap_less_key_mode = True
+        self._supports_rescale_flag_override = bool(
+            self._ops.supports_rescale_flag_override()
+        )
 
     # ── helpers ───────────────────────────────────────────────────────
     def _pad(self, values: Sequence[float]) -> List[float]:
@@ -975,6 +982,28 @@ class HEonGPUBackend(CKKSBackend):
             )
         return self._ops.coeff_to_slot(ct, self._gk)
 
+    def _get_encoding_transform_context(self, level: int):
+        if not self._bootstrap_ready:
+            raise RuntimeError(
+                "encoding transform context requires configure_bootstrapping() first"
+            )
+        cached = self._encoding_transform_ctx.get(level)
+        if cached is not None:
+            return cached
+
+        tc = self._hg.EncodingTransformContext()
+        self._ops.generate_encoding_transform_context(
+            tc,
+            self._scale,
+            self._bootstrap_ctos_piece,
+            self._bootstrap_stoc_piece,
+            level,
+            level,
+            self._bootstrap_less_key_mode,
+        )
+        self._encoding_transform_ctx[level] = tc
+        return tc
+
     def coeff_matvec_to_slot(
         self,
         ct_x_coeff: Ciphertext,
@@ -991,6 +1020,11 @@ class HEonGPUBackend(CKKSBackend):
 
         Returns the 2-ct list from CtoS. Use ``out[0]`` if ``m·n ≤ N/2``.
         """
+        if not self._supports_rescale_flag_override:
+            ct_y = self.coeff_matvec(ct_x_coeff, weight, in_dim=in_dim, rescale=True)
+            tc = self._get_encoding_transform_context(self._ops.depth(ct_y))
+            return self._ops.coeff_to_slot_ctx(ct_y, self._gk, tc)
+
         ct_y = self.coeff_matvec(ct_x_coeff, weight, in_dim=in_dim, rescale=False)
         # CtoS plaintext matrices live at depth 0 (top of chain). Our
         # multiply-without-rescale leaves ct at depth 0 with a doubled
@@ -1232,6 +1266,10 @@ class HEonGPUBackend(CKKSBackend):
             self._scale, CtoS_piece, StoC_piece, taylor_number, less_key_mode,
             slim,
         )
+        self._bootstrap_ctos_piece = int(CtoS_piece)
+        self._bootstrap_stoc_piece = int(StoC_piece)
+        self._bootstrap_less_key_mode = bool(less_key_mode)
+        self._encoding_transform_ctx.clear()
         self._slim_bootstrap = bool(slim)
         self._slim_StoC_piece = int(StoC_piece)
         # Merge boot shifts with the existing ±2^k power-of-two set so
