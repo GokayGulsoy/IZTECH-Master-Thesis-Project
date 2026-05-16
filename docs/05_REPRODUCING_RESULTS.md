@@ -25,10 +25,19 @@ bash scripts/setup_pod_gpu.sh
 This:
 
 1. Installs system deps (cmake, ninja, libgmp-dev, libntl-dev, …).
-2. Builds HEonGPU (`third_party/HEonGPU/build/`).
-3. Builds the pybind11 bindings in
+2. Creates a persistent RunPod venv at `/workspace/fhe_venv`.
+3. Builds HEonGPU under `/workspace/HEonGPU/build/`.
+4. Builds the pybind11 bindings in
    [`fhe_thesis/encryption/heongpu_bindings/`](../fhe_thesis/encryption/heongpu_bindings/).
-4. Verifies import via the smoke test below.
+5. Leaves the pod ready for future same-pod resumes via:
+
+```bash
+source scripts/activate_pod_env.sh
+```
+
+On RunPod, `/workspace` persists across stop/start of the same pod. It does
+not migrate to a different pod unless you attach a RunPod network volume or
+export the data elsewhere.
 
 ## 2. Smoke-test the HEonGPU backend
 

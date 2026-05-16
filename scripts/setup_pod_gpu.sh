@@ -13,6 +13,7 @@ set -euo pipefail
 WORKSPACE="${WORKSPACE:-/workspace}"
 REPO_DIR="${REPO_DIR:-$WORKSPACE/repo}"
 HEONGPU_DIR="${HEONGPU_DIR:-$WORKSPACE/HEonGPU}"
+VENV_DIR="${VENV_DIR:-$WORKSPACE/fhe_venv}"
 
 REPO_URL="${REPO_URL:-https://github.com/GokayGulsoy/IZTECH-Master-Thesis-Project.git}"
 REPO_BRANCH="${REPO_BRANCH:-synthesizer-lpan-production}"
@@ -31,34 +32,29 @@ echo "  Synthesizer-LPAN GPU pod setup"
 echo "  workspace = $WORKSPACE"
 echo "  repo      = $REPO_DIR ($REPO_BRANCH)"
 echo "  HEonGPU   = $HEONGPU_DIR @ $HEONGPU_COMMIT"
+echo "  venv      = $VENV_DIR"
 echo "  CUDA arch = sm_$CUDA_ARCH"
 echo "  cores     = $NPROC"
 echo "=============================================="
 
 # ── 0. Verify GPU ──────────────────────────────────────────────────────
 echo
-echo "[0/5] GPU check..."
+echo "[0/6] GPU check..."
 nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
 nvcc --version | tail -1
 
 # ── 1. Apt deps ────────────────────────────────────────────────────────
 echo
-echo "[1/5] System packages..."
+echo "[1/6] System packages..."
 apt-get update -qq
 DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     ninja-build g++ gcc python3-dev python3-pip \
     git ca-certificates wget curl build-essential \
     libssl-dev libgmp-dev libomp-dev libntl-dev
 
-# Apt's cmake (3.22) is too old for HEonGPU (>=3.26.4). Use pip cmake.
-python3 -m pip install --quiet --upgrade "cmake>=3.28"
-export PATH=/usr/local/bin:$PATH
-cmake --version | head -1
-ninja --version
-
 # ── 2. Repos ───────────────────────────────────────────────────────────
 echo
-echo "[2/5] Cloning repos..."
+echo "[2/6] Cloning repos..."
 mkdir -p "$WORKSPACE"
 if [[ ! -d "$REPO_DIR/.git" ]]; then
     git clone "$REPO_URL" "$REPO_DIR"
@@ -77,9 +73,28 @@ git -C "$HEONGPU_DIR" fetch --all -q
 git -C "$HEONGPU_DIR" checkout "$HEONGPU_COMMIT"
 echo "  HEonGPU HEAD: $(git -C $HEONGPU_DIR rev-parse --short HEAD)"
 
-# ── 3. Build & install HEonGPU ─────────────────────────────────────────
+# ── 3. Persistent Python env/tooling ────────────────────────────────────
 echo
-echo "[3/5] Building HEonGPU (this is the slow step ~15-30 min)..."
+echo "[3/6] Persistent Python env..."
+if [[ ! -x "$VENV_DIR/bin/python" ]]; then
+    python3 -m venv "$VENV_DIR"
+fi
+# shellcheck source=/dev/null
+source "$VENV_DIR/bin/activate"
+
+# Apt's cmake (3.22) is too old for HEonGPU (>=3.26.4). Keep newer build
+# tooling inside the persistent venv so same-pod resumes do not need a
+# global pip reinstall.
+python -m pip install --upgrade pip setuptools wheel -q
+python -m pip install --quiet --upgrade "cmake>=3.28" "pybind11>=2.12"
+export PATH="$VENV_DIR/bin:/usr/local/cuda/bin:$PATH"
+cmake --version | head -1
+ninja --version
+python --version
+
+# ── 4. Build HEonGPU ────────────────────────────────────────────────────
+echo
+echo "[4/6] Building HEonGPU (cached under /workspace)..."
 HEO_BUILD="$HEONGPU_DIR/build"
 if [[ ! -f "$HEO_BUILD/CMakeCache.txt" ]]; then
     cmake -S "$HEONGPU_DIR" -B "$HEO_BUILD" -G Ninja \
@@ -90,28 +105,27 @@ if [[ ! -f "$HEO_BUILD/CMakeCache.txt" ]]; then
         -DHEonGPU_BUILD_BENCHMARKS=OFF
 fi
 cmake --build "$HEO_BUILD" -j"$NPROC"
-cmake --install "$HEO_BUILD" --prefix /usr/local
-ldconfig
-echo "  HEonGPU installed ✓"
+    echo "  HEonGPU build cache ready ✓"
 
-# ── 4. Python deps ─────────────────────────────────────────────────────
+    # ── 5. Python deps ─────────────────────────────────────────────────────
 echo
-echo "[4/5] Python deps..."
-python3 -m pip install --upgrade pip setuptools wheel -q
-python3 -m pip install --upgrade "pybind11>=2.12" -q
+    echo "[5/6] Python deps..."
 # Install a CUDA-enabled torch build first, then let pyproject.toml pull the
 # remaining project dependencies.
-python3 -m pip install --upgrade torch --index-url "${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu121}" -q
-python3 -m pip install -e "$REPO_DIR" -q
+    python -m pip install --upgrade torch --index-url "${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu121}" -q
+    python -m pip install -e "$REPO_DIR" -q
 echo "  pip deps installed ✓"
 
-# ── 5. Build bindings ──────────────────────────────────────────────────
+    # ── 6. Build bindings ──────────────────────────────────────────────────
 echo
-echo "[5/5] Building HEonGPU pybind11 bindings..."
+    echo "[6/6] Building HEonGPU pybind11 bindings..."
 cd "$REPO_DIR/fhe_thesis/encryption/heongpu_bindings"
 HEONGPU_DIR="$HEONGPU_DIR" CUDA_ARCH="$CUDA_ARCH" bash build.sh
 echo
 echo "=============================================="
-echo "  Setup complete. Quick smoke test:"
-echo "    cd $REPO_DIR && python scripts/smoke_heongpu_backend.py"
+    echo "  Setup complete. Same-pod resume command:"
+    echo "    source $REPO_DIR/scripts/activate_pod_env.sh"
+    echo ""
+    echo "  Quick smoke test:"
+    echo "    cd $REPO_DIR && python scripts/smoke_heongpu_backend.py"
 echo "=============================================="

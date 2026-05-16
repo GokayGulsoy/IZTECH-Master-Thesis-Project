@@ -82,6 +82,9 @@ pip install -e .
 # 4. Build the vendored HEonGPU CUDA backend
 bash scripts/setup_pod_gpu.sh
 
+# On a resumed RunPod session, reactivate the persistent pod env
+source scripts/activate_pod_env.sh
+
 # 5. Smoke-test
 python scripts/smoke_heongpu_backend.py
 
